@@ -21,3 +21,4 @@ Thumbs.db
 # Runtime state
 /state.db
 *.sock
+.github/workflows/
