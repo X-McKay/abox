@@ -118,13 +118,13 @@ impl PolicyEngine {
             let allow_patterns: Vec<Regex> = cp
                 .allow
                 .iter()
-                .map(|p| Regex::new(p).with_context(|| format!("Invalid allow regex: {}", p)))
+                .map(|p| Regex::new(p).with_context(|| format!("Invalid allow regex: {p}")))
                 .collect::<Result<_>>()?;
 
             let deny_patterns: Vec<Regex> = cp
                 .deny
                 .iter()
-                .map(|p| Regex::new(p).with_context(|| format!("Invalid deny regex: {}", p)))
+                .map(|p| Regex::new(p).with_context(|| format!("Invalid deny regex: {p}")))
                 .collect::<Result<_>>()?;
 
             cli_policies.push(CompiledCliPolicy {
@@ -146,32 +146,28 @@ impl PolicyEngine {
     /// Evaluate a CLI command request.
     ///
     /// # Arguments
-    /// * `command` - The binary name (e.g., "git").
-    /// * `args` - The full argument list (e.g., ["push", "origin", "main"]).
+    /// * `command` - The binary name (e.g., `git`).
+    /// * `args` - The full argument list (e.g., `["push", "origin", "main"]`).
     pub fn evaluate_cli(&self, command: &str, args: &[String]) -> Decision {
         let args_str = args.join(" ");
 
         // Find the matching policy
         let policy = self.cli_policies.iter().find(|p| p.command == command);
 
-        let policy = match policy {
-            Some(p) => p,
-            None => {
-                // No policy for this command — use default
-                return if self.default_cli_action == "allow" {
-                    Decision::Allow
-                } else {
-                    Decision::Deny(format!("No policy for command '{}'", command))
-                };
-            }
+        let Some(policy) = policy else {
+            // No policy for this command — use default
+            return if self.default_cli_action == "allow" {
+                Decision::Allow
+            } else {
+                Decision::Deny(format!("No policy for command '{command}'"))
+            };
         };
 
         // Deny patterns are checked first (deny takes precedence)
         for pattern in &policy.deny_patterns {
             if pattern.is_match(&args_str) {
                 return Decision::Deny(format!(
-                    "Denied by pattern '{}' for command '{}'",
-                    pattern, command
+                    "Denied by pattern '{pattern}' for command '{command}'"
                 ));
             }
         }
@@ -181,8 +177,7 @@ impl PolicyEngine {
             let allowed = policy.allow_patterns.iter().any(|p| p.is_match(&args_str));
             if !allowed {
                 return Decision::Deny(format!(
-                    "No allow pattern matched for '{}' with args: {}",
-                    command, args_str
+                    "No allow pattern matched for '{command}' with args: {args_str}"
                 ));
             }
         }
@@ -206,7 +201,7 @@ impl PolicyEngine {
         if self.default_egress_action == "allow" {
             Ok(None)
         } else {
-            Err(Decision::Deny(format!("No egress rule for domain '{}'", domain)))
+            Err(Decision::Deny(format!("No egress rule for domain '{domain}'")))
         }
     }
 }
@@ -272,7 +267,10 @@ mod tests {
         let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
         let decision = engine.evaluate_cli(
             "git",
-            &["push", "origin", "main"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &["push", "origin", "main"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
         );
         assert_eq!(decision, Decision::Allow);
     }
@@ -284,7 +282,7 @@ mod tests {
             "git",
             &["push", "--force", "origin", "main"]
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>(),
         );
         assert!(matches!(decision, Decision::Deny(_)));
@@ -293,8 +291,10 @@ mod tests {
     #[test]
     fn test_unknown_command_denied() {
         let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
-        let decision = engine
-            .evaluate_cli("rm", &["-rf", "/"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let decision = engine.evaluate_cli(
+            "rm",
+            &["-rf", "/"].iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        );
         assert!(matches!(decision, Decision::Deny(_)));
     }
 
@@ -303,7 +303,10 @@ mod tests {
         let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
         let decision = engine.evaluate_cli(
             "aws",
-            &["s3", "ls", "s3://my-bucket"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &["s3", "ls", "s3://my-bucket"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
         );
         assert_eq!(decision, Decision::Allow);
     }
@@ -313,7 +316,7 @@ mod tests {
         let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
         let decision = engine.evaluate_cli(
             "aws",
-            &["iam", "list-users"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &["iam", "list-users"].iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
         );
         assert!(matches!(decision, Decision::Deny(_)));
     }

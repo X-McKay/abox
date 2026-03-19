@@ -4,7 +4,7 @@
 //! (HTTP CONNECT handling) in isolation and in combination.
 
 use abox_core::policy::{CliPolicy, EgressRule, PolicyEngine, PolicyFile};
-use std::path::Path;
+
 use tempfile::TempDir;
 
 // We need to reference the proxyd modules. Since they are in a binary crate,
@@ -72,7 +72,7 @@ fn test_audit_log_file_write() {
             "decision": "allowed",
             "result_code": 0,
         });
-        writeln!(file, "{}", json).unwrap();
+        writeln!(file, "{json}").unwrap();
     }
     drop(file);
 
@@ -83,7 +83,7 @@ fn test_audit_log_file_write() {
 
     for (i, line) in lines.iter().enumerate() {
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(parsed["sandbox_id"], format!("task-{}", i));
+        assert_eq!(parsed["sandbox_id"], format!("task-{i}"));
     }
 }
 
@@ -225,7 +225,7 @@ async fn test_cli_proxy_unix_socket_roundtrip() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Client: send a request
-    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    let stream = UnixStream::connect(&socket_path).await.unwrap();
     let request = serde_json::json!({
         "command": "echo",
         "args": ["hello", "world"],

@@ -27,5 +27,8 @@ http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 bytes = "1"
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 tempfile = "3"

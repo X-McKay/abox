@@ -15,7 +15,7 @@ pub struct DivergenceArgs {
 }
 
 pub fn execute<W: WorkspacePort, V: VmPort>(
-    args: DivergenceArgs,
+    args: &DivergenceArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
 ) -> Result<()> {
     let entries = orchestrator.divergence(&args.base)?;
@@ -41,9 +41,8 @@ pub fn execute<W: WorkspacePort, V: VmPort>(
     for (file, sandboxes) in &by_file {
         let conflict_marker = if sandboxes.len() > 1 { " [!]" } else { "" };
         for (i, (sandbox, status)) in sandboxes.iter().enumerate() {
-            let file_col =
-                if i == 0 { format!("{}{}", file, conflict_marker) } else { String::new() };
-            println!("{:<40} {:<16} {:<12}", file_col, sandbox, status);
+            let file_col = if i == 0 { format!("{file}{conflict_marker}") } else { String::new() };
+            println!("{file_col:<40} {sandbox:<16} {status:<12}");
         }
     }
 

@@ -1,4 +1,23 @@
+# Pre-commit hooks — https://pre-commit.com
+#
+# Install: pip install pre-commit && pre-commit install
+#
+# These hooks run on every commit. They are intentionally fast — full test
+# suite and cargo-deny run in CI, not on every commit.
+
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
   - repo: local
     hooks:
       - id: cargo-fmt
@@ -10,14 +29,7 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --workspace -- -D warnings
-        language: system
-        types: [rust]
-        pass_filenames: false
-
-      - id: cargo-test
-        name: cargo test (unit)
-        entry: cargo test --workspace --lib
+        entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

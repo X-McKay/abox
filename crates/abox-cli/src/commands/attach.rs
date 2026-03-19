@@ -35,7 +35,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         .context("Failed to run socat. Is it installed?")?;
 
     if !status.success() {
-        anyhow::bail!("socat exited with status: {}", status);
+        anyhow::bail!("socat exited with status: {status}");
     }
 
     Ok(())

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-guest-image.sh — Build the agentbox guest root filesystem.
+# build-guest-image.sh — Build the abox guest root filesystem.
 #
 # This script creates an Alpine Linux-based root filesystem image with:
 # - abox-shim installed and symlinked for proxied commands
@@ -21,7 +21,7 @@ OUTPUT="${1:-rootfs.raw}"
 SIZE="${2:-4G}"
 SHIM_BINARY="${SHIM_BINARY:-../target/x86_64-unknown-linux-musl/release/abox-shim}"
 
-echo "=== Building agentbox guest image ==="
+echo "=== Building abox guest image ==="
 echo "Output: ${OUTPUT}"
 echo "Size:   ${SIZE}"
 
@@ -69,7 +69,7 @@ echo "[4/6] Installing init script..."
 cat > "${MOUNT_DIR}/etc/init.d/abox-init" << 'INITEOF'
 #!/bin/sh
 # abox-init: Guest initialization script.
-# Runs at boot to set up the agentbox environment.
+# Runs at boot to set up the abox environment.
 
 # Mount the virtiofs workspace
 mkdir -p /workspace
@@ -123,6 +123,6 @@ rmdir "${MOUNT_DIR}"
 
 echo "=== Guest image built: ${OUTPUT} ==="
 echo ""
-echo "To use with agentbox, set in ~/.agentbox/config.toml:"
+echo "To use with abox, set in ~/.abox/config.toml:"
 echo "  [vm_defaults]"
 echo "  image_path = \"$(realpath "${OUTPUT}")\""

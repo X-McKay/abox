@@ -21,7 +21,7 @@ pub struct TemplateInfo {
 
 /// Manages VM snapshots and templates.
 pub struct SnapshotManager {
-    /// Directory where templates are stored (e.g., `~/.agentbox/templates/`).
+    /// Directory where templates are stored (e.g., `~/.abox/templates/`).
     template_dir: PathBuf,
     /// Directory for runtime sockets.
     runtime_dir: PathBuf,
@@ -58,7 +58,7 @@ impl SnapshotManager {
         if !status.success() {
             // Clean up on failure
             let _ = std::fs::remove_dir_all(&snap_dir);
-            bail!("Snapshot creation failed for template '{}'", template_name);
+            bail!("Snapshot creation failed for template '{template_name}'");
         }
 
         tracing::info!(
@@ -80,10 +80,10 @@ impl SnapshotManager {
     ) -> Result<PathBuf> {
         let snap_dir = self.template_dir.join(template_name);
         if !snap_dir.exists() {
-            bail!("Template '{}' not found", template_name);
+            bail!("Template '{template_name}' not found");
         }
 
-        let api_socket = self.runtime_dir.join(format!("ch-api-{}.sock", sandbox_id));
+        let api_socket = self.runtime_dir.join(format!("ch-api-{sandbox_id}.sock"));
 
         // Clean up stale socket
         let _ = std::fs::remove_file(&api_socket);
@@ -120,7 +120,7 @@ impl SnapshotManager {
             .context("Failed to resume restored VM")?;
 
         if !status.success() {
-            bail!("Failed to resume VM from template '{}'", template_name);
+            bail!("Failed to resume VM from template '{template_name}'");
         }
 
         tracing::info!(template = template_name, sandbox_id, "VM restored from snapshot");
@@ -158,7 +158,7 @@ impl SnapshotManager {
     pub fn delete_template(&self, name: &str) -> Result<()> {
         let path = self.template_dir.join(name);
         if !path.exists() {
-            bail!("Template '{}' not found", name);
+            bail!("Template '{name}' not found");
         }
         std::fs::remove_dir_all(&path)?;
         tracing::info!(template = name, "Template deleted");

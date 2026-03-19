@@ -51,8 +51,8 @@ impl AuditLog {
     /// Write an audit entry.
     pub fn log(&self, entry: &AuditEntry) -> anyhow::Result<()> {
         let json = serde_json::to_string(entry)?;
-        let mut writer = self.writer.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-        writeln!(writer, "{}", json)?;
+        let mut writer = self.writer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        writeln!(writer, "{json}")?;
         writer.flush()?;
         Ok(())
     }

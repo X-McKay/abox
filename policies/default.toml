@@ -1,9 +1,9 @@
-# Default agentbox credential proxy policy.
+# Default abox credential proxy policy.
 #
 # This file controls which CLI commands and HTTP destinations are allowed
 # from sandboxes. Deny rules are evaluated before allow rules.
 #
-# Place this file at ~/.agentbox/policies/default.toml or specify a custom
+# Place this file at ~/.abox/policies/default.toml or specify a custom
 # path in config.toml.
 
 # Default action for CLI commands not matching any policy: "allow" or "deny".

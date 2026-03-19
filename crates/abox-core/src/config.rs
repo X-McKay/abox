@@ -1,16 +1,16 @@
-//! Configuration types for agentbox.
+//! Configuration types for abox.
 //!
 //! All configuration is loaded from TOML files. The main config file lives at
-//! `~/.agentbox/config.toml` and policy files live under the `policies/` directory.
+//! `~/.abox/config.toml` and policy files live under the `policies/` directory.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Top-level agentbox configuration.
+/// Top-level abox configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AboxConfig {
-    /// Base directory for agentbox state (worktrees, snapshots, logs).
-    /// Defaults to `~/.agentbox`.
+    /// Base directory for abox state (worktrees, snapshots, logs).
+    /// Defaults to `~/.abox`.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
 
@@ -95,7 +95,7 @@ impl AboxConfig {
         }
     }
 
-    /// Return the default config file path: `~/.agentbox/config.toml`.
+    /// Return the default config file path: `~/.abox/config.toml`.
     pub fn default_path() -> anyhow::Result<PathBuf> {
         let dir = default_state_dir();
         Ok(dir.join("config.toml"))
@@ -118,7 +118,7 @@ impl AboxConfig {
 
     /// Return the runtime directory for sockets and PIDs.
     pub fn runtime_dir(&self) -> PathBuf {
-        PathBuf::from("/run/agentbox")
+        PathBuf::from("/run/abox")
     }
 
     /// Ensure all required directories exist.
@@ -131,7 +131,7 @@ impl AboxConfig {
 }
 
 fn default_state_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join(".agentbox")
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join(".abox")
 }
 
 fn default_memory() -> u32 {
@@ -164,11 +164,11 @@ mod tests {
 
     #[test]
     fn test_parse_minimal_toml() {
-        let toml_str = r#"
+        let toml_str = r"
             [vm_defaults]
             memory_mib = 4096
             vcpus = 4
-        "#;
+        ";
         let config: AboxConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.vm_defaults.memory_mib, 4096);
         assert_eq!(config.vm_defaults.vcpus, 4);
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn test_worktrees_dir() {
         let config =
-            AboxConfig { state_dir: PathBuf::from("/tmp/test-agentbox"), ..Default::default() };
-        assert_eq!(config.worktrees_dir(), PathBuf::from("/tmp/test-agentbox/worktrees"));
+            AboxConfig { state_dir: PathBuf::from("/tmp/test-abox"), ..Default::default() };
+        assert_eq!(config.worktrees_dir(), PathBuf::from("/tmp/test-abox/worktrees"));
     }
 }

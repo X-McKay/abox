@@ -73,7 +73,7 @@ fn test_config_directory_helpers() {
     assert_eq!(config.worktrees_dir(), PathBuf::from("/test/state/worktrees"));
     assert_eq!(config.templates_dir(), PathBuf::from("/test/state/templates"));
     assert_eq!(config.logs_dir(), PathBuf::from("/test/state/logs"));
-    assert_eq!(config.runtime_dir(), PathBuf::from("/run/agentbox"));
+    assert_eq!(config.runtime_dir(), PathBuf::from("/run/abox"));
 }
 
 #[test]
@@ -495,16 +495,14 @@ fn test_workspace_commits_ahead_count() {
     let sig = git2::Signature::now("Agent", "agent@test.com").unwrap();
 
     for i in 1..=2 {
-        std::fs::write(path.join(format!("file{}.txt", i)), format!("content {}\n", i)).unwrap();
+        std::fs::write(path.join(format!("file{i}.txt")), format!("content {i}\n")).unwrap();
         let mut index = wt_repo.index().unwrap();
-        index.add_path(Path::new(&format!("file{}.txt", i))).unwrap();
+        index.add_path(Path::new(&format!("file{i}.txt"))).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = wt_repo.find_tree(tree_id).unwrap();
         let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
-        wt_repo
-            .commit(Some("HEAD"), &sig, &sig, &format!("Commit {}", i), &tree, &[&head])
-            .unwrap();
+        wt_repo.commit(Some("HEAD"), &sig, &sig, &format!("Commit {i}"), &tree, &[&head]).unwrap();
     }
 
     // Should be 2 commits ahead
@@ -536,7 +534,7 @@ fn test_workspace_merge_clean() {
 
     // Merge should succeed with no conflicts
     let conflicts = ws.merge_branch("task-1", "main").unwrap();
-    assert!(conflicts.is_empty(), "Expected no conflicts, got: {:?}", conflicts);
+    assert!(conflicts.is_empty(), "Expected no conflicts, got: {conflicts:?}");
 
     // The main branch should now have the new file
     let repo = Repository::open(&repo_path).unwrap();
@@ -637,10 +635,12 @@ impl MockVmPort {
         }
     }
 
+    #[allow(dead_code)]
     fn started_ids(&self) -> Vec<String> {
         self.started.lock().unwrap().iter().map(|c| c.id.clone()).collect()
     }
 
+    #[allow(dead_code)]
     fn stopped_ids(&self) -> Vec<String> {
         self.stopped.lock().unwrap().clone()
     }

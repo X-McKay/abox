@@ -83,13 +83,13 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 .vm_defaults
                 .image_path
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("/var/lib/agentbox/images/base.raw")),
+                .unwrap_or_else(|| PathBuf::from("/var/lib/abox/images/base.raw")),
             kernel_path: self
                 .config
                 .vm_defaults
                 .kernel_path
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("/var/lib/agentbox/kernel/vmlinux")),
+                .unwrap_or_else(|| PathBuf::from("/var/lib/abox/kernel/vmlinux")),
             memory_mib: params.memory_mib.unwrap_or(self.config.vm_defaults.memory_mib),
             vcpus: params.vcpus.unwrap_or(self.config.vm_defaults.vcpus),
             user: params.user,
@@ -120,13 +120,13 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         self.vm_manager
             .stop(task_id)
             .await
-            .with_context(|| format!("Failed to stop VM '{}'", task_id))?;
+            .with_context(|| format!("Failed to stop VM '{task_id}'"))?;
 
         // Optionally remove the worktree and branch
         if clean {
             self.workspace
                 .remove_worktree(task_id, true)
-                .with_context(|| format!("Failed to remove worktree '{}'", task_id))?;
+                .with_context(|| format!("Failed to remove worktree '{task_id}'"))?;
         }
 
         Ok(())

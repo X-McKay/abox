@@ -18,6 +18,9 @@ chrono.workspace = true
 dirs.workspace = true
 git2 = "0.20"
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

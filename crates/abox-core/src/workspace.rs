@@ -20,7 +20,7 @@ impl std::fmt::Display for FileStatus {
             Self::Added => write!(f, "Added"),
             Self::Modified => write!(f, "Modified"),
             Self::Deleted => write!(f, "Deleted"),
-            Self::Renamed(old) => write!(f, "Renamed({})", old),
+            Self::Renamed(old) => write!(f, "Renamed({old})"),
         }
     }
 }
@@ -58,7 +58,7 @@ pub trait WorkspacePort: Send + Sync {
     /// Remove a worktree and optionally delete its branch.
     fn remove_worktree(&self, sandbox_id: &str, delete_branch: bool) -> anyhow::Result<()>;
 
-    /// List all active worktrees managed by agentbox.
+    /// List all active worktrees managed by abox.
     fn list_worktrees(&self) -> anyhow::Result<Vec<WorktreeInfo>>;
 
     /// Compute the divergence matrix: which files are changed in which worktrees

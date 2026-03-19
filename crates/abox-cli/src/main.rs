@@ -97,8 +97,8 @@ async fn main() -> Result<()> {
         Commands::List => commands::list::execute(&orchestrator).await,
         Commands::Attach(args) => commands::attach::execute(args, &orchestrator).await,
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,
-        Commands::Divergence(args) => commands::divergence::execute(args, &orchestrator),
-        Commands::Merge(args) => commands::merge::execute(args, &orchestrator),
+        Commands::Divergence(ref args) => commands::divergence::execute(args, &orchestrator),
+        Commands::Merge(ref args) => commands::merge::execute(args, &orchestrator),
         Commands::Template(_) | Commands::Tui => unreachable!(),
     }
 }

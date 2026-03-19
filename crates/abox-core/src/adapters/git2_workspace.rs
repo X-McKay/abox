@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 pub struct Git2Workspace {
     /// Path to the main git repository.
     repo_path: PathBuf,
-    /// Base directory where worktrees are created (e.g., `~/.agentbox/worktrees/`).
+    /// Base directory where worktrees are created (e.g., `~/.abox/worktrees/`).
     worktree_base: PathBuf,
 }
 
@@ -35,7 +35,7 @@ impl Git2Workspace {
 
     /// Return the branch name for a given sandbox ID.
     fn branch_name(sandbox_id: &str) -> String {
-        format!("agent/{}", sandbox_id)
+        format!("agent/{sandbox_id}")
     }
 }
 
@@ -47,12 +47,12 @@ impl WorkspacePort for Git2Workspace {
         // Resolve the base branch to a commit
         let base_ref = repo
             .revparse_single(base_branch)
-            .with_context(|| format!("Branch '{}' not found", base_branch))?;
+            .with_context(|| format!("Branch '{base_branch}' not found"))?;
         let commit = base_ref.peel_to_commit().context("Failed to peel to commit")?;
 
         // Create the new branch
         repo.branch(&branch_name, &commit, false)
-            .with_context(|| format!("Failed to create branch '{}'", branch_name))?;
+            .with_context(|| format!("Failed to create branch '{branch_name}'"))?;
 
         // Determine the worktree path
         let wt_path = self.worktree_base.join(sandbox_id);
@@ -92,7 +92,7 @@ impl WorkspacePort for Git2Workspace {
             prune_opts.working_tree(true);
             prune_opts.valid(true);
             wt.prune(Some(&mut prune_opts))
-                .with_context(|| format!("Failed to prune worktree '{}'", sandbox_id))?;
+                .with_context(|| format!("Failed to prune worktree '{sandbox_id}'"))?;
         }
 
         // Remove the worktree directory from disk
@@ -120,10 +120,9 @@ impl WorkspacePort for Git2Workspace {
         let wt_names = repo.worktrees()?;
         let mut infos = Vec::new();
 
-        for name in wt_names.iter() {
-            let name = match name {
-                Some(n) => n,
-                None => continue,
+        for name in &wt_names {
+            let Some(name) = name else {
+                continue;
             };
 
             let wt_path = self.worktree_base.join(name);
@@ -160,13 +159,12 @@ impl WorkspacePort for Git2Workspace {
         let mut entries = Vec::new();
         let wt_names = repo.worktrees()?;
 
-        for name in wt_names.iter() {
-            let name = match name {
-                Some(n) => n,
-                None => continue,
+        for name in &wt_names {
+            let Some(name) = name else {
+                continue;
             };
 
-            // Only process agentbox worktrees
+            // Only process abox worktrees
             let wt_path = self.worktree_base.join(name);
             if !wt_path.exists() {
                 continue;
@@ -229,13 +227,13 @@ impl WorkspacePort for Git2Workspace {
 
         if !checkout_output.status.success() {
             let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-            anyhow::bail!("Failed to checkout {}: {}", base_branch, stderr);
+            anyhow::bail!("Failed to checkout {base_branch}: {stderr}");
         }
 
         // Then merge the agent branch
         let merge_output = std::process::Command::new("git")
             .args(["merge", "--no-ff", &branch_name, "-m"])
-            .arg(format!("Merge {} into {}", branch_name, base_branch))
+            .arg(format!("Merge {branch_name} into {base_branch}"))
             .current_dir(&self.repo_path)
             .output()
             .context("Failed to run git merge")?;
@@ -245,8 +243,11 @@ impl WorkspacePort for Git2Workspace {
             Ok(vec![])
         } else {
             let stderr = String::from_utf8_lossy(&merge_output.stderr);
-            let conflicts: Vec<String> =
-                stderr.lines().filter(|l| l.contains("CONFLICT")).map(|l| l.to_string()).collect();
+            let conflicts: Vec<String> = stderr
+                .lines()
+                .filter(|l| l.contains("CONFLICT"))
+                .map(ToString::to_string)
+                .collect();
 
             // Abort the merge so the repo is in a clean state
             let _ = std::process::Command::new("git")

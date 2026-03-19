@@ -81,6 +81,7 @@ impl EgressProxyServer {
     }
 }
 
+#[allow(clippy::unused_async)] // hyper's service requires async fn signature
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     policy: &PolicyEngine,
@@ -90,16 +91,14 @@ async fn handle_request(
     if req.method() == Method::CONNECT {
         // HTTPS CONNECT tunnel
         let host = req.uri().authority().map(|a| a.host().to_string());
-        let port = req.uri().authority().and_then(|a| a.port_u16()).unwrap_or(443);
+        let port =
+            req.uri().authority().and_then(hyper::http::uri::Authority::port_u16).unwrap_or(443);
 
-        let domain = match host {
-            Some(h) => h,
-            None => {
-                return Ok(Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(full_body("Missing host in CONNECT request"))
-                    .unwrap());
-            }
+        let Some(domain) = host else {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(full_body("Missing host in CONNECT request"))
+                .unwrap());
         };
 
         // Evaluate egress policy
@@ -116,7 +115,7 @@ async fn handle_request(
                 audit.log_egress("unknown", &domain, "allowed", 200);
 
                 // Establish the TCP tunnel
-                let addr = format!("{}:{}", domain, port);
+                let addr = format!("{domain}:{port}");
                 tokio::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => match TcpStream::connect(&addr).await {

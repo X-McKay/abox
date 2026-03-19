@@ -17,7 +17,7 @@ pub struct MergeArgs {
 }
 
 pub fn execute<W: WorkspacePort, V: VmPort>(
-    args: MergeArgs,
+    args: &MergeArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
 ) -> Result<()> {
     let conflicts = orchestrator.merge(&args.task, &args.base)?;
@@ -27,7 +27,7 @@ pub fn execute<W: WorkspacePort, V: VmPort>(
     } else {
         println!("Merge failed with {} conflict(s):", conflicts.len());
         for conflict in &conflicts {
-            println!("  {}", conflict);
+            println!("  {conflict}");
         }
         println!();
         println!("The merge was aborted. Resolve conflicts manually.");

@@ -32,7 +32,7 @@ impl CloudHypervisorAdapter {
     /// Create a new adapter.
     ///
     /// # Arguments
-    /// * `runtime_dir` - Directory for runtime sockets (e.g., `/run/agentbox`).
+    /// * `runtime_dir` - Directory for runtime sockets (e.g., `/run/abox`).
     pub fn new(runtime_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&runtime_dir)?;
         Ok(Self { runtime_dir, vms: Arc::new(Mutex::new(HashMap::new())) })
@@ -45,7 +45,7 @@ impl CloudHypervisorAdapter {
             if path.exists() {
                 return Ok(());
             }
-            if start.elapsed().as_millis() > timeout_ms as u128 {
+            if start.elapsed().as_millis() > u128::from(timeout_ms) {
                 bail!("Timed out waiting for socket: {}", path.display());
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -157,13 +157,13 @@ impl VmPort for CloudHypervisorAdapter {
 
             // Clean up socket files
             for suffix in ["virtiofs", "ch-api", "console", "vsock"] {
-                let sock = self.runtime_dir.join(format!("{}-{}.sock", suffix, id));
+                let sock = self.runtime_dir.join(format!("{suffix}-{id}.sock"));
                 let _ = std::fs::remove_file(sock);
             }
 
             tracing::info!(sandbox_id = id, "MicroVM stopped");
         } else {
-            bail!("No running VM with id '{}'", id);
+            bail!("No running VM with id '{id}'");
         }
         Ok(())
     }
@@ -182,7 +182,7 @@ impl VmPort for CloudHypervisorAdapter {
             .context("Failed to run ch-remote")?;
 
         if !status.success() {
-            bail!("ch-remote pause failed for '{}'", id);
+            bail!("ch-remote pause failed for '{id}'");
         }
 
         tracing::info!(sandbox_id = id, "MicroVM paused");
@@ -202,7 +202,7 @@ impl VmPort for CloudHypervisorAdapter {
             .context("Failed to run ch-remote")?;
 
         if !status.success() {
-            bail!("ch-remote resume failed for '{}'", id);
+            bail!("ch-remote resume failed for '{id}'");
         }
 
         tracing::info!(sandbox_id = id, "MicroVM resumed");

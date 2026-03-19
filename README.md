@@ -1,86 +1,88 @@
-# abox
+# abox — Parallel AI Agent Sandboxing
 
-**Parallel AI Agent Sandboxing with MicroVMs**
+`abox` is a lightweight, secure tool for running multiple AI coding agents in parallel, isolated sandboxes. It combines **git worktrees** with **microVMs** (Cloud Hypervisor) to provide agents with independent workspaces, while securely proxying credentials via a dual-layer interception architecture.
 
-`abox` is a lightweight, self-hosted tool for running multiple AI coding agents in parallel, each in a hardware-isolated MicroVM with its own git worktree, secure credential proxying, and a central management interface.
+## Why `abox`?
 
-## Key Features
+When running multiple autonomous agents on a single codebase, you face three problems:
+1. **Workspace collisions:** Agents stepping on each other's git branches and files.
+2. **Credential leaks:** Giving agents direct access to your AWS or GitHub tokens is dangerous.
+3. **Host system risk:** Agents running `rm -rf /` or installing malware.
 
-- **Hardware Isolation:** Each agent runs inside a Cloud Hypervisor MicroVM with KVM. No agent action can impact the host.
-- **Git Worktree Integration:** Each sandbox gets its own branch and worktree, shared with the VM via `virtiofs` for instant, bidirectional filesystem access.
-- **Dual-Layer Credential Proxy:** CLI tools (git, aws) are proxied via a shim over VSock. HTTP API keys are injected by an egress proxy. Credentials never enter the VM.
-- **Agent Agnostic:** Run Claude Code, Cursor, custom Python agents, or anything else — unmodified — inside the sandbox.
-- **Central Management:** CLI (`abox`) and TUI dashboard for managing all sandboxes, viewing divergence across branches, and reviewing audit logs.
-- **Snapshot Templates:** Pre-build VM images with your tools installed, then fork new sandboxes in sub-second time.
+`abox` solves this by:
+- Isolating each agent in a fast-booting **Cloud Hypervisor microVM**.
+- Mounting independent **git worktrees** into the VM via `virtiofs`.
+- Proxying commands and HTTP requests out of the VM through a **strict, TOML-configured policy engine**.
 
 ## Architecture
 
-```
-Host: abox CLI/TUI → abox-core (Workspace + VM Manager) → Cloud Hypervisor + virtiofsd
-                   → abox-proxyd (CLI Proxy + Egress Proxy + Policy Engine)
+`abox` is built in Rust using a Hexagonal (Ports & Adapters) architecture.
 
-Guest: Agent (unmodified) → abox-shim (intercepts git/aws) → VSock → Host Proxy
-                          → HTTPS_PROXY → Host Egress Proxy
-```
+1. **`abox-core`**: Domain logic (Workspace manager, VM lifecycle, Policy engine).
+2. **`abox-cli`**: The user interface (CLI commands and TUI dashboard).
+3. **`abox-proxyd`**: The host-side daemon that evaluates policies and executes allowed commands.
+4. **`abox-shim`**: A static musl binary injected into the guest VM that intercepts commands (via symlinks) and forwards them to `proxyd`.
 
-## Quick Start
+![Architecture](.plans/architecture-diagram.png)
+
+## Getting Started
+
+### Prerequisites
+- Linux host with KVM enabled (`/dev/kvm`)
+- Rust toolchain (`cargo`)
+- Cloud Hypervisor (`cloud-hypervisor`)
+- virtiofsd (`virtiofsd`)
+
+### Installation
 
 ```bash
-# Start 3 parallel agents
-abox run --task fix-auth -- claude --print "Fix the auth bug"
-abox run --task add-tests -- claude --print "Add unit tests for payments"
-abox run --task refactor-db -- claude --print "Refactor DB to use connection pooling"
-
-# See what files each agent is changing
-abox divergence
-
-# Attach to a sandbox terminal
-abox attach fix-auth
-
-# Merge completed work
-abox merge fix-auth
-
-# Open the TUI dashboard
-abox tui
+git clone https://github.com/X-McKay/abox.git
+cd abox
+cargo build --release
 ```
 
-## Prerequisites
+### Configuration
 
-- Linux with KVM support (`/dev/kvm`)
-- [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) installed
-- [virtiofsd](https://gitlab.com/virtio-fs/virtiofsd) installed
-- Git
+Copy the example configuration to your home directory:
 
-## Project Structure
-
+```bash
+mkdir -p ~/.config/abox
+cp templates/config.example.toml ~/.config/abox/config.toml
+cp policies/default.toml ~/.config/abox/policy.toml
 ```
-abox/
-├── crates/
-│   ├── abox-cli/        # CLI + TUI (clap, ratatui)
-│   ├── abox-core/       # Domain logic: workspace, VM, snapshot, config
-│   ├── abox-proxyd/     # Host-side credential proxy daemon
-│   └── abox-shim/       # Guest-side credential shim (static musl binary)
-├── policies/            # TOML policy templates for credential proxy
-├── templates/           # Guest image build scripts
-└── .plans/              # Architecture and implementation plans
-```
+
+### Usage
+
+1. **Start an agent sandbox:**
+   ```bash
+   abox run --task fix-auth --base main --command "claude"
+   ```
+
+2. **List running sandboxes:**
+   ```bash
+   abox list
+   ```
+
+3. **Check divergence across agents:**
+   ```bash
+   abox divergence
+   ```
+
+4. **Merge a completed task:**
+   ```bash
+   abox merge fix-auth
+   ```
 
 ## Development
 
-```bash
-# Build all crates
-cargo build --workspace
+We use `just` as our command runner. Install it with `cargo install just`.
 
-# Run unit tests
-cargo test --workspace --lib
+- `just check`: Run formatting, lints, and tests.
+- `just lint`: Run clippy with strict warnings.
+- `just build-shim`: Build the guest shim (requires `x86_64-unknown-linux-musl` target).
 
-# Run clippy
-cargo clippy --workspace -- -D warnings
-
-# Format code
-cargo fmt --all
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development guidelines.
 
 ## License
 
-Apache-2.0
+Apache 2.0
