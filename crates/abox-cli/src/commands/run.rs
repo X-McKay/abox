@@ -1,0 +1,86 @@
+//! `abox run` — Create and start a new sandbox.
+//!
+//! Creates a git worktree, boots a MicroVM, mounts the worktree via virtiofs,
+//! and starts the specified agent inside the VM.
+
+use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
+use abox_core::vm::VmPort;
+use abox_core::workspace::WorkspacePort;
+use anyhow::Result;
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Unique task identifier (e.g., "fix-auth"). Used as the sandbox name,
+    /// branch name suffix, and worktree directory name.
+    #[arg(long)]
+    pub task: String,
+
+    /// Base branch to fork from. Default: "main".
+    #[arg(long, default_value = "main")]
+    pub base: String,
+
+    /// Restore from a snapshot template instead of booting fresh.
+    #[arg(long)]
+    pub template: Option<String>,
+
+    /// Memory allocation in MiB. Overrides config default.
+    #[arg(long)]
+    pub memory: Option<u32>,
+
+    /// Number of vCPUs. Overrides config default.
+    #[arg(long)]
+    pub cpus: Option<u8>,
+
+    /// Unix user to run the agent as inside the VM.
+    #[arg(long)]
+    pub user: Option<String>,
+
+    /// Environment variables to set (KEY=VALUE). Can be repeated.
+    #[arg(long = "env", short = 'e')]
+    pub env_vars: Vec<String>,
+
+    /// The agent command to run inside the VM.
+    /// Everything after `--` is treated as the command.
+    #[arg(last = true, required = true)]
+    pub command: Vec<String>,
+}
+
+pub async fn execute<W: WorkspacePort, V: VmPort>(
+    args: RunArgs,
+    orchestrator: &SandboxOrchestrator<W, V>,
+) -> Result<()> {
+    let env_vars: Vec<(String, String)> = args
+        .env_vars
+        .iter()
+        .filter_map(|s| {
+            let mut parts = s.splitn(2, '=');
+            let key = parts.next()?.to_string();
+            let value = parts.next().unwrap_or("").to_string();
+            Some((key, value))
+        })
+        .collect();
+
+    let params = CreateSandboxParams {
+        task_id: args.task.clone(),
+        base_branch: args.base,
+        template: args.template,
+        memory_mib: args.memory,
+        vcpus: args.cpus,
+        user: args.user,
+        env_vars,
+        command: args.command,
+    };
+
+    let status = orchestrator.create_sandbox(params).await?;
+
+    println!("Sandbox '{}' created:", status.id);
+    println!("  Branch:   {}", status.branch);
+    println!("  Worktree: {}", status.worktree_path);
+    println!("  VM PID:   {}", status.vm_pid);
+    println!("  State:    {}", status.vm_state);
+    println!();
+    println!("Attach with: abox attach {}", args.task);
+
+    Ok(())
+}

@@ -1,0 +1,112 @@
+# Default agentbox credential proxy policy.
+#
+# This file controls which CLI commands and HTTP destinations are allowed
+# from sandboxes. Deny rules are evaluated before allow rules.
+#
+# Place this file at ~/.agentbox/policies/default.toml or specify a custom
+# path in config.toml.
+
+# Default action for CLI commands not matching any policy: "allow" or "deny".
+default_cli_action = "deny"
+
+# Default action for HTTP requests not matching any egress rule: "deny".
+default_egress_action = "deny"
+
+# ── Git ──────────────────────────────────────────────────────────────────
+[[cli]]
+command = "git"
+forward_ssh_agent = true
+
+# Allowed git operations (regexes matched against the full argument string)
+allow = [
+    "^status",
+    "^log",
+    "^diff",
+    "^show",
+    "^branch",
+    "^add\\s+",
+    "^commit\\s+",
+    "^checkout\\s+",
+    "^switch\\s+",
+    "^push\\s+origin\\s+\\S+$",
+    "^pull\\s+",
+    "^fetch\\s+",
+    "^clone\\s+",
+    "^stash",
+    "^rebase\\s+",
+    "^merge\\s+",
+    "^rev-parse",
+    "^remote\\s+-v",
+]
+
+# Denied git operations (checked first — deny takes precedence)
+deny = [
+    "--force",
+    "-f\\b",
+    "push\\s+--delete",
+    "push\\s+origin\\s+:refs",
+    "\\breset\\s+--hard",
+    "\\bclean\\s+-fd",
+]
+
+# ── GitHub CLI ───────────────────────────────────────────────────────────
+[[cli]]
+command = "gh"
+forward_ssh_agent = false
+
+allow = [
+    "^pr\\s+(create|list|view|checkout|diff|merge)",
+    "^issue\\s+(create|list|view)",
+    "^repo\\s+view",
+    "^auth\\s+status",
+]
+
+deny = [
+    "^repo\\s+delete",
+    "^auth\\s+login",
+]
+
+# ── AWS CLI ──────────────────────────────────────────────────────────────
+[[cli]]
+command = "aws"
+forward_ssh_agent = false
+
+allow = [
+    "^s3\\s+(ls|cp|sync|mv|rm)",
+    "^sts\\s+get-caller-identity",
+    "^logs\\s+(describe|get|filter)",
+]
+
+deny = [
+    "^iam\\s+",
+    "^ec2\\s+(run-instances|terminate)",
+    "^organizations\\s+",
+    "^sts\\s+assume-role",
+]
+
+# ── HTTP Egress Rules ────────────────────────────────────────────────────
+# Each rule matches a domain and injects a credential header.
+
+[[egress]]
+domain = "api.anthropic.com"
+inject_header = "x-api-key"
+env_var = "ANTHROPIC_API_KEY"
+header_template = "{value}"
+
+[[egress]]
+domain = "api.openai.com"
+inject_header = "Authorization"
+env_var = "OPENAI_API_KEY"
+header_template = "Bearer {value}"
+
+[[egress]]
+domain = "*.googleapis.com"
+inject_header = "Authorization"
+env_var = "GOOGLE_API_KEY"
+header_template = "Bearer {value}"
+
+[[egress]]
+domain = "api.github.com"
+inject_header = "Authorization"
+env_var = "GITHUB_TOKEN"
+header_template = "Bearer {value}"

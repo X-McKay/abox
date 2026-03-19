@@ -1,0 +1,28 @@
+# agentbox configuration
+#
+# Copy this file to ~/.agentbox/config.toml and customize.
+
+# Base directory for agentbox state (worktrees, snapshots, logs).
+# state_dir = "~/.agentbox"
+
+[vm_defaults]
+# Memory allocation per sandbox in MiB.
+memory_mib = 2048
+
+# Number of vCPUs per sandbox.
+vcpus = 2
+
+# Path to the guest root filesystem image.
+# Build one with: templates/build-guest-image.sh
+# image_path = "/var/lib/agentbox/images/base.raw"
+
+# Path to the kernel binary (vmlinux, not bzImage).
+# Download from Cloud Hypervisor releases or build your own.
+# kernel_path = "/var/lib/agentbox/kernel/vmlinux"
+
+[proxy]
+# Port for the HTTP egress proxy.
+egress_port = 18443
+
+# Directory containing policy TOML files.
+# policy_dir = "~/.agentbox/policies"
