@@ -26,3 +26,6 @@ hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 bytes = "1"
+
+[dev-dependencies]
+tempfile = "3"
