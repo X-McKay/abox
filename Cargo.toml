@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/abox-cli",
+    "crates/abox-core",
+    "crates/abox-proxyd",
+    "crates/abox-shim",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/X-McKay/abox"
+rust-version = "1.75"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"

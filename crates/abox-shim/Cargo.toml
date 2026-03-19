@@ -1,0 +1,16 @@
+[package]
+name = "abox-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "abox-shim"
+path = "src/main.rs"
+
+# Minimal dependencies for a static musl binary.
+# No tokio, no async — synchronous only for smallest possible binary.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
