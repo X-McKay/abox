@@ -3,6 +3,13 @@
 # Usage: source scripts/lib/download.sh; download_to <url> <dest> <sha256>
 set -euo pipefail
 
+for cmd in curl sha256sum; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        echo "ERROR: required command '$cmd' not found in PATH" >&2
+        exit 1
+    }
+done
+
 VENDOR_DIR="${VENDOR_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../vendor" && pwd)}"
 
 download_to() {
