@@ -120,6 +120,9 @@ impl WorkspacePort for Git2Workspace {
         let wt_names = repo.worktrees()?;
         let mut infos = Vec::new();
 
+        // Resolve a sensible base branch once for all worktrees in this listing.
+        let base_branch = resolve_default_branch(&repo);
+
         for name in &wt_names {
             let Some(name) = name else {
                 continue;
@@ -131,9 +134,7 @@ impl WorkspacePort for Git2Workspace {
             }
 
             let branch = Self::branch_name(name);
-
-            // Count commits ahead of main (best effort)
-            let commits_ahead = count_commits_ahead(&repo, &branch, "main").unwrap_or(0);
+            let commits_ahead = count_commits_ahead(&repo, &branch, &base_branch).unwrap_or(0);
 
             infos.push(WorktreeInfo {
                 sandbox_id: name.to_string(),
@@ -268,23 +269,38 @@ fn count_commits_ahead(repo: &Repository, branch: &str, base: &str) -> Result<us
     Ok(ahead)
 }
 
+/// Best-effort resolution of a repository's "default" branch for ahead/behind
+/// computations. Tries `main` first, then `master`, then falls back to HEAD.
+fn resolve_default_branch(repo: &Repository) -> String {
+    for candidate in ["main", "master"] {
+        if repo.revparse_single(candidate).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    "HEAD".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
     /// Helper: create a temporary git repo with an initial commit on `main`.
+    ///
+    /// Works regardless of the host's `init.defaultBranch` setting by forcing
+    /// the initial branch to `main` via `init_opts`.
     fn setup_test_repo() -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().to_path_buf();
 
-        let repo = Repository::init(&repo_path).unwrap();
+        let mut init_opts = git2::RepositoryInitOptions::new();
+        init_opts.initial_head("main");
+        let repo = Repository::init_opts(&repo_path, &init_opts).unwrap();
 
-        // Create an initial commit so `main` exists
+        // Create an initial commit so `main` exists as a real ref
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
         let tree_id = {
             let mut index = repo.index().unwrap();
-            // Write a file so the tree is not empty
             let file_path = repo_path.join("README.md");
             std::fs::write(&file_path, "# Test Repo\n").unwrap();
             index.add_path(Path::new("README.md")).unwrap();
@@ -293,10 +309,6 @@ mod tests {
         };
         let tree = repo.find_tree(tree_id).unwrap();
         repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[]).unwrap();
-
-        // Rename the default branch to `main`
-        let mut head = repo.find_branch("master", BranchType::Local).unwrap();
-        head.rename("main", false).unwrap();
 
         (tmp, repo_path)
     }

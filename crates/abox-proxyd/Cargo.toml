@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 abox-core = { path = "../abox-core" }
+clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

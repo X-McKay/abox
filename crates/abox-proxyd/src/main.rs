@@ -17,9 +17,19 @@ use abox_core::config::AboxConfig;
 use abox_core::policy::PolicyEngine;
 use anyhow::{Context, Result};
 use audit::AuditLog;
+use clap::Parser;
 use cli_proxy::CliProxyServer;
 use egress_proxy::EgressProxyServer;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+#[derive(Parser)]
+#[command(name = "abox-proxyd", about = "abox host-side credential proxy daemon", version)]
+struct Cli {
+    /// Path to the abox config file. Defaults to `~/.abox/config.toml`.
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,11 +42,17 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
+    let cli = Cli::parse();
+
     tracing::info!("abox-proxyd starting");
 
     // Load configuration
-    let config_path = AboxConfig::default_path()?;
+    let config_path = match cli.config {
+        Some(p) => p,
+        None => AboxConfig::default_path()?,
+    };
     let config = AboxConfig::load(&config_path)?;
+    config.ensure_dirs()?;
 
     // Load policy engine
     let policy_path = config.proxy.policy_dir.join("default.toml");
@@ -59,7 +75,6 @@ async fn main() -> Result<()> {
 
     // Initialize audit log
     let audit_path = config.logs_dir().join("audit.jsonl");
-    config.ensure_dirs()?;
     let audit = Arc::new(AuditLog::new(&audit_path)?);
     tracing::info!(path = %audit_path.display(), "Audit log initialized");
 

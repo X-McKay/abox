@@ -46,10 +46,13 @@ cargo build --release
 Copy the example configuration to your home directory:
 
 ```bash
-mkdir -p ~/.config/abox
-cp templates/config.example.toml ~/.config/abox/config.toml
-cp policies/default.toml ~/.config/abox/policy.toml
+mkdir -p ~/.abox/policies
+cp templates/config.example.toml ~/.abox/config.toml
+cp policies/default.toml ~/.abox/policies/default.toml
 ```
+
+By default, abox stores all state under `~/.abox/` (worktrees, templates,
+logs, and the runtime socket directory). No root access required.
 
 ### Usage
 

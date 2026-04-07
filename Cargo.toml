@@ -2,6 +2,7 @@
 members = [
     "crates/abox-cli",
     "crates/abox-core",
+    "crates/abox-protocol",
     "crates/abox-proxyd",
     "crates/abox-shim",
 ]

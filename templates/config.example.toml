@@ -5,6 +5,11 @@
 # Base directory for abox state (worktrees, snapshots, logs).
 # state_dir = "~/.abox"
 
+# Directory for runtime files (sockets, PIDs).
+# Defaults to `<state_dir>/run` (writable by the current user, no root needed).
+# Set to `/run/abox` for a system-wide install.
+# runtime_dir = "/run/abox"
+
 [vm_defaults]
 # Memory allocation per sandbox in MiB.
 memory_mib = 2048

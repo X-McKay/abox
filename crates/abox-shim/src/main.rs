@@ -15,11 +15,10 @@
 //!
 //! # Protocol
 //!
-//! The request/response types here mirror `abox_core::protocol::{ProxyRequest, ProxyResponse}`.
-//! They are duplicated (not imported) because this crate intentionally avoids depending
-//! on `abox-core` to keep the binary small and free of transitive dependencies.
+//! Wire types are defined in the tiny `abox-protocol` crate (serde-only,
+//! no transitive deps) and shared with `abox-proxyd` via `abox-core`.
 
-use serde::{Deserialize, Serialize};
+use abox_protocol::{ProxyRequest, ProxyResponse};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -29,23 +28,9 @@ use std::process::ExitCode;
 /// port 5000 to this path via `socat`.
 const PROXY_SOCKET: &str = "/run/abox-proxy.sock";
 
-// ─── Protocol types (mirrors abox_core::protocol) ──────────────────────────
-
-#[derive(Debug, Serialize)]
-struct ProxyRequest {
-    command: String,
-    args: Vec<String>,
-    cwd: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProxyResponse {
-    exit_code: i32,
-    #[serde(default)]
-    stdout: String,
-    #[serde(default)]
-    stderr: String,
-}
+/// Environment variable injected into the guest by the host so the shim can
+/// attribute every request to the originating sandbox.
+const SANDBOX_ID_ENV: &str = "ABOX_SANDBOX_ID";
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -63,8 +48,9 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let (command, cmd_args) = parse_args()?;
     let cwd = std::env::current_dir()
         .map_or_else(|_| "/workspace".to_string(), |p| p.display().to_string());
+    let sandbox_id = std::env::var(SANDBOX_ID_ENV).ok();
 
-    let request = ProxyRequest { command, args: cmd_args, cwd };
+    let request = ProxyRequest { command, args: cmd_args, cwd, sandbox_id };
     let response = send_request(&request)?;
 
     if !response.stdout.is_empty() {

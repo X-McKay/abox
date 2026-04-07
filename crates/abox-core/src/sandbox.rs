@@ -97,12 +97,28 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             proxy_port: self.config.proxy.egress_port,
         };
 
-        // Step 3: Start the VM
-        let vm_info = self
-            .vm_manager
-            .start(vm_config)
-            .await
-            .with_context(|| format!("Failed to start VM for '{}'", params.task_id))?;
+        // Step 3: Start the VM. If this fails, roll back the worktree we just
+        // created so the user is not left with orphaned state.
+        let vm_info = match self.vm_manager.start(vm_config).await {
+            Ok(info) => info,
+            Err(start_err) => {
+                tracing::warn!(
+                    task_id = %params.task_id,
+                    error = %start_err,
+                    "VM start failed; rolling back worktree"
+                );
+                if let Err(cleanup_err) = self.workspace.remove_worktree(&params.task_id, true) {
+                    tracing::error!(
+                        task_id = %params.task_id,
+                        error = %cleanup_err,
+                        "Worktree rollback failed; manual cleanup required"
+                    );
+                }
+                return Err(
+                    start_err.context(format!("Failed to start VM for '{}'", params.task_id))
+                );
+            }
+        };
 
         Ok(SandboxStatus {
             id: params.task_id.clone(),
@@ -115,14 +131,23 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     }
 
     /// Stop a sandbox and optionally clean up.
+    ///
+    /// If the VM is already stopped (or never started — e.g. previous `run`
+    /// failed at VM boot), this still proceeds with worktree cleanup when
+    /// `clean` is true. This guarantees there is always a CLI path to recover
+    /// from orphaned state.
     pub async fn stop_sandbox(&self, task_id: &str, clean: bool) -> Result<()> {
-        // Stop the VM
-        self.vm_manager
-            .stop(task_id)
-            .await
-            .with_context(|| format!("Failed to stop VM '{task_id}'"))?;
+        match self.vm_manager.stop(task_id).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(
+                    task_id,
+                    error = %e,
+                    "VM stop returned error (likely already stopped); continuing"
+                );
+            }
+        }
 
-        // Optionally remove the worktree and branch
         if clean {
             self.workspace
                 .remove_worktree(task_id, true)

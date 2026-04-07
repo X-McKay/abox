@@ -14,6 +14,12 @@ pub struct AboxConfig {
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
 
+    /// Directory for runtime files (sockets, PIDs).
+    /// Defaults to `<state_dir>/run` so abox is fully usable without root.
+    /// Set to e.g. `/run/abox` for a system-wide install.
+    #[serde(default)]
+    pub runtime_dir: Option<PathBuf>,
+
     /// Default VM configuration applied to all sandboxes unless overridden.
     #[serde(default)]
     pub vm_defaults: VmDefaults,
@@ -59,6 +65,7 @@ impl Default for AboxConfig {
     fn default() -> Self {
         Self {
             state_dir: default_state_dir(),
+            runtime_dir: None,
             vm_defaults: VmDefaults::default(),
             proxy: ProxyConfig::default(),
         }
@@ -117,8 +124,11 @@ impl AboxConfig {
     }
 
     /// Return the runtime directory for sockets and PIDs.
+    ///
+    /// If `runtime_dir` is set in config, use it. Otherwise default to
+    /// `<state_dir>/run`, which is always writable for the current user.
     pub fn runtime_dir(&self) -> PathBuf {
-        PathBuf::from("/run/abox")
+        self.runtime_dir.clone().unwrap_or_else(|| self.state_dir.join("run"))
     }
 
     /// Ensure all required directories exist.
@@ -126,6 +136,8 @@ impl AboxConfig {
         std::fs::create_dir_all(self.worktrees_dir())?;
         std::fs::create_dir_all(self.templates_dir())?;
         std::fs::create_dir_all(self.logs_dir())?;
+        std::fs::create_dir_all(self.runtime_dir())?;
+        std::fs::create_dir_all(&self.proxy.policy_dir)?;
         Ok(())
     }
 }

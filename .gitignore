@@ -22,3 +22,7 @@ Thumbs.db
 /state.db
 *.sock
 .github/workflows/
+
+# Local scratch and worktrees
+.scratch/
+.worktrees/

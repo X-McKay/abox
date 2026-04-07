@@ -74,15 +74,26 @@ async fn handle_connection(
     }
 
     let request: ProxyRequest = serde_json::from_str(line.trim())?;
-    tracing::debug!(command = %request.command, args = ?request.args, "CLI proxy request");
+    let sandbox_id = request.sandbox_id.as_deref().unwrap_or("unknown");
+    tracing::debug!(
+        sandbox_id,
+        command = %request.command,
+        args = ?request.args,
+        "CLI proxy request"
+    );
 
     // Evaluate policy and build response
     let decision = policy.evaluate_cli(&request.command, &request.args);
     let response = match &decision {
-        Decision::Allow => execute_and_respond(&request, audit).await,
+        Decision::Allow => execute_and_respond(&request, sandbox_id, audit).await,
         Decision::Deny(reason) => {
-            audit.log_cli("unknown", &request.command, &request.args, "denied", 126);
-            tracing::warn!(command = %request.command, reason = %reason, "CLI request denied");
+            audit.log_cli(sandbox_id, &request.command, &request.args, "denied", 126);
+            tracing::warn!(
+                sandbox_id,
+                command = %request.command,
+                reason = %reason,
+                "CLI request denied"
+            );
             ProxyResponse::denied(reason)
         }
     };
@@ -97,11 +108,15 @@ async fn handle_connection(
 }
 
 /// Execute an allowed command on the host and build a response.
-async fn execute_and_respond(request: &ProxyRequest, audit: &AuditLog) -> ProxyResponse {
+async fn execute_and_respond(
+    request: &ProxyRequest,
+    sandbox_id: &str,
+    audit: &AuditLog,
+) -> ProxyResponse {
     match execute_command(request).await {
         Ok(response) => {
             audit.log_cli(
-                "unknown",
+                sandbox_id,
                 &request.command,
                 &request.args,
                 "allowed",
@@ -110,8 +125,13 @@ async fn execute_and_respond(request: &ProxyRequest, audit: &AuditLog) -> ProxyR
             response
         }
         Err(e) => {
-            audit.log_cli("unknown", &request.command, &request.args, "error", -1);
-            tracing::error!(command = %request.command, error = %e, "Command execution failed");
+            audit.log_cli(sandbox_id, &request.command, &request.args, "error", -1);
+            tracing::error!(
+                sandbox_id,
+                command = %request.command,
+                error = %e,
+                "Command execution failed"
+            );
             ProxyResponse::from_exit(1, String::new(), format!("execution failed: {e}"))
         }
     }

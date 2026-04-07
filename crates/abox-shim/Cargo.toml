@@ -12,7 +12,7 @@ path = "src/main.rs"
 # Minimal dependencies for a static musl binary.
 # No tokio, no async — synchronous only for smallest possible binary.
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+abox-protocol = { path = "../abox-protocol" }
 serde_json = "1"
 
 [lints]

@@ -24,6 +24,7 @@ dependencies = [
 name = "abox-core"
 version = "0.1.0"
 dependencies = [
+ "abox-protocol",
  "anyhow",
  "chrono",
  "dirs",
@@ -39,6 +40,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "abox-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "abox-proxyd"
 version = "0.1.0"
 dependencies = [
@@ -46,6 +55,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
+ "clap",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -65,7 +75,7 @@ dependencies = [
 name = "abox-shim"
 version = "0.1.0"
 dependencies = [
- "serde",
+ "abox-protocol",
  "serde_json",
 ]
 

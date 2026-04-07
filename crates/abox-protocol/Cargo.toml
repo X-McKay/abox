@@ -1,0 +1,18 @@
+[package]
+name = "abox-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol shared between abox-shim (guest) and abox-proxyd (host)"
+
+# Intentionally minimal: serde only. Both abox-shim (static musl) and
+# abox-core depend on this crate, so its dependency surface must stay tiny.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

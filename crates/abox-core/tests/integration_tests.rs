@@ -11,7 +11,7 @@ use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
 use abox_core::snapshot::SnapshotManager;
 use abox_core::vm::{VmConfig, VmInfo, VmPort, VmState};
 use abox_core::workspace::{FileStatus, WorkspacePort};
-use git2::{BranchType, Repository};
+use git2::Repository;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -73,6 +73,17 @@ fn test_config_directory_helpers() {
     assert_eq!(config.worktrees_dir(), PathBuf::from("/test/state/worktrees"));
     assert_eq!(config.templates_dir(), PathBuf::from("/test/state/templates"));
     assert_eq!(config.logs_dir(), PathBuf::from("/test/state/logs"));
+    // runtime_dir defaults to <state_dir>/run when not configured.
+    assert_eq!(config.runtime_dir(), PathBuf::from("/test/state/run"));
+}
+
+#[test]
+fn test_config_runtime_dir_override() {
+    let config = AboxConfig {
+        state_dir: PathBuf::from("/test/state"),
+        runtime_dir: Some(PathBuf::from("/run/abox")),
+        ..Default::default()
+    };
     assert_eq!(config.runtime_dir(), PathBuf::from("/run/abox"));
 }
 
@@ -322,7 +333,10 @@ fn setup_test_repo() -> (TempDir, PathBuf) {
     let tmp = TempDir::new().unwrap();
     let repo_path = tmp.path().to_path_buf();
 
-    let repo = Repository::init(&repo_path).unwrap();
+    // Force the initial branch to `main` regardless of host's `init.defaultBranch`.
+    let mut init_opts = git2::RepositoryInitOptions::new();
+    init_opts.initial_head("main");
+    let repo = Repository::init_opts(&repo_path, &init_opts).unwrap();
 
     let sig = git2::Signature::now("Test", "test@test.com").unwrap();
     let tree_id = {
@@ -335,9 +349,6 @@ fn setup_test_repo() -> (TempDir, PathBuf) {
     };
     let tree = repo.find_tree(tree_id).unwrap();
     repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[]).unwrap();
-
-    let mut head = repo.find_branch("master", BranchType::Local).unwrap();
-    head.rename("main", false).unwrap();
 
     (tmp, repo_path)
 }
