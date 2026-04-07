@@ -26,3 +26,6 @@ Thumbs.db
 # Local scratch and worktrees
 .scratch/
 .worktrees/
+
+vendor/*
+!vendor/.gitkeep
