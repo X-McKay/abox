@@ -15,17 +15,26 @@ ABOX_VM_DIR="${ABOX_VM_DIR:-$HOME/.abox/vm}"
 
 # ─── Argument parsing ────────────────────────────────────────────────────
 DO_SYMLINK=1
+ASSUME_YES="${BOOTSTRAP_YES:-0}"
 for arg in "$@"; do
     case "$arg" in
         --no-symlink)
             DO_SYMLINK=0
             ;;
+        --yes|-y)
+            ASSUME_YES=1
+            ;;
         --help|-h)
             cat <<HELP
-Usage: $(basename "$0") [--no-symlink]
+Usage: $(basename "$0") [--no-symlink] [--yes]
 
   --no-symlink   Do NOT create symlinks in ~/.local/bin. You will need
                  to add $ABOX_VM_DIR to your PATH manually.
+  --yes, -y      Non-interactive mode: silently install missing rust
+                 toolchain components (e.g. the x86_64-unknown-linux-musl
+                 target). Without this flag the script fails fast and
+                 prints the rustup command for you to run yourself.
+                 Honored from the BOOTSTRAP_YES=1 environment variable too.
 HELP
             exit 0
             ;;
@@ -119,8 +128,25 @@ download_to "$SOCAT_URL"    "$ABOX_VM_DIR/socat.apk"                  "$SOCAT_SH
 # ─── Phase 4: Build abox-shim for static musl ────────────────────────────
 echo "[4/5] Building abox-shim for static musl..."
 if ! rustup target list --installed 2>/dev/null | grep -q '^x86_64-unknown-linux-musl$'; then
-    echo "  adding x86_64-unknown-linux-musl rust target..."
+    if [[ "$ASSUME_YES" == "1" ]] || [[ "${CI:-}" == "true" ]]; then
+        echo "  adding x86_64-unknown-linux-musl rust target..."
+        rustup target add x86_64-unknown-linux-musl
+    else
+        cat <<MISSING_MUSL >&2
+
+ERROR: x86_64-unknown-linux-musl rust target is not installed.
+
+The abox-shim is built as a static-musl binary so it can run inside
+the minimal Alpine guest rootfs. Install the target manually:
+
     rustup target add x86_64-unknown-linux-musl
+
+…or re-run this script with --yes to let it do that for you:
+
+    $(basename "$0") --yes
+MISSING_MUSL
+        exit 1
+    fi
 fi
 ( cd "$REPO_ROOT" && cargo build --release --target x86_64-unknown-linux-musl -p abox-shim )
 SHIM_BIN="$REPO_ROOT/target/x86_64-unknown-linux-musl/release/abox-shim"
