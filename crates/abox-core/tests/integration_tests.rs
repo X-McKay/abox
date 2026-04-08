@@ -913,3 +913,95 @@ async fn test_orchestrator_vm_config_overrides() {
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].id, "task-custom");
 }
+
+#[tokio::test]
+async fn test_run_sandbox_polls_until_vm_exits() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A mock VM port whose `info()` returns Ok on the first call and Err
+    /// on all subsequent calls, simulating a VM that exits promptly.
+    struct ExitingMockVm {
+        info_calls: AtomicUsize,
+    }
+
+    impl VmPort for ExitingMockVm {
+        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
+            Ok(VmInfo {
+                id: config.id,
+                pid: 12345,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
+            // First call: VM still exists. All subsequent calls: VM is gone.
+            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(VmInfo {
+                    id: id.to_string(),
+                    pid: 12345,
+                    state: VmState::Running,
+                    api_socket: PathBuf::from("/tmp/api.sock"),
+                    console_socket: PathBuf::from("/tmp/console.sock"),
+                })
+            } else {
+                anyhow::bail!("VM exited")
+            }
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+    }
+
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    config.ensure_dirs().unwrap();
+
+    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0) };
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+
+    let params = CreateSandboxParams {
+        task_id: "run-sandbox-test".into(),
+        base_branch: "main".into(),
+        template: None,
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["true".into()],
+    };
+
+    let policy = std::sync::Arc::new(
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "allow".into(),
+            default_egress_action: "deny".into(),
+        })
+        .unwrap(),
+    );
+
+    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    assert_eq!(exit, 0);
+
+    // The worktree should have been created on disk.
+    assert!(wt_base.join("run-sandbox-test").exists());
+}

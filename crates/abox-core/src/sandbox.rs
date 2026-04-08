@@ -215,4 +215,70 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     pub async fn vm_info(&self, task_id: &str) -> Result<VmInfo> {
         self.vm_manager.info(task_id).await
     }
+
+    /// Foreground variant of `create_sandbox`.
+    ///
+    /// Creates the worktree, boots the VM, starts a per-VM proxy bridge
+    /// bound to `<runtime>/vsock-<id>.sock_5000` (the path Cloud Hypervisor
+    /// exposes for guest vsock-port-5000 traffic), streams the guest
+    /// console to the orchestrator's stdio, polls the VM until it exits,
+    /// and tears everything down.
+    ///
+    /// Returns the agent's exit code. The current MVP returns 0 on clean
+    /// VM exit; structured exit-code propagation from the guest is a
+    /// follow-up.
+    pub async fn run_sandbox(
+        &self,
+        params: CreateSandboxParams,
+        policy: std::sync::Arc<crate::policy::PolicyEngine>,
+    ) -> Result<i32> {
+        let status = self.create_sandbox(params).await?;
+        let task_id = status.id.clone();
+
+        // Spawn the per-VM proxy bridge bound to vsock-<id>.sock_5000.
+        let bridge_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5000"));
+        let bridge = crate::proxy_bridge::ProxyBridge::new(
+            bridge_socket,
+            policy,
+            std::sync::Arc::new(crate::proxy_bridge::TracingAuditSink),
+            crate::proxy_bridge::SandboxAttribution::Fixed(task_id.clone()),
+        );
+        let bridge_handle = tokio::spawn(async move {
+            if let Err(e) = bridge.run().await {
+                tracing::error!(error = %e, "proxy bridge crashed");
+            }
+        });
+
+        // Spawn the console streamer.
+        let console_socket = self.config.runtime_dir().join(format!("console-{task_id}.sock"));
+        let console_handle = tokio::spawn(async move {
+            // Wait briefly for the console socket to appear (CH may not
+            // have created it yet).
+            for _ in 0..100 {
+                if console_socket.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            if let Err(e) = Box::pin(crate::console::stream_to_stdio(&console_socket)).await {
+                tracing::debug!(error = %e, "console stream ended");
+            }
+        });
+
+        // Poll for VM exit. The trait doesn't expose a "wait" primitive,
+        // so we poll `info` until it errors out (which the adapter does
+        // when the VM is no longer in its registry — i.e. after it has
+        // been removed from the map).
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if self.vm_manager.info(&task_id).await.is_err() {
+                break;
+            }
+        }
+
+        bridge_handle.abort();
+        console_handle.abort();
+
+        Ok(0)
+    }
 }
