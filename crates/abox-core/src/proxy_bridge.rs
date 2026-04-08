@@ -103,8 +103,14 @@ impl ProxyBridge {
             let attribution = Arc::clone(&attribution);
             let cwd_map = cwd_map.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle(stream, &policy, audit.as_ref(), attribution.as_ref(), cwd_map.as_deref()).await
+                if let Err(e) = handle(
+                    stream,
+                    &policy,
+                    audit.as_ref(),
+                    attribution.as_ref(),
+                    cwd_map.as_deref(),
+                )
+                .await
                 {
                     tracing::error!(error = %e, "proxy bridge connection error");
                 }
@@ -132,12 +138,10 @@ async fn handle(
     // Translate guest CWD to host path if a cwd_map was configured.
     if let Some((guest_prefix, host_root)) = cwd_map {
         if request.cwd.starts_with(guest_prefix.as_str()) {
-            let suffix = request.cwd.trim_start_matches(guest_prefix.as_str()).trim_start_matches('/');
-            let host_cwd = if suffix.is_empty() {
-                host_root.clone()
-            } else {
-                host_root.join(suffix)
-            };
+            let suffix =
+                request.cwd.trim_start_matches(guest_prefix.as_str()).trim_start_matches('/');
+            let host_cwd =
+                if suffix.is_empty() { host_root.clone() } else { host_root.join(suffix) };
             request.cwd = host_cwd.display().to_string();
         }
     }
@@ -229,8 +233,7 @@ impl FileAuditSink {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file =
-            std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self { writer: std::sync::Mutex::new(std::io::BufWriter::new(file)) })
     }
 }
@@ -244,8 +247,8 @@ impl AuditSink for FileAuditSink {
         decision: &str,
         exit_code: i32,
     ) {
-        use std::io::Write;
         use chrono::Utc;
+        use std::io::Write;
         let entry = serde_json::json!({
             "timestamp": Utc::now().to_rfc3339(),
             "sandbox_id": sandbox_id,
