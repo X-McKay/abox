@@ -270,17 +270,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         });
 
         // Spawn the console streamer.
-        let console_socket = self.config.runtime_dir().join(format!("console-{task_id}.sock"));
+        let console_log = self.config.runtime_dir().join(format!("console-{task_id}.log"));
         let console_handle = tokio::spawn(async move {
-            // Wait briefly for the console socket to appear (CH may not
-            // have created it yet).
-            for _ in 0..100 {
-                if console_socket.exists() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            if let Err(e) = Box::pin(crate::console::stream_to_stdio(&console_socket)).await {
+            if let Err(e) = Box::pin(crate::console::tail_to_stdout(&console_log)).await {
                 tracing::debug!(error = %e, "console stream ended");
             }
         });

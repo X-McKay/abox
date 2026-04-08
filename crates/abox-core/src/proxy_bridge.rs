@@ -136,10 +136,13 @@ async fn handle(
     let mut request: ProxyRequest = serde_json::from_str(line.trim())?;
 
     // Translate guest CWD to host path if a cwd_map was configured.
+    // Use component-aware matching to avoid treating `/workspacefoo` as
+    // a subdirectory of `/workspace`.
     if let Some((guest_prefix, host_root)) = cwd_map {
-        if request.cwd.starts_with(guest_prefix.as_str()) {
-            let suffix =
-                request.cwd.trim_start_matches(guest_prefix.as_str()).trim_start_matches('/');
+        let prefix = guest_prefix.as_str();
+        let trailing = format!("{prefix}/");
+        if request.cwd == prefix || request.cwd.starts_with(&trailing) {
+            let suffix = request.cwd.trim_start_matches(prefix).trim_start_matches('/');
             let host_cwd =
                 if suffix.is_empty() { host_root.clone() } else { host_root.join(suffix) };
             request.cwd = host_cwd.display().to_string();

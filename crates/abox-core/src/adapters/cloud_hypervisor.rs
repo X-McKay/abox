@@ -40,6 +40,22 @@ impl CloudHypervisorAdapter {
         Ok(Self { runtime_dir, vms: Arc::new(Mutex::new(HashMap::new())) })
     }
 
+    /// Remove all runtime files associated with a VM (sockets, console log,
+    /// vsock bridge socket, and staged meta directory).
+    ///
+    /// Called from both `stop()` (explicit teardown) and `info()` (natural
+    /// exit detection) so cleanup always runs regardless of how the VM ends.
+    fn cleanup_vm_files(&self, id: &str, vm: &RunningVm) {
+        for suffix in ["virtiofs", "virtiofs-meta", "ch-api", "vsock"] {
+            let sock = self.runtime_dir.join(format!("{suffix}-{id}.sock"));
+            let _ = std::fs::remove_file(sock);
+        }
+        // Console is a plain file (CH v44's --console file=...), not a socket.
+        let _ = std::fs::remove_file(&vm.console_socket);
+        let _ = std::fs::remove_file(self.runtime_dir.join(format!("vsock-{id}.sock_5000")));
+        let _ = std::fs::remove_dir_all(&vm.meta_dir);
+    }
+
     /// Wait for a Unix socket file to appear on disk.
     async fn wait_for_socket(path: &std::path::Path, timeout_ms: u64) -> Result<()> {
         let start = std::time::Instant::now();
@@ -200,16 +216,8 @@ impl VmPort for CloudHypervisorAdapter {
             let _ = vm.virtiofsd_child.kill().await;
             let _ = vm.meta_virtiofsd_child.kill().await;
 
-            // Clean up socket files
-            for suffix in ["virtiofs", "virtiofs-meta", "ch-api", "console", "vsock"] {
-                let sock = self.runtime_dir.join(format!("{suffix}-{id}.sock"));
-                let _ = std::fs::remove_file(sock);
-            }
-            // Task 7 will bind a per-VM proxy bridge socket here; clean it up too.
-            let _ = std::fs::remove_file(self.runtime_dir.join(format!("vsock-{id}.sock_5000")));
-
-            // Remove the staged boot metadata directory.
-            let _ = std::fs::remove_dir_all(&vm.meta_dir);
+            // Clean up all runtime files (sockets, console log, meta dir).
+            self.cleanup_vm_files(id, &vm);
 
             tracing::info!(sandbox_id = id, "MicroVM stopped");
         } else {
@@ -264,11 +272,16 @@ impl VmPort for CloudHypervisorAdapter {
         let vm = vms.get_mut(id).context("VM not found")?;
         // If the cloud-hypervisor process has exited, treat the VM as gone.
         if let Ok(Some(_)) = vm.ch_child.try_wait() {
+            // Run file cleanup while we still hold the vm reference (before
+            // removing it from the map drops the RunningVm).
+            self.cleanup_vm_files(id, vm);
             drop(vms);
-            // Remove from registry so the next info() call returns an error,
-            // which is what sandbox.rs's polling loop watches for.
+
+            // Reacquire and remove the entry (this drops the RunningVm, which
+            // kills the virtiofsd children via kill_on_drop).
             let mut vms = self.vms.lock().await;
             vms.remove(id);
+
             bail!("VM '{id}' has exited");
         }
         Ok(VmInfo {
