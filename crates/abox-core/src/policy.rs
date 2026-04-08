@@ -96,7 +96,6 @@ struct CompiledCliPolicy {
     command: String,
     allow_patterns: Vec<Regex>,
     deny_patterns: Vec<Regex>,
-    #[allow(dead_code)]
     forward_ssh_agent: bool,
 }
 
@@ -200,6 +199,16 @@ impl PolicyEngine {
         }
 
         Decision::Allow
+    }
+
+    /// Look up whether a given command's policy requests SSH agent
+    /// forwarding.
+    ///
+    /// Returns `false` for unknown commands. Used by the proxy bridge to
+    /// decide whether to pass `SSH_AUTH_SOCK` through to the child process
+    /// (and to deliberately unset it for commands that did not opt in).
+    pub fn forward_ssh_agent(&self, command: &str) -> bool {
+        self.cli_policies.iter().find(|p| p.command == command).is_some_and(|p| p.forward_ssh_agent)
     }
 
     /// Evaluate an HTTP egress request.
@@ -522,6 +531,16 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         assert!(matches!(decision, Decision::Deny(_)));
+    }
+
+    #[test]
+    fn test_forward_ssh_agent_lookup() {
+        // git policy has forward_ssh_agent=true; aws has false; unknown
+        // commands return false (default-safe).
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        assert!(engine.forward_ssh_agent("git"));
+        assert!(!engine.forward_ssh_agent("aws"));
+        assert!(!engine.forward_ssh_agent("nonexistent"));
     }
 
     #[test]

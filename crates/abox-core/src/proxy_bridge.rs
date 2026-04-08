@@ -165,8 +165,9 @@ async fn handle(
     );
 
     let decision = policy.evaluate_cli(&request.command, &request.args);
+    let forward_ssh = policy.forward_ssh_agent(&request.command);
     let response = match &decision {
-        Decision::Allow => match exec(&request).await {
+        Decision::Allow => match exec(&request, forward_ssh).await {
             Ok(r) => {
                 audit.log_cli(&sandbox_id, &request.command, &request.args, "allowed", r.exit_code);
                 r
@@ -201,12 +202,25 @@ async fn handle(
     Ok(())
 }
 
-async fn exec(request: &ProxyRequest) -> Result<ProxyResponse> {
-    let output = tokio::process::Command::new(&request.command)
-        .args(&request.args)
-        .current_dir(resolve_cwd(&request.cwd))
-        .output()
-        .await?;
+async fn exec(request: &ProxyRequest, forward_ssh: bool) -> Result<ProxyResponse> {
+    let mut cmd = tokio::process::Command::new(&request.command);
+    cmd.args(&request.args).current_dir(resolve_cwd(&request.cwd));
+
+    // SSH agent forwarding (S3): if the matched policy opted in, pass the
+    // host's SSH_AUTH_SOCK through so guest tools (e.g. `git push` to an
+    // SSH remote) can reach the host's running ssh-agent. Otherwise,
+    // explicitly remove SSH_AUTH_SOCK from the child env so a child
+    // cannot accidentally inherit it from a parent process that happens
+    // to have it set. The unset is the safer default.
+    if forward_ssh {
+        if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
+            cmd.env("SSH_AUTH_SOCK", sock);
+        }
+    } else {
+        cmd.env_remove("SSH_AUTH_SOCK");
+    }
+
+    let output = cmd.output().await?;
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

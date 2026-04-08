@@ -50,12 +50,19 @@ fn main() -> ExitCode {
 
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let (command, cmd_args) = parse_args()?;
-    // ABOX_CWD overrides getcwd(2) — used when virtiofs mounts confuse the
-    // kernel's getcwd path resolution.
-    let cwd = std::env::var(CWD_OVERRIDE_ENV).unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map_or_else(|_| "/workspace".to_string(), |p| p.display().to_string())
-    });
+
+    // CWD resolution order (most authoritative first):
+    //   1. ABOX_CWD env var (set by /abox-meta/runner.sh; host-known truth)
+    //   2. /proc/self/cwd symlink target — kernel-maintained, more reliable
+    //      than getcwd(2) on some virtiofs kernels which can return the
+    //      wrong path when the process is inside a virtiofs mount.
+    //   3. getcwd(2) fallback
+    //   4. hardcoded "/workspace" if everything else failed
+    let cwd = std::env::var(CWD_OVERRIDE_ENV)
+        .ok()
+        .or_else(|| std::fs::read_link("/proc/self/cwd").ok().map(|p| p.display().to_string()))
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| "/workspace".to_string());
     let sandbox_id = std::env::var(SANDBOX_ID_ENV).ok();
 
     let request = ProxyRequest { command, args: cmd_args, cwd, sandbox_id };
