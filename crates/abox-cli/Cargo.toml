@@ -1,0 +1,29 @@
+[package]
+name = "abox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "abox"
+path = "src/main.rs"
+
+[dependencies]
+abox-core = { path = "../abox-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"

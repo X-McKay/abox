@@ -1,0 +1,17 @@
+# Cargo configuration for the abox workspace.
+
+[alias]
+# Shorthand aliases for common workflows.
+c = "check --workspace"
+t = "test --workspace"
+l = "clippy --workspace --all-targets -- -D warnings"
+b = "build --workspace"
+r = "run -p abox-cli --"
+
+# Build the shim as a static musl binary.
+build-shim = "build --release --target x86_64-unknown-linux-musl -p abox-shim"
+
+
+[target.x86_64-unknown-linux-musl]
+# Static linking for the guest shim binary.
+rustflags = ["-C", "target-feature=+crt-static"]

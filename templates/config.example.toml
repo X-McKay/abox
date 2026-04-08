@@ -1,0 +1,33 @@
+# abox configuration
+#
+# Copy this file to ~/.abox/config.toml and customize.
+
+# Base directory for abox state (worktrees, snapshots, logs).
+# state_dir = "~/.abox"
+
+# Directory for runtime files (sockets, PIDs).
+# Defaults to `<state_dir>/run` (writable by the current user, no root needed).
+# Set to `/run/abox` for a system-wide install.
+# runtime_dir = "/run/abox"
+
+[vm_defaults]
+# Memory allocation per sandbox in MiB.
+memory_mib = 2048
+
+# Number of vCPUs per sandbox.
+vcpus = 2
+
+# Path to the guest root filesystem image.
+# Build one with: templates/build-guest-image.sh
+# image_path = "/var/lib/abox/images/base.raw"
+
+# Path to the kernel binary (vmlinux, not bzImage).
+# Download from Cloud Hypervisor releases or build your own.
+# kernel_path = "/var/lib/abox/kernel/vmlinux"
+
+[proxy]
+# Port for the HTTP egress proxy.
+egress_port = 18443
+
+# Directory containing policy TOML files.
+# policy_dir = "~/.abox/policies"
