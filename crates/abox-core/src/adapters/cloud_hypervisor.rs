@@ -22,6 +22,8 @@ pub struct CloudHypervisorAdapter {
 struct RunningVm {
     ch_child: Child,
     virtiofsd_child: Child,
+    meta_virtiofsd_child: Child,
+    meta_dir: PathBuf,
     api_socket: PathBuf,
     console_socket: PathBuf,
     #[allow(dead_code)]
@@ -56,42 +58,71 @@ impl CloudHypervisorAdapter {
 impl VmPort for CloudHypervisorAdapter {
     async fn start(&self, config: VmConfig) -> Result<VmInfo> {
         let virtiofs_socket = self.runtime_dir.join(format!("virtiofs-{}.sock", config.id));
+        let meta_socket = self.runtime_dir.join(format!("virtiofs-meta-{}.sock", config.id));
         let api_socket = self.runtime_dir.join(format!("ch-api-{}.sock", config.id));
         let console_socket = self.runtime_dir.join(format!("console-{}.sock", config.id));
         let vsock_socket = self.runtime_dir.join(format!("vsock-{}.sock", config.id));
+        let meta_dir = self.runtime_dir.join(format!("meta-{}", config.id));
+
+        // Stage boot metadata into meta_dir.
+        let meta = crate::boot_meta::BootMeta {
+            sandbox_id: config.id.clone(),
+            agent_command: config.agent_command.clone(),
+            env: config.env_vars.clone(),
+        };
+        meta.stage(&meta_dir)
+            .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
 
         // Clean up any stale sockets from a previous run
-        for sock in [&virtiofs_socket, &api_socket, &console_socket, &vsock_socket] {
+        for sock in [&virtiofs_socket, &meta_socket, &api_socket, &console_socket, &vsock_socket] {
             let _ = std::fs::remove_file(sock);
         }
 
-        // ── Step 1: Start virtiofsd ──
+        // ── Step 1: Start workspace virtiofsd ──
         // virtiofsd serves the git worktree to the VM via the vhost-user protocol.
-        // --sandbox=namespace puts virtiofsd in its own mount/pid namespace.
+        // --sandbox=none avoids namespace restrictions that require elevated privileges.
         // --cache=never avoids consuming host page cache (important at scale).
         let virtiofsd_child = Command::new("virtiofsd")
             .arg(format!("--socket-path={}", virtiofs_socket.display()))
             .arg(format!("--shared-dir={}", config.worktree_path.display()))
             .arg("--cache=never")
-            .arg("--sandbox=namespace")
+            .arg("--sandbox=none")
             .arg("--thread-pool-size=4")
             .kill_on_drop(true)
             .spawn()
-            .context("Failed to start virtiofsd. Is it installed?")?;
+            .context(
+                "Failed to start workspace virtiofsd. Run scripts/bootstrap_vm.sh to install it.",
+            )?;
 
         Self::wait_for_socket(&virtiofs_socket, 5000)
             .await
-            .context("virtiofsd socket did not appear within 5 seconds")?;
+            .context("workspace virtiofsd socket did not appear within 5 seconds")?;
+
+        // ── Step 1b: Start meta virtiofsd (read-only) ──
+        let meta_virtiofsd_child = Command::new("virtiofsd")
+            .arg(format!("--socket-path={}", meta_socket.display()))
+            .arg(format!("--shared-dir={}", meta_dir.display()))
+            .arg("--cache=never")
+            .arg("--sandbox=none")
+            .arg("--readonly")
+            .kill_on_drop(true)
+            .spawn()
+            .context("Failed to start meta virtiofsd")?;
+
+        Self::wait_for_socket(&meta_socket, 5000)
+            .await
+            .context("meta virtiofsd socket did not appear within 5 seconds")?;
 
         tracing::debug!(
             sandbox_id = %config.id,
-            socket = %virtiofs_socket.display(),
-            "virtiofsd started"
+            workspace_socket = %virtiofs_socket.display(),
+            meta_socket = %meta_socket.display(),
+            "virtiofsd up"
         );
 
         // ── Step 2: Start Cloud Hypervisor ──
         // --memory shared=on is REQUIRED for virtiofs (enables shared memory mapping).
-        // --fs connects the virtiofsd socket as a virtio-fs device with tag "workspace".
+        // --fs connects both virtiofsd sockets as virtio-fs devices.
         // --console socket connects the VM's serial console for `abox attach`.
         // --vsock allows the guest shim to communicate with the host proxy daemon.
         let ch_child = Command::new("cloud-hypervisor")
@@ -106,11 +137,16 @@ impl VmPort for CloudHypervisorAdapter {
             .arg("--kernel")
             .arg(config.kernel_path.display().to_string())
             .arg("--cmdline")
-            .arg("console=hvc0 root=/dev/vda1 rw")
+            .arg("console=hvc0 root=/dev/vda rw quiet")
             .arg("--fs")
             .arg(format!(
                 "tag=workspace,socket={},num_queues=1,queue_size=1024",
                 virtiofs_socket.display()
+            ))
+            .arg("--fs")
+            .arg(format!(
+                "tag=aboxmeta,socket={},num_queues=1,queue_size=512",
+                meta_socket.display()
             ))
             .arg("--vsock")
             .arg(format!("cid=3,socket={}", vsock_socket.display()))
@@ -118,7 +154,9 @@ impl VmPort for CloudHypervisorAdapter {
             .arg(format!("socket={}", console_socket.display()))
             .kill_on_drop(true)
             .spawn()
-            .context("Failed to start cloud-hypervisor. Is it installed?")?;
+            .context(
+                "Failed to start cloud-hypervisor. Run scripts/bootstrap_vm.sh to install it.",
+            )?;
 
         Self::wait_for_socket(&api_socket, 10000)
             .await
@@ -137,6 +175,8 @@ impl VmPort for CloudHypervisorAdapter {
         let running = RunningVm {
             ch_child,
             virtiofsd_child,
+            meta_virtiofsd_child,
+            meta_dir: meta_dir.clone(),
             api_socket: api_socket.clone(),
             console_socket: console_socket.clone(),
             config,
@@ -154,12 +194,18 @@ impl VmPort for CloudHypervisorAdapter {
             // Kill processes (in production, send shutdown via CH API first)
             let _ = vm.ch_child.kill().await;
             let _ = vm.virtiofsd_child.kill().await;
+            let _ = vm.meta_virtiofsd_child.kill().await;
 
             // Clean up socket files
-            for suffix in ["virtiofs", "ch-api", "console", "vsock"] {
+            for suffix in ["virtiofs", "virtiofs-meta", "ch-api", "console", "vsock"] {
                 let sock = self.runtime_dir.join(format!("{suffix}-{id}.sock"));
                 let _ = std::fs::remove_file(sock);
             }
+            // Task 7 will bind a per-VM proxy bridge socket here; clean it up too.
+            let _ = std::fs::remove_file(self.runtime_dir.join(format!("vsock-{id}.sock_5000")));
+
+            // Remove the staged boot metadata directory.
+            let _ = std::fs::remove_dir_all(&vm.meta_dir);
 
             tracing::info!(sandbox_id = id, "MicroVM stopped");
         } else {

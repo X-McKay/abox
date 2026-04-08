@@ -17,6 +17,7 @@
 pub mod adapters;
 pub mod boot_meta;
 pub mod config;
+pub mod console;
 pub mod error;
 pub mod policy;
 pub mod protocol;
