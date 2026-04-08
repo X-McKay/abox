@@ -28,10 +28,10 @@ When running multiple autonomous agents on a single codebase, you face three pro
 ## Getting Started
 
 ### Prerequisites
-- Linux host with KVM enabled (`/dev/kvm`)
+
+- Linux host with `/dev/kvm` accessible to your user
 - Rust toolchain (`cargo`)
-- Cloud Hypervisor (`cloud-hypervisor`)
-- virtiofsd (`virtiofsd`)
+- `just` command runner (`cargo install just`)
 
 ### Installation
 
@@ -39,7 +39,11 @@ When running multiple autonomous agents on a single codebase, you face three pro
 git clone https://github.com/X-McKay/abox.git
 cd abox
 cargo build --release
+just bootstrap-vm     # downloads the VMM, kernel, and builds the guest rootfs
 ```
+
+See [`docs/vm-setup.md`](docs/vm-setup.md) for the full setup walkthrough,
+including how to boot a real sandbox with `abox run --task X -- claude`.
 
 ### Configuration
 
