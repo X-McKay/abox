@@ -386,13 +386,16 @@ else
     expect "agent exits 0; audit log records sandbox_id=vm-e2e for the git call"
 
     # Run with a generous timeout so a stuck VM cannot hang the test.
-    if RUN_OUT=$(timeout 90 $ABOX run --task vm-e2e --base main -- \
-        /usr/local/bin/git status 2>&1); then
+    # Capture stdout+stderr to a file so we can also assert on the live
+    # console output (D4): the guest init banner must reach the host.
+    RUN_OUT_FILE="$SCRATCH/vm-e2e-run.out"
+    if timeout 90 $ABOX run --task vm-e2e --base main -- \
+        /usr/local/bin/git status >"$RUN_OUT_FILE" 2>&1; then
         pass "vm boot + agent exec"
     else
         rc=$?
         fail "vm boot + agent exec" "exit=$rc; tail of output below"
-        echo "$RUN_OUT" | tail -20 | sed "s/^/    /"
+        tail -20 "$RUN_OUT_FILE" | sed "s/^/    /"
     fi
 
     AUDIT_VM="$SCRATCH/state/logs/audit.jsonl"
@@ -401,6 +404,17 @@ else
     else
         fail "audit log attribution from real guest" \
              "no vm-e2e entries in $AUDIT_VM"
+    fi
+
+    # D4: assert the guest's init banner ('abox guest init: online')
+    # actually reached the orchestrator's stdout. The console streamer
+    # is the channel; without this assertion phase 6 could pass even
+    # when console output is silently dropped.
+    if grep -q "abox guest init: online" "$RUN_OUT_FILE"; then
+        pass "guest init banner reached host stdout"
+    else
+        fail "console streaming" "no 'guest init: online' banner in run output"
+        tail -20 "$RUN_OUT_FILE" | sed "s/^/    /"
     fi
 
     # Cleanup the leftover sandbox state so the test can be re-run.
