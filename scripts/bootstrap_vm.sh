@@ -13,6 +13,30 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ABOX_VM_DIR="${ABOX_VM_DIR:-$HOME/.abox/vm}"
 
+# ─── Argument parsing ────────────────────────────────────────────────────
+DO_SYMLINK=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-symlink)
+            DO_SYMLINK=0
+            ;;
+        --help|-h)
+            cat <<HELP
+Usage: $(basename "$0") [--no-symlink]
+
+  --no-symlink   Do NOT create symlinks in ~/.local/bin. You will need
+                 to add $ABOX_VM_DIR to your PATH manually.
+HELP
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $arg" >&2
+            echo "Try '$(basename "$0") --help'" >&2
+            exit 1
+            ;;
+    esac
+done
+
 source "$REPO_ROOT/scripts/lib/download.sh"
 
 mkdir -p "$ABOX_VM_DIR" "$REPO_ROOT/vendor"
@@ -115,3 +139,28 @@ GUEST_INIT="$REPO_ROOT/guest/init.sh" \
 echo
 echo "Bootstrap complete. Files in $ABOX_VM_DIR:"
 ls -lh "$ABOX_VM_DIR"
+
+# ─── Install convenience symlinks into ~/.local/bin ──────────────────────
+if [[ "$DO_SYMLINK" == "1" ]]; then
+    LOCAL_BIN="$HOME/.local/bin"
+    mkdir -p "$LOCAL_BIN"
+    echo
+    echo "Installing convenience symlinks in $LOCAL_BIN..."
+    for bin in cloud-hypervisor ch-remote virtiofsd; do
+        ln -sf "$ABOX_VM_DIR/$bin" "$LOCAL_BIN/$bin"
+        echo "  $LOCAL_BIN/$bin -> $ABOX_VM_DIR/$bin"
+    done
+
+    # Warn if ~/.local/bin isn't on PATH.
+    case ":$PATH:" in
+        *":$LOCAL_BIN:"*)
+            : # already on PATH
+            ;;
+        *)
+            echo
+            echo "WARNING: $LOCAL_BIN is not on your PATH."
+            echo "Add this to your shell profile (e.g., ~/.bashrc):"
+            echo '  export PATH="$HOME/.local/bin:$PATH"'
+            ;;
+    esac
+fi

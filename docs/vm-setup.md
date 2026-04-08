@@ -37,13 +37,19 @@ have:
   rootfs.raw         # guest root filesystem (96 MiB sparse)
 ```
 
-Add the binaries to your PATH for the current shell (one-time):
+By default, `bootstrap_vm.sh` symlinks `cloud-hypervisor`,
+`ch-remote`, and `virtiofsd` into `~/.local/bin/` so they're
+discoverable on a typical PATH. If `~/.local/bin` is not already on
+your PATH, the script warns and prints the one-line `export` to add
+to your shell profile.
+
+To opt out (e.g., for a shared install you want to manage manually),
+pass `--no-symlink` and add `~/.abox/vm` to `PATH` yourself:
 
 ```bash
+./scripts/bootstrap_vm.sh --no-symlink
 export PATH="$HOME/.abox/vm:$PATH"
 ```
-
-…or symlink them into `~/.local/bin`.
 
 Drop the default policy and config into `~/.abox/`:
 
