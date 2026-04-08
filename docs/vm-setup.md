@@ -115,17 +115,51 @@ re-running the bootstrap is fast (seconds) and offline-friendly.
 
 **`Permission denied (os error 13)` on `/dev/kvm`**
 Your user isn't in the `kvm` group. Run `sudo usermod -aG kvm $USER`,
-log out, and back in.
+log out, and back in. Verify with `ls -la /dev/kvm` (look for the
+`+` ACL marker or your username in the group).
 
 **`cloud-hypervisor: command not found` when running `abox run`**
-You haven't added `~/.abox/vm/` to `PATH`. Either export it in your
-shell or symlink the binaries into `~/.local/bin/`.
+The bootstrap script symlinks the VMM binaries into `~/.local/bin/`
+by default, but `~/.local/bin` may not be on your `PATH`. Either
+add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile,
+or `export PATH="$HOME/.abox/vm:$PATH"` if you used `--no-symlink`.
+
+**`x86_64-unknown-linux-musl rust target is not installed`**
+The shim is built as a static-musl binary so it can run inside the
+minimal Alpine guest rootfs. Either install the target manually:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+```
+
+…or re-run `bootstrap_vm.sh --yes` to let the script install it.
 
 **Phase 6 skipped in `just e2e-vm`**
 Run `just bootstrap-vm` first. It's idempotent — safe to re-run.
+Phase 6 is gated on `~/.abox/vm/cloud-hypervisor` and `rootfs.raw`
+existing.
 
 **`bootstrap_vm.sh` fails with a checksum mismatch**
 An upstream artifact has been re-published or the download was
 truncated. Check your network, delete the stale file in `vendor/`,
 and re-run. If the problem persists, the pinned version may need to
 be bumped — file an issue.
+
+**`virtiofsd: Error creating listener: socket error: path must be shorter than SUN_LEN`**
+Your runtime_dir path is too long. Linux Unix-domain socket paths
+are capped at 108 bytes including a per-sandbox suffix like
+`vfs-status-<task-id>.sock`. Move `runtime_dir` to a shorter
+location (e.g., `/tmp/abox-<user>` or `~/.abox/r`) in your config
+file:
+
+```toml
+runtime_dir = "/home/you/.abox/r"
+```
+
+**`abox run` finishes too fast and reports exit 1 with a "rolled back" warning**
+The VM started but the guest never wrote `/abox-status/exit-code`.
+Most common cause: the rootfs is stale. Re-run `just bootstrap-vm`
+to rebuild the rootfs with the current `guest/init.sh`. If that
+doesn't fix it, capture the console with
+`RUST_LOG=abox_core=debug abox run --task X -- /bin/sh -c "echo hi"`
+and look for kernel-panic / virtiofsd-error lines in the output.

@@ -1454,3 +1454,79 @@ Expected: output streams to your terminal, agent runs inside the guest, `git sta
 **Type consistency:** `BootMeta` fields, `ProxyBridge::new` signature, `SandboxAttribution` variants, `AuditSink` trait method — all match across tasks.
 
 **Reversibility:** every task ends in a single git commit, so any task can be reverted independently.
+
+---
+
+## Retrospective (added 2026-04-08)
+
+This plan was executed in mid-April 2026 and merged as the
+`vm-e2e-mvp` branch. The follow-up branch `vm-e2e-hardening` (see
+[`2026-04-08-vm-e2e-hardening.md`](2026-04-08-vm-e2e-hardening.md))
+drained the P0/P1 backlog items it left behind. Lessons learned:
+
+**What worked well**
+
+- The per-VM vsock bridge attribution model: every CLI request
+  arriving on `<vsock>_5000` provably came from one specific guest.
+  Zero ambiguity in the audit log for the CLI proxy path.
+- The bootstrap-vm download caching. Re-running bootstrap is
+  effectively instant after the first pull and recovers cleanly
+  from a partial download via SHA256 verification.
+- The two-virtiofs share design (workspace + aboxmeta) was the
+  right call vs. cramming boot metadata onto the cmdline. The
+  hardening branch added a third share (`aboxstatus`) for exit
+  code propagation by following the same pattern.
+
+**What didn't go quite as planned**
+
+- **Task 9's scope absorbed real fixes** in
+  `crates/abox-core/src/adapters/cloud_hypervisor.rs`,
+  `crates/abox-core/src/proxy_bridge.rs`,
+  `crates/abox-core/src/sandbox.rs`, and
+  `crates/abox-shim/src/main.rs`. The plan listed those files under
+  Task 6/7/8. This is normal during final integration but the
+  task-level breakdown didn't anticipate it. Future plans should
+  budget a final "integration + bug fix" task.
+- **F2 (exit code propagation)** was deliberately deferred from
+  this plan even though it's a core correctness issue. The
+  hardening branch closed it via a new `aboxstatus` virtiofs share
+  — see [ADR-002](../decisions/002-aboxstatus-share.md). With
+  hindsight, F2 should have been in this plan; the workaround
+  (`Ok(0)` placeholder) was load-bearing in a way the plan didn't
+  signal clearly.
+- **F3 (HTTPS credential injection)** also stayed deferred and
+  remains deferred — it is a multi-day TLS-termination project
+  with its own standalone spec at
+  [`2026-04-08-credential-injection.md`](2026-04-08-credential-injection.md).
+- **Phase 6 gating** was the right call (CI runners don't have
+  `/dev/kvm`), but it masked regressions until someone ran the
+  test locally with a bootstrap. The hardening branch added CI
+  for phases 1-5 but phase 6 still needs manual verification on a
+  KVM-capable host. A future ARM64 / nested-virt runner would
+  close this gap.
+- **Linux SUN_LEN (108 bytes)** for unix-domain socket paths bit
+  us when the hardening branch added a third virtiofs socket. The
+  fix was to shorten all three prefixes from `virtiofs-*` to
+  `vfs-*` — should have been the original choice.
+
+**Hardening-branch follow-ups (executed 2026-04-08)**
+
+The 13 commits on `vm-e2e-hardening` add to the original 16 from
+this plan. They land:
+
+- F2 (exit code) via the third `aboxstatus` virtiofs share
+- D5 (console graceful drain via Notify-based shutdown)
+- S1 (policy global-option bypass parser)
+- S3 + S4 (`forward_ssh_agent` wiring + shim `/proc/self/cwd`)
+- F1 (`abox run --detach` via re-exec)
+- D1 (bootstrap symlinks into ~/.local/bin)
+- D2 (timing constants lifted into `VmRuntimeTuning`)
+- D3 (`--yes` opt-in for rust target install)
+- D4 (phase-6 console banner assertion)
+- D6 (GitHub Actions CI workflow)
+- H3 (e2e trap on INT/TERM + stale scratch sweep)
+- ADR-002 documenting the `aboxstatus` design
+- This retrospective
+
+F4 (template create wiring) and F5 (TUI dashboard refresh) stayed
+deferred — both are P2 cosmetic items.
