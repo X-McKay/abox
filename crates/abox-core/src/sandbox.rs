@@ -94,6 +94,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             vcpus: params.vcpus.unwrap_or(self.config.vm_defaults.vcpus),
             user: params.user,
             env_vars: params.env_vars,
+            agent_command: params.command.clone(),
             proxy_port: self.config.proxy.egress_port,
         };
 

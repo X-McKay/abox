@@ -24,6 +24,8 @@ pub struct VmConfig {
     pub user: Option<String>,
     /// Environment variables to set inside the VM.
     pub env_vars: Vec<(String, String)>,
+    /// Command (argv-style) to exec inside the guest after boot.
+    pub agent_command: Vec<String>,
     /// Port of the HTTP egress proxy on the host.
     pub proxy_port: u16,
 }
