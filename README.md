@@ -56,6 +56,8 @@ re-running it is fast (seconds, not minutes). See
 - [`docs/vm-setup.md`](docs/vm-setup.md) — VM stack installation +
   troubleshooting
 - [`docs/decisions/`](docs/decisions/) — architecture decision records
+- [`docs/future-work.md`](docs/future-work.md) — forward-looking
+  roadmap; what's next and why
 
 ### Configuration
 

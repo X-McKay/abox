@@ -34,6 +34,10 @@ Each item has a **priority** (P0 = next up, P1 = soon, P2 = nice to have), a rou
 
 The detailed write-ups for each item are kept below as a running history.
 
+For forward-looking guidance — what to work on next, in what order,
+plus newly-discovered items and longer-term ideas — see
+[`docs/future-work.md`](../future-work.md).
+
 ---
 
 ## Functional gaps
