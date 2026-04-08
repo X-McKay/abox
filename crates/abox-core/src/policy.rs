@@ -148,8 +148,25 @@ impl PolicyEngine {
     /// # Arguments
     /// * `command` - The binary name (e.g., `git`).
     /// * `args` - The full argument list (e.g., `["push", "origin", "main"]`).
+    ///
+    /// For `git` specifically, this strips a known set of global options
+    /// (`-c key=val`, `-C path`, `--git-dir`, `--work-tree`, `--no-pager`,
+    /// etc.) from the front of `args` before matching against the
+    /// allow/deny regex list. Any other leading dash-prefixed token is
+    /// treated as an **unknown** global option and the request is denied.
+    ///
+    /// Without this stripping, a request like
+    /// `git -c color.ui=always status` would not match an allow pattern
+    /// anchored on `^status`, because the joined string would begin with
+    /// `-c color.ui=always`. The fix lets ordinary workflows through while
+    /// keeping the deny list tight: an attacker cannot inject extra tokens
+    /// before the subcommand without explicitly being on the allow-list.
     pub fn evaluate_cli(&self, command: &str, args: &[String]) -> Decision {
-        let args_str = args.join(" ");
+        let stripped: Vec<String> = match strip_global_options(command, args) {
+            Ok(s) => s,
+            Err(reason) => return Decision::Deny(reason),
+        };
+        let args_str = stripped.join(" ");
 
         // Find the matching policy
         let policy = self.cli_policies.iter().find(|p| p.command == command);
@@ -204,6 +221,71 @@ impl PolicyEngine {
             Err(Decision::Deny(format!("No egress rule for domain '{domain}'")))
         }
     }
+}
+
+/// Strip known global options from the front of a command's args so the
+/// subcommand (and its own args) can be matched against the allow/deny
+/// regex list. Returns an error `reason` if an unknown option-like token
+/// appears before the subcommand — this keeps the allow-list tight.
+///
+/// Currently knows about git's global options. Non-git commands pass
+/// through unchanged.
+fn strip_global_options(command: &str, args: &[String]) -> Result<Vec<String>, String> {
+    if command != "git" {
+        return Ok(args.to_vec());
+    }
+
+    // Git's documented global options that take a separate value (two tokens).
+    const TWO_TOKEN: &[&str] = &["-c", "-C", "--git-dir", "--work-tree", "--namespace"];
+    // Git's documented global options that are flags (one token, no value).
+    const ONE_TOKEN_FLAGS: &[&str] = &[
+        "--no-pager",
+        "-p",
+        "--paginate",
+        "--no-optional-locks",
+        "--bare",
+        "--no-replace-objects",
+    ];
+    // Long options that use `--flag=value` (one token).
+    const ONE_TOKEN_EQ_PREFIX: &[&str] =
+        &["--git-dir=", "--work-tree=", "--namespace=", "--super-prefix=", "--config-env="];
+
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i].as_str();
+
+        // Subcommand reached (first token not starting with '-').
+        if !tok.starts_with('-') {
+            return Ok(args[i..].to_vec());
+        }
+
+        if TWO_TOKEN.contains(&tok) {
+            if i + 1 >= args.len() {
+                return Err(format!("git global option '{tok}' requires a value"));
+            }
+            i += 2;
+            continue;
+        }
+
+        if ONE_TOKEN_FLAGS.contains(&tok) {
+            i += 1;
+            continue;
+        }
+
+        if ONE_TOKEN_EQ_PREFIX.iter().any(|p| tok.starts_with(p)) {
+            i += 1;
+            continue;
+        }
+
+        // Unknown global option: deny rather than silently strip. This is a
+        // deliberate deny-by-default — future git versions that add new
+        // global flags will need an explicit update here, which is the
+        // correct place to apply scrutiny.
+        return Err(format!("Unknown git global option '{tok}' not in allow-list"));
+    }
+
+    // No subcommand at all — treat as deny.
+    Err("git invocation has no subcommand".to_string())
 }
 
 /// Match a domain pattern against a domain.
@@ -344,5 +426,116 @@ mod tests {
         assert!(!domain_matches("*.amazonaws.com", "amazonaws.com"));
         assert!(domain_matches("api.anthropic.com", "api.anthropic.com"));
         assert!(!domain_matches("api.anthropic.com", "evil.anthropic.com"));
+    }
+
+    // ─── Global-option bypass tests (S1) ────────────────────────────────────
+
+    #[test]
+    fn test_git_force_push_via_dash_c_is_denied() {
+        // Bypass attempt: prepend `-c key=val` global options so the joined
+        // args_str begins with "-c ..." rather than "push", defeating the
+        // ^push\s+--force regex and slipping past the deny list.
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let decision = engine.evaluate_cli(
+            "git",
+            &["-c", "core.hooks=./evil", "push", "--force", "origin", "main"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            matches!(decision, Decision::Deny(_)),
+            "git -c ... push --force should be denied, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn test_git_force_push_via_dash_big_c_is_denied() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let decision = engine.evaluate_cli(
+            "git",
+            &["-C", "/tmp/evil", "push", "--force", "origin", "main"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            matches!(decision, Decision::Deny(_)),
+            "git -C <path> push --force should be denied, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn test_git_status_via_dash_c_is_still_allowed() {
+        // Tight on denies, still permissive for ordinary workflows.
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let decision = engine.evaluate_cli(
+            "git",
+            &["-c", "color.ui=always", "status"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn test_git_status_via_dash_big_c_is_still_allowed() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let decision = engine.evaluate_cli(
+            "git",
+            &["-C", "/some/path", "status"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn test_git_unknown_global_option_denied() {
+        // Document the assumption: unknown global options are rejected
+        // rather than silently stripped. Future git versions that add
+        // new globals need an explicit allow-list update.
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let decision = engine.evaluate_cli(
+            "git",
+            &["--exec-path=/evil", "status"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            matches!(decision, Decision::Deny(_)),
+            "unknown global opts should be denied, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn test_git_no_subcommand_denied() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let decision = engine.evaluate_cli(
+            "git",
+            &["-c", "color.ui=always"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(decision, Decision::Deny(_)));
+    }
+
+    #[test]
+    fn test_non_git_command_unaffected_by_global_strip() {
+        // Global-option stripping is git-only; aws + others should
+        // pass straight to the regex match.
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let decision = engine.evaluate_cli(
+            "aws",
+            &["s3", "ls", "s3://my-bucket"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(decision, Decision::Allow);
     }
 }
