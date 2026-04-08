@@ -269,10 +269,20 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             }
         });
 
-        // Spawn the console streamer.
+        // Spawn the console streamer with a shutdown notify so it can drain
+        // the last bytes of guest output gracefully when the VM exits,
+        // instead of being abort()'d mid-read and dropping the trailing
+        // poweroff banner on slow systems.
         let console_log = self.config.runtime_dir().join(format!("console-{task_id}.log"));
+        let console_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let console_shutdown_for_task = console_shutdown.clone();
         let console_handle = tokio::spawn(async move {
-            if let Err(e) = Box::pin(crate::console::tail_to_stdout(&console_log)).await {
+            if let Err(e) = Box::pin(crate::console::tail_to_stdout_until(
+                &console_log,
+                console_shutdown_for_task,
+            ))
+            .await
+            {
                 tracing::debug!(error = %e, "console stream ended");
             }
         });
@@ -289,7 +299,11 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         }
 
         bridge_handle.abort();
-        console_handle.abort();
+        // Signal the console tailer to drain and exit. Wait briefly for it
+        // to finish before we move on; if it stays stuck (shouldn't happen
+        // in practice), the JoinHandle is dropped and the task is cancelled.
+        console_shutdown.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), console_handle).await;
 
         // Read the exit code the guest wrote into /abox-status/exit-code.
         // If the status dir isn't available (in-memory adapter) or the file
