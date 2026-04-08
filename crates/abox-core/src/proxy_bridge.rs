@@ -256,7 +256,7 @@ impl AuditSink for FileAuditSink {
             "result_code": exit_code,
         });
         if let Ok(mut w) = self.writer.lock() {
-            let _ = writeln!(w, "{}", entry);
+            let _ = writeln!(w, "{entry}");
             let _ = w.flush();
         }
         // Also emit through tracing for visibility.

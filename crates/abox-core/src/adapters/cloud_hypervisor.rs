@@ -269,7 +269,7 @@ impl VmPort for CloudHypervisorAdapter {
             // which is what sandbox.rs's polling loop watches for.
             let mut vms = self.vms.lock().await;
             vms.remove(id);
-            bail!("VM '{}' has exited", id);
+            bail!("VM '{id}' has exited");
         }
         Ok(VmInfo {
             id: id.to_string(),
