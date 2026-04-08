@@ -3,10 +3,36 @@
 **Created:** 2026-04-08
 **Source branch:** `vm-e2e-mvp` (15 commits, develop → vm-e2e-mvp-mvp)
 **Related plan:** [`docs/plans/2026-04-07-vm-end-to-end-mvp.md`](../plans/2026-04-07-vm-end-to-end-mvp.md)
+**Hardening branch:** `vm-e2e-hardening` (executed 2026-04-08; see [`docs/plans/2026-04-08-vm-e2e-hardening.md`](../plans/2026-04-08-vm-e2e-hardening.md))
 
 The VM MVP is merged/mergeable with a real live-VM end-to-end test (`just e2e-vm` phase 6) verifying the happy path: boot a Cloud Hypervisor microVM, exec a guest command, route its `git`/`gh`/`aws` through the host policy proxy with per-sandbox attribution, and clean up on exit. Everything in this file was **explicitly deferred** (either in the plan itself, noted by reviewers, or discovered during implementation) and is waiting for a future sprint.
 
 Each item has a **priority** (P0 = next up, P1 = soon, P2 = nice to have), a rough **effort** estimate (S / M / L), and a **why** explaining the deferral.
+
+## Status (updated 2026-04-08 after vm-e2e-hardening)
+
+| Item | Priority | Effort | Status |
+|---|---|---|---|
+| F1. `abox run --detach` | P1 | S | **DONE** in `af6a5cd` |
+| F2. Agent exit code always 0 | P0 | S | **DONE** in `7660592` (see [ADR-002](../decisions/002-aboxstatus-share.md)) |
+| F3. HTTPS credential injection | P0 | L | **DEFERRED** — spec at [`docs/plans/2026-04-08-credential-injection.md`](../plans/2026-04-08-credential-injection.md) |
+| F4. `abox template create` stub | P2 | M | **OPEN** (deferred from this hardening branch) |
+| F5. TUI dashboard never refreshes | P2 | S | **OPEN** (deferred from this hardening branch) |
+| S1. Policy regex bypass | P1 | M | **DONE** in `3beec80` |
+| S2. Egress audit attribution | P1 | S | **OPEN** (blocked on F3) |
+| S3. `forward_ssh_agent` not enforced | P2 | S | **DONE** in `0600339` |
+| S4. shim `getcwd()` fallback | P2 | S | **DONE** in `0600339` |
+| D1. Bootstrap PATH symlinks | P1 | S | **DONE** in `702644c` |
+| D2. Hardcoded timing constants | P2 | S | **DONE** in `1426089` |
+| D3. Bootstrap musl target opt-in | P2 | S | **DONE** in `09130ba` |
+| D4. E2E phase 6 console assertion | P2 | S | **DONE** in `836add6` |
+| D5. Console tail exit signal | P1 | S | **DONE** in `ff37d35` |
+| D6. CI workflow | P1 | S | **DONE** in `43d4aae` |
+| H1. Squash 15 commits before merge | P2 | S | **OPEN** (controller preference) |
+| H2. Plan doesn't reflect Task 9 scope | P2 | S | **DONE** — retrospective added to plan in `7cda252` |
+| H3. E2E `.scratch/` cleanup robustness | P2 | S | **DONE** in `df475be` |
+
+The detailed write-ups for each item are kept below as a running history.
 
 ---
 
