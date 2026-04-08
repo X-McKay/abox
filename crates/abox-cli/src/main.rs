@@ -7,7 +7,7 @@ use abox_core::adapters::cloud_hypervisor::CloudHypervisorAdapter;
 use abox_core::adapters::git2_workspace::Git2Workspace;
 use abox_core::config::AboxConfig;
 use abox_core::sandbox::SandboxOrchestrator;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -86,6 +86,26 @@ async fn main() -> Result<()> {
         return tui::dashboard::run_dashboard(&mut state);
     }
 
+    // Load the policy engine. If no policy file exists, fall back to a
+    // hard deny-all policy with a warning.
+    let policy_path = config.proxy.policy_dir.join("default.toml");
+    let policy = if policy_path.exists() {
+        abox_core::policy::PolicyEngine::from_file(&policy_path)
+            .with_context(|| format!("Failed to load policy from {}", policy_path.display()))?
+    } else {
+        tracing::warn!(
+            path = %policy_path.display(),
+            "No policy file found, using deny-all defaults"
+        );
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "deny".to_string(),
+            default_egress_action: "deny".to_string(),
+        })?
+    };
+    let policy = std::sync::Arc::new(policy);
+
     // Build the orchestrator
     let repo_path = cli.repo.canonicalize()?;
     let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
@@ -93,7 +113,9 @@ async fn main() -> Result<()> {
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm_manager);
 
     match cli.command {
-        Commands::Run(args) => commands::run::execute(args, &orchestrator).await,
+        Commands::Run(args) => {
+            commands::run::execute(args, &orchestrator, std::sync::Arc::clone(&policy)).await
+        }
         Commands::List => commands::list::execute(&orchestrator).await,
         Commands::Attach(args) => commands::attach::execute(args, &orchestrator).await,
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,

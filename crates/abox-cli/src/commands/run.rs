@@ -49,6 +49,7 @@ pub struct RunArgs {
 pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
+    policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
 ) -> Result<()> {
     let env_vars: Vec<(String, String)> = args
         .env_vars
@@ -72,15 +73,13 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         command: args.command,
     };
 
-    let status = orchestrator.create_sandbox(params).await?;
+    println!("Sandbox '{}' starting...", args.task);
+    let exit_code = orchestrator.run_sandbox(params, policy).await?;
 
-    println!("Sandbox '{}' created:", status.id);
-    println!("  Branch:   {}", status.branch);
-    println!("  Worktree: {}", status.worktree_path);
-    println!("  VM PID:   {}", status.vm_pid);
-    println!("  State:    {}", status.vm_state);
-    println!();
-    println!("Attach with: abox attach {}", args.task);
-
-    Ok(())
+    if exit_code == 0 {
+        println!("\nSandbox '{}' exited cleanly.", args.task);
+        Ok(())
+    } else {
+        anyhow::bail!("agent in sandbox '{}' exited with code {}", args.task, exit_code)
+    }
 }
