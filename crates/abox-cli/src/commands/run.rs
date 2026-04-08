@@ -80,6 +80,12 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         println!("\nSandbox '{}' exited cleanly.", args.task);
         Ok(())
     } else {
-        anyhow::bail!("agent in sandbox '{}' exited with code {}", args.task, exit_code)
+        // Surface the agent's exact exit code to the OS. We intentionally
+        // bypass anyhow here: a non-zero agent exit is not an abox error —
+        // it's a successful run of a failing program, and users scripting
+        // `abox run` rely on the exit code matching what they would have
+        // seen if they had run the command directly on the host.
+        eprintln!("\nSandbox '{}' exited with code {}.", args.task, exit_code);
+        std::process::exit(exit_code);
     }
 }

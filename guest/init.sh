@@ -4,10 +4,12 @@
 # Responsibilities:
 #   1. Mount /proc, /sys, /dev
 #   2. Mount /workspace from virtiofs (the git worktree)
-#   3. Mount /abox-meta from virtiofs (boot metadata)
-#   4. Bridge /run/abox-proxy.sock <-> vsock host:5000 via socat
-#   5. Exec the agent command via /abox-meta/runner.sh
-#   6. Power off cleanly so the host orchestrator unblocks
+#   3. Mount /abox-meta from virtiofs (boot metadata, read-mostly)
+#   4. Mount /abox-status from virtiofs (read-write; for exit-code reporting)
+#   5. Bridge /run/abox-proxy.sock <-> vsock host:5000 via socat
+#   6. Exec the agent command via /abox-meta/runner.sh
+#   7. Write the agent's exit code to /abox-status/exit-code
+#   8. Power off cleanly so the host orchestrator unblocks
 
 set -e
 
@@ -46,17 +48,33 @@ else
     echo "WARNING: $SOCAT_BIN not found; proxy bridge unavailable"
 fi
 
+# Status share (writable) for reporting the agent's exit code back to host.
+mkdir -p /abox-status
+mount -t virtiofs aboxstatus /abox-status 2>/dev/null || \
+    echo "WARNING: failed to mount aboxstatus virtiofs"
+
 if [ -f /abox-meta/runner.sh ]; then
     echo "==> running /abox-meta/runner.sh"
-    sh /abox-meta/runner.sh || true
+    # `set -e` is in effect; use an if-conditional so a non-zero runner
+    # exit does NOT terminate init.sh before we report the exit code.
+    if sh /abox-meta/runner.sh; then
+        RC=0
+    else
+        RC=$?
+    fi
 else
     echo "==> no /abox-meta/runner.sh found"
+    RC=127
 fi
+
+# Report exit code back to host through the writable status share.
+echo "$RC" > /abox-status/exit-code 2>/dev/null || \
+    echo "WARNING: could not write /abox-status/exit-code"
+sync
 
 # Tear down the socat bridge (best-effort).
 kill "$SOCAT_PID" 2>/dev/null || true
 
-sync
 echo
-echo "==> abox guest init: poweroff"
+echo "==> abox guest init: poweroff (rc=$RC)"
 poweroff -f

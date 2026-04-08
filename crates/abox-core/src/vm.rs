@@ -85,4 +85,14 @@ pub trait VmPort: Send + Sync {
 
     /// List all managed VMs.
     async fn list(&self) -> anyhow::Result<Vec<VmInfo>>;
+
+    /// Return the path to the status directory for a given sandbox id.
+    ///
+    /// Adapters that back onto a real hypervisor (e.g. Cloud Hypervisor)
+    /// stage a read-write virtiofs share here and point the guest at it so
+    /// guest init can write `exit-code` before poweroff. In-memory / mock
+    /// adapters don't have a status dir and return `None`.
+    fn status_dir(&self, _id: &str) -> Option<PathBuf> {
+        None
+    }
 }

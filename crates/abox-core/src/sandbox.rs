@@ -291,6 +291,20 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         bridge_handle.abort();
         console_handle.abort();
 
-        Ok(0)
+        // Read the exit code the guest wrote into /abox-status/exit-code.
+        // If the status dir isn't available (in-memory adapter) or the file
+        // is missing/malformed, fall back to 0.
+        let exit_code = self
+            .vm_manager
+            .status_dir(&task_id)
+            .and_then(|d| crate::adapters::cloud_hypervisor::read_exit_code(&d))
+            .unwrap_or(0);
+
+        // Tear down the status dir now that we've read it.
+        if let Some(sd) = self.vm_manager.status_dir(&task_id) {
+            let _ = std::fs::remove_dir_all(&sd);
+        }
+
+        Ok(exit_code)
     }
 }

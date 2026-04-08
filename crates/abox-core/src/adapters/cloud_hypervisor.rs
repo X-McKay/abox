@@ -23,11 +23,24 @@ struct RunningVm {
     ch_child: Child,
     virtiofsd_child: Child,
     meta_virtiofsd_child: Child,
+    status_virtiofsd_child: Child,
     meta_dir: PathBuf,
+    status_dir: PathBuf,
     api_socket: PathBuf,
     console_socket: PathBuf,
     #[allow(dead_code)]
     config: VmConfig,
+}
+
+/// Read the guest agent's exit code from a staged status directory.
+///
+/// The guest init script writes the agent's exit status to
+/// `<status_dir>/exit-code` as a single-line integer before poweroff.
+/// Returns `None` if the file is missing (the VM crashed or was killed
+/// before writing) or if the file contents don't parse as an i32.
+pub fn read_exit_code(status_dir: &std::path::Path) -> Option<i32> {
+    let contents = std::fs::read_to_string(status_dir.join("exit-code")).ok()?;
+    contents.trim().parse::<i32>().ok()
 }
 
 impl CloudHypervisorAdapter {
@@ -45,8 +58,13 @@ impl CloudHypervisorAdapter {
     ///
     /// Called from both `stop()` (explicit teardown) and `info()` (natural
     /// exit detection) so cleanup always runs regardless of how the VM ends.
-    fn cleanup_vm_files(&self, id: &str, vm: &RunningVm) {
-        for suffix in ["virtiofs", "virtiofs-meta", "ch-api", "vsock"] {
+    ///
+    /// `remove_status_dir` controls whether the staged status directory is
+    /// also deleted. `info()` must pass `false` so `run_sandbox` can still
+    /// read `exit-code` from it after the VM exits; `stop()` and
+    /// `run_sandbox` (after reading the file) pass `true`.
+    fn cleanup_vm_files(&self, id: &str, vm: &RunningVm, remove_status_dir: bool) {
+        for suffix in ["vfs", "vfs-meta", "vfs-status", "ch-api", "vsock"] {
             let sock = self.runtime_dir.join(format!("{suffix}-{id}.sock"));
             let _ = std::fs::remove_file(sock);
         }
@@ -54,6 +72,9 @@ impl CloudHypervisorAdapter {
         let _ = std::fs::remove_file(&vm.console_socket);
         let _ = std::fs::remove_file(self.runtime_dir.join(format!("vsock-{id}.sock_5000")));
         let _ = std::fs::remove_dir_all(&vm.meta_dir);
+        if remove_status_dir {
+            let _ = std::fs::remove_dir_all(&vm.status_dir);
+        }
     }
 
     /// Wait for a Unix socket file to appear on disk.
@@ -73,13 +94,18 @@ impl CloudHypervisorAdapter {
 
 impl VmPort for CloudHypervisorAdapter {
     async fn start(&self, config: VmConfig) -> Result<VmInfo> {
-        let virtiofs_socket = self.runtime_dir.join(format!("virtiofs-{}.sock", config.id));
-        let meta_socket = self.runtime_dir.join(format!("virtiofs-meta-{}.sock", config.id));
+        // NB: socket path prefixes are deliberately short ("vfs-", "vfs-meta-",
+        // "vfs-status-") so the fully-qualified path stays under the Linux
+        // SUN_LEN limit (108 bytes) even for long scratch dirs + task ids.
+        let virtiofs_socket = self.runtime_dir.join(format!("vfs-{}.sock", config.id));
+        let meta_socket = self.runtime_dir.join(format!("vfs-meta-{}.sock", config.id));
+        let status_socket = self.runtime_dir.join(format!("vfs-status-{}.sock", config.id));
         let api_socket = self.runtime_dir.join(format!("ch-api-{}.sock", config.id));
         // cloud-hypervisor v44 supports file= for console but not socket=.
         let console_socket = self.runtime_dir.join(format!("console-{}.log", config.id));
         let vsock_socket = self.runtime_dir.join(format!("vsock-{}.sock", config.id));
         let meta_dir = self.runtime_dir.join(format!("meta-{}", config.id));
+        let status_dir = self.runtime_dir.join(format!("status-{}", config.id));
 
         // Stage boot metadata into meta_dir.
         let meta = crate::boot_meta::BootMeta {
@@ -90,8 +116,15 @@ impl VmPort for CloudHypervisorAdapter {
         meta.stage(&meta_dir)
             .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
 
+        // Stage the status dir for the writable aboxstatus virtiofs share.
+        std::fs::create_dir_all(&status_dir)
+            .with_context(|| format!("Failed to create status dir {}", status_dir.display()))?;
+        // Pre-create an empty exit-code file so virtiofsd has something to serve
+        // and the guest can truncate it without permission errors.
+        let _ = std::fs::write(status_dir.join("exit-code"), "");
+
         // Clean up any stale sockets/files from a previous run
-        for sock in [&virtiofs_socket, &meta_socket, &api_socket, &vsock_socket] {
+        for sock in [&virtiofs_socket, &meta_socket, &status_socket, &api_socket, &vsock_socket] {
             let _ = std::fs::remove_file(sock);
         }
         let _ = std::fs::remove_file(&console_socket);
@@ -132,10 +165,27 @@ impl VmPort for CloudHypervisorAdapter {
             .await
             .context("meta virtiofsd socket did not appear within 5 seconds")?;
 
+        // ── Step 1c: Start status virtiofsd (read-write) ──
+        // This share is writable from inside the guest so `init.sh` can
+        // report the agent's exit code back to the host via a staged file.
+        let status_virtiofsd_child = Command::new("virtiofsd")
+            .arg(format!("--socket-path={}", status_socket.display()))
+            .arg(format!("--shared-dir={}", status_dir.display()))
+            .arg("--cache=never")
+            .arg("--sandbox=none")
+            .kill_on_drop(true)
+            .spawn()
+            .context("Failed to start status virtiofsd")?;
+
+        Self::wait_for_socket(&status_socket, 5000)
+            .await
+            .context("status virtiofsd socket did not appear within 5 seconds")?;
+
         tracing::debug!(
             sandbox_id = %config.id,
             workspace_socket = %virtiofs_socket.display(),
             meta_socket = %meta_socket.display(),
+            status_socket = %status_socket.display(),
             "virtiofsd up"
         );
 
@@ -168,6 +218,10 @@ impl VmPort for CloudHypervisorAdapter {
                 "tag=aboxmeta,socket={},num_queues=1,queue_size=512",
                 meta_socket.display()
             ))
+            .arg(format!(
+                "tag=aboxstatus,socket={},num_queues=1,queue_size=256",
+                status_socket.display()
+            ))
             .arg("--vsock")
             .arg(format!("cid=3,socket={}", vsock_socket.display()))
             .arg("--console")
@@ -196,7 +250,9 @@ impl VmPort for CloudHypervisorAdapter {
             ch_child,
             virtiofsd_child,
             meta_virtiofsd_child,
+            status_virtiofsd_child,
             meta_dir: meta_dir.clone(),
+            status_dir: status_dir.clone(),
             api_socket: api_socket.clone(),
             console_socket: console_socket.clone(),
             config,
@@ -215,9 +271,11 @@ impl VmPort for CloudHypervisorAdapter {
             let _ = vm.ch_child.kill().await;
             let _ = vm.virtiofsd_child.kill().await;
             let _ = vm.meta_virtiofsd_child.kill().await;
+            let _ = vm.status_virtiofsd_child.kill().await;
 
-            // Clean up all runtime files (sockets, console log, meta dir).
-            self.cleanup_vm_files(id, &vm);
+            // Clean up all runtime files (sockets, console log, meta dir,
+            // and the status dir — this is an explicit teardown).
+            self.cleanup_vm_files(id, &vm, true);
 
             tracing::info!(sandbox_id = id, "MicroVM stopped");
         } else {
@@ -273,8 +331,10 @@ impl VmPort for CloudHypervisorAdapter {
         // If the cloud-hypervisor process has exited, treat the VM as gone.
         if let Ok(Some(_)) = vm.ch_child.try_wait() {
             // Run file cleanup while we still hold the vm reference (before
-            // removing it from the map drops the RunningVm).
-            self.cleanup_vm_files(id, vm);
+            // removing it from the map drops the RunningVm). Note: we keep
+            // the status dir around so `run_sandbox` can still read the
+            // guest's exit code after this call tears the VM entry down.
+            self.cleanup_vm_files(id, vm, false);
             drop(vms);
 
             // Reacquire and remove the entry (this drops the RunningVm, which
@@ -305,5 +365,9 @@ impl VmPort for CloudHypervisorAdapter {
                 console_socket: vm.console_socket.clone(),
             })
             .collect())
+    }
+
+    fn status_dir(&self, id: &str) -> Option<PathBuf> {
+        Some(self.runtime_dir.join(format!("status-{id}")))
     }
 }

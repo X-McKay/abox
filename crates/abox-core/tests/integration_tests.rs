@@ -1005,3 +1005,29 @@ async fn test_run_sandbox_polls_until_vm_exits() {
     // The worktree should have been created on disk.
     assert!(wt_base.join("run-sandbox-test").exists());
 }
+
+// ─── read_exit_code tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_read_exit_code_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("exit-code"), "42\n").unwrap();
+    let code = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path())
+        .expect("read_exit_code succeeds");
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn test_read_exit_code_missing_file_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let result = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path());
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_read_exit_code_malformed_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("exit-code"), "not-a-number").unwrap();
+    let code = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path());
+    assert_eq!(code, None);
+}

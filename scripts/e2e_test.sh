@@ -163,9 +163,13 @@ assert_contains "scratch repo has init commit" "init" "$INIT_LOG"
 step "Write config that points runtime_dir into scratch (no /run/abox needed)"
 how "write TOML at $SCRATCH/config.toml"
 expect "abox CLI works as a non-root user"
+# NOTE: runtime_dir is a *short* path ('$SCRATCH/r') because Cloud
+# Hypervisor / virtiofsd unix sockets are capped at SUN_LEN (108 bytes)
+# and the scratch dir path already eats 70+ characters before we append
+# the per-sandbox socket suffix.
 cat > "$SCRATCH/config.toml" <<EOF
 state_dir = "$SCRATCH/state"
-runtime_dir = "$SCRATCH/state/run"
+runtime_dir = "$SCRATCH/r"
 
 [vm_defaults]
 memory_mib = 512
@@ -175,7 +179,7 @@ vcpus = 1
 egress_port = 28443
 policy_dir = "$SCRATCH/state/policies"
 EOF
-mkdir -p "$SCRATCH/state/policies"
+mkdir -p "$SCRATCH/state/policies" "$SCRATCH/r"
 cp "$REPO_ROOT/policies/default.toml" "$SCRATCH/state/policies/default.toml"
 pass "config + default policy installed"
 
@@ -264,7 +268,7 @@ ABOX_HOME_DEFAULT="$HOME/.abox"
 "$PROXYD_BIN" --config "$SCRATCH/config.toml" >"$SCRATCH/proxyd.log" 2>&1 &
 PROXYD_PID=$!
 # Wait for socket to appear (max ~2s).
-SOCK="$SCRATCH/state/run/cli-proxy.sock"
+SOCK="$SCRATCH/r/cli-proxy.sock"
 for _ in $(seq 1 40); do
     [[ -S "$SOCK" ]] && break
     sleep 0.05
@@ -401,6 +405,24 @@ else
 
     # Cleanup the leftover sandbox state so the test can be re-run.
     $ABOX stop vm-e2e --clean 2>/dev/null || true
+
+    step "Non-zero agent exit propagates to abox run"
+    how 'abox run --task vm-e2e-fail -- /bin/sh -c "exit 7"'
+    expect "abox run exits with 7 (guest runner.sh RC bubbled out through aboxstatus)"
+    if timeout 90 $ABOX run --task vm-e2e-fail --base main -- \
+        /bin/sh -c "exit 7" >"$SCRATCH/fail-run.log" 2>&1; then
+        fail "exit code propagation" "abox run returned 0 but guest exited 7"
+        tail -20 "$SCRATCH/fail-run.log" | sed "s/^/    /"
+    else
+        rc=$?
+        if [[ "$rc" == "7" ]]; then
+            pass "exit code propagation (rc=7)"
+        else
+            fail "exit code propagation" "expected rc=7, got rc=$rc"
+            tail -20 "$SCRATCH/fail-run.log" | sed "s/^/    /"
+        fi
+    fi
+    $ABOX stop vm-e2e-fail --clean 2>/dev/null || true
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
