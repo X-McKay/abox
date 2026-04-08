@@ -4,7 +4,7 @@
 //! a unified interface for sandbox lifecycle management. This is the main
 //! application-layer service that the CLI and TUI call into.
 
-use crate::config::AboxConfig;
+use crate::config::{AboxConfig, VmRuntimeTuning};
 use crate::vm::{VmConfig, VmInfo, VmPort, VmState};
 use crate::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
 use anyhow::{Context, Result};
@@ -297,9 +297,11 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         // Poll for VM exit. The trait doesn't expose a "wait" primitive,
         // so we poll `info` until it errors out (which the adapter does
         // when the VM is no longer in its registry — i.e. after it has
-        // been removed from the map).
+        // been removed from the map). Interval is centralized in
+        // VmRuntimeTuning so tests can tighten it.
+        let tuning = VmRuntimeTuning::DEFAULT;
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            tokio::time::sleep(tuning.vm_exit_poll_interval).await;
             if self.vm_manager.info(&task_id).await.is_err() {
                 break;
             }

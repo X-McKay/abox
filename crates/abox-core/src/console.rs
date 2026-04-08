@@ -11,6 +11,7 @@
 //! dropped — important on slow systems where the abort path used to lose
 //! the guest's poweroff banner.
 
+use crate::config::VmRuntimeTuning;
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Arc;
@@ -49,6 +50,7 @@ where
     file.seek(std::io::SeekFrom::Start(0)).await?;
 
     let mut buf = [0u8; 8192];
+    let poll_interval = VmRuntimeTuning::DEFAULT.console_poll_interval;
     loop {
         tokio::select! {
             biased;
@@ -61,7 +63,7 @@ where
                 let n = read?;
                 if n == 0 {
                     // EOF: wait briefly and try again — `tail -f`-style poll.
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    tokio::time::sleep(poll_interval).await;
                     continue;
                 }
                 sink.write_all(&buf[..n]).await?;

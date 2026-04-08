@@ -61,6 +61,42 @@ pub struct ProxyConfig {
     pub policy_dir: PathBuf,
 }
 
+/// Runtime timing knobs for the VM supervisor.
+///
+/// Centralizes the polling intervals and timeouts that used to be hardcoded
+/// throughout `cloud_hypervisor.rs`, `console.rs`, and `sandbox.rs`. The
+/// defaults match the pre-refactor literals so behavior is unchanged.
+/// Tests can construct a custom instance to drive faster simulations.
+///
+/// Not yet exposed in the TOML schema — the goal of this introduction is
+/// to make tuning *possible* without committing to a public surface.
+#[derive(Debug, Clone, Copy)]
+pub struct VmRuntimeTuning {
+    /// How often `run_sandbox` polls `vm_manager.info()` for VM exit.
+    pub vm_exit_poll_interval: std::time::Duration,
+    /// How often the console tailer polls for new bytes after EOF.
+    pub console_poll_interval: std::time::Duration,
+    /// How long to wait for a virtiofsd / cloud-hypervisor socket file to
+    /// appear before bailing out.
+    pub socket_wait_timeout: std::time::Duration,
+}
+
+impl VmRuntimeTuning {
+    /// Default tuning: 250 ms VM exit poll, 50 ms console poll,
+    /// 5 s socket wait.
+    pub const DEFAULT: Self = Self {
+        vm_exit_poll_interval: std::time::Duration::from_millis(250),
+        console_poll_interval: std::time::Duration::from_millis(50),
+        socket_wait_timeout: std::time::Duration::from_secs(5),
+    };
+}
+
+impl Default for VmRuntimeTuning {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 impl Default for AboxConfig {
     fn default() -> Self {
         Self {
