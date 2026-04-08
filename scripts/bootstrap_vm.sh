@@ -64,12 +64,12 @@ echo "  install dir: $ABOX_VM_DIR"
 echo "  vendor dir:  $REPO_ROOT/vendor"
 echo
 
-echo "[1/3] Downloading cloud-hypervisor + ch-remote..."
+echo "[1/5] Downloading cloud-hypervisor + ch-remote..."
 download_to "$CH_BIN_URL"    "$ABOX_VM_DIR/cloud-hypervisor" "$CH_BIN_SHA"
 download_to "$CH_REMOTE_URL" "$ABOX_VM_DIR/ch-remote"        "$CH_REMOTE_SHA"
 chmod +x "$ABOX_VM_DIR/cloud-hypervisor" "$ABOX_VM_DIR/ch-remote"
 
-echo "[2/3] Downloading virtiofsd..."
+echo "[2/5] Downloading virtiofsd..."
 download_to "$VIRTIOFSD_DEB_URL" "$ABOX_VM_DIR/virtiofsd.deb" "$VIRTIOFSD_DEB_SHA"
 # Extract just the virtiofsd binary from the deb (rootless — dpkg-deb -x needs no root)
 _VFSD_TMP="$(mktemp -d)"
@@ -87,10 +87,30 @@ fi
 rm -f "$ABOX_VM_DIR/virtiofsd.deb"
 chmod +x "$ABOX_VM_DIR/virtiofsd"
 
-echo "[3/3] Downloading guest kernel + Alpine miniroot + socat package..."
+echo "[3/5] Downloading guest kernel + Alpine miniroot + socat package..."
 download_to "$VMLINUX_URL"  "$ABOX_VM_DIR/vmlinux"                    "$VMLINUX_SHA"
 download_to "$ALPINE_URL"   "$ABOX_VM_DIR/alpine-minirootfs.tar.gz"   "$ALPINE_SHA"
 download_to "$SOCAT_URL"    "$ABOX_VM_DIR/socat.apk"                  "$SOCAT_SHA"
+
+# ─── Phase 4: Build abox-shim for static musl ────────────────────────────
+echo "[4/5] Building abox-shim for static musl..."
+if ! rustup target list --installed 2>/dev/null | grep -q '^x86_64-unknown-linux-musl$'; then
+    echo "  adding x86_64-unknown-linux-musl rust target..."
+    rustup target add x86_64-unknown-linux-musl
+fi
+( cd "$REPO_ROOT" && cargo build --release --target x86_64-unknown-linux-musl -p abox-shim )
+SHIM_BIN="$REPO_ROOT/target/x86_64-unknown-linux-musl/release/abox-shim"
+if [[ ! -f "$SHIM_BIN" ]]; then
+    echo "ERROR: shim binary was not produced at $SHIM_BIN" >&2
+    exit 1
+fi
+
+# ─── Phase 5: Assemble the guest rootfs ──────────────────────────────────
+echo "[5/5] Assembling guest rootfs..."
+SHIM_BIN="$SHIM_BIN" \
+ABOX_VM_DIR="$ABOX_VM_DIR" \
+GUEST_INIT="$REPO_ROOT/guest/init.sh" \
+    "$REPO_ROOT/scripts/build_rootfs.sh"
 
 echo
 echo "Bootstrap complete. Files in $ABOX_VM_DIR:"
