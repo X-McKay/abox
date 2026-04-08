@@ -4,7 +4,7 @@
 //! a unified interface for sandbox lifecycle management. This is the main
 //! application-layer service that the CLI and TUI call into.
 
-use crate::config::AboxConfig;
+use crate::config::{AboxConfig, VmRuntimeTuning};
 use crate::vm::{VmConfig, VmInfo, VmPort, VmState};
 use crate::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
 use anyhow::{Context, Result};
@@ -55,6 +55,13 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         Self { config, workspace, vm_manager }
     }
 
+    /// Runtime directory (where sockets, console logs, and detached
+    /// supervisor PID files live). Exposed so CLI commands like
+    /// `abox run --detach` can write per-sandbox state next to the rest.
+    pub fn runtime_dir(&self) -> std::path::PathBuf {
+        self.config.runtime_dir()
+    }
+
     /// Create and start a new sandbox.
     ///
     /// This performs the full lifecycle:
@@ -94,6 +101,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             vcpus: params.vcpus.unwrap_or(self.config.vm_defaults.vcpus),
             user: params.user,
             env_vars: params.env_vars,
+            agent_command: params.command.clone(),
             proxy_port: self.config.proxy.egress_port,
         };
 
@@ -213,5 +221,129 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     /// Get VM info for a specific sandbox.
     pub async fn vm_info(&self, task_id: &str) -> Result<VmInfo> {
         self.vm_manager.info(task_id).await
+    }
+
+    /// Foreground variant of `create_sandbox`.
+    ///
+    /// Creates the worktree, boots the VM, starts a per-VM proxy bridge
+    /// bound to `<runtime>/vsock-<id>.sock_5000` (the path Cloud Hypervisor
+    /// exposes for guest vsock-port-5000 traffic), streams the guest
+    /// console to the orchestrator's stdio, polls the VM until it exits,
+    /// and tears everything down.
+    ///
+    /// Returns the agent's exit code. The current MVP returns 0 on clean
+    /// VM exit; structured exit-code propagation from the guest is a
+    /// follow-up.
+    pub async fn run_sandbox(
+        &self,
+        params: CreateSandboxParams,
+        policy: std::sync::Arc<crate::policy::PolicyEngine>,
+    ) -> Result<i32> {
+        let status = self.create_sandbox(params).await?;
+        let task_id = status.id.clone();
+        let worktree_path = std::path::PathBuf::from(&status.worktree_path);
+
+        // Spawn the per-VM proxy bridge bound to vsock-<id>.sock_5000.
+        let bridge_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5000"));
+        // Use a file-based audit sink so guest requests appear in the same
+        // audit JSONL file used by abox-proxyd. Fall back to TracingAuditSink
+        // if the log file can't be opened.
+        let audit_path = self.config.logs_dir().join("audit.jsonl");
+        let audit_sink: std::sync::Arc<dyn crate::proxy_bridge::AuditSink> =
+            match crate::proxy_bridge::FileAuditSink::open(&audit_path) {
+                Ok(sink) => std::sync::Arc::new(sink),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %audit_path.display(),
+                        "Could not open audit log; falling back to tracing-only"
+                    );
+                    std::sync::Arc::new(crate::proxy_bridge::TracingAuditSink)
+                }
+            };
+        // Map guest /workspace → host worktree so that the shim's CWD
+        // (which is /workspace inside the VM) resolves to the real path.
+        let bridge = crate::proxy_bridge::ProxyBridge::new(
+            bridge_socket,
+            policy,
+            audit_sink,
+            crate::proxy_bridge::SandboxAttribution::Fixed(task_id.clone()),
+        )
+        .with_cwd_map("/workspace", worktree_path);
+        let bridge_handle = tokio::spawn(async move {
+            if let Err(e) = bridge.run().await {
+                tracing::error!(error = %e, "proxy bridge crashed");
+            }
+        });
+
+        // Spawn the console streamer with a shutdown notify so it can drain
+        // the last bytes of guest output gracefully when the VM exits,
+        // instead of being abort()'d mid-read and dropping the trailing
+        // poweroff banner on slow systems.
+        let console_log = self.config.runtime_dir().join(format!("console-{task_id}.log"));
+        let console_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let console_shutdown_for_task = console_shutdown.clone();
+        let console_handle = tokio::spawn(async move {
+            if let Err(e) = Box::pin(crate::console::tail_to_stdout_until(
+                &console_log,
+                console_shutdown_for_task,
+            ))
+            .await
+            {
+                tracing::debug!(error = %e, "console stream ended");
+            }
+        });
+
+        // Poll for VM exit. The trait doesn't expose a "wait" primitive,
+        // so we poll `info` until it errors out (which the adapter does
+        // when the VM is no longer in its registry — i.e. after it has
+        // been removed from the map). Interval is centralized in
+        // VmRuntimeTuning so tests can tighten it.
+        let tuning = VmRuntimeTuning::DEFAULT;
+        loop {
+            tokio::time::sleep(tuning.vm_exit_poll_interval).await;
+            if self.vm_manager.info(&task_id).await.is_err() {
+                break;
+            }
+        }
+
+        bridge_handle.abort();
+        // Signal the console tailer to drain and exit. Wait briefly for it
+        // to finish before we move on; if it stays stuck (shouldn't happen
+        // in practice), the JoinHandle is dropped and the task is cancelled.
+        console_shutdown.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), console_handle).await;
+
+        // Read the exit code the guest wrote into /abox-status/exit-code.
+        let exit_code_opt = self
+            .vm_manager
+            .status_dir(&task_id)
+            .and_then(|d| crate::adapters::cloud_hypervisor::read_exit_code(&d));
+
+        // Tear down the status dir now that we've read (or failed to read) it.
+        if let Some(sd) = self.vm_manager.status_dir(&task_id) {
+            let _ = std::fs::remove_dir_all(&sd);
+        }
+
+        if let Some(code) = exit_code_opt {
+            Ok(code)
+        } else {
+            // The guest never wrote an exit code — the VM died before
+            // init.sh got that far (kernel panic, missing rootfs,
+            // virtiofs failure, etc.). Roll back the worktree like a
+            // failed VM start would, since this run produced nothing.
+            tracing::warn!(
+                task_id = %task_id,
+                "Guest did not write an exit code; rolling back worktree"
+            );
+            if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
+                tracing::error!(
+                    task_id = %task_id,
+                    error = %e,
+                    "Worktree rollback after silent VM failure also failed"
+                );
+            }
+            Ok(1)
+        }
     }
 }

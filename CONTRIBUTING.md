@@ -51,6 +51,45 @@ We enforce strict code quality via CI and pre-commit hooks:
 - **Testing:** All new functionality must include unit tests. Integration tests should be added to `abox-core/tests/` or `abox-proxyd/tests/`.
 - **Documentation:** Public APIs must be documented with rustdoc (`///`). We enforce `missing_docs` (currently suppressed while the API stabilizes, but will be enabled soon).
 
+## Running the End-to-End Test
+
+`./scripts/e2e_test.sh` (or `just e2e`) is the canonical
+verification gate for any change touching the orchestrator, the
+proxy bridge, the bootstrap, or the guest init. It runs six phases:
+
+1. **build** — `cargo build --workspace`
+2. **unit + integration tests** — `cargo test --workspace`
+3. **scratch git repo + abox config** — sets up an isolated test env
+4. **abox CLI workspace ops** — list / divergence / merge / stop --clean
+5. **abox-proxyd CLI policy enforcement** — allow/deny + audit log
+6. **full VM end-to-end** *(gated)* — boots a real Cloud Hypervisor
+   microVM, runs `git status` inside it, asserts the audit log is
+   attributed to the right sandbox, and asserts a non-zero guest
+   exit (`sh -c "exit 7"`) propagates as `abox run` exit 7.
+
+Phase 6 is gated on `~/.abox/vm/cloud-hypervisor` + `rootfs.raw`
+existing. Developers without the bootstrap stack still get phases
+1-5; the script prints `skipped: VM artifacts not found` and
+continues. The CI workflow runs phases 1-5 only — phase 6 needs
+`/dev/kvm` which most managed runners don't expose.
+
+To add a new phase, append a `section "phase N — ..."` block in
+`scripts/e2e_test.sh` with `step` / `how` / `expect` / `pass` /
+`fail` calls. The summary footer counts every `pass`/`fail`
+invocation so new assertions are picked up automatically.
+
+## Subagent-Driven Implementation
+
+Multi-step work in this repo is typically done via the
+`superpowers:subagent-driven-development` workflow: write a plan
+under `docs/plans/YYYY-MM-DD-<topic>.md`, then execute it
+task-by-task with TDD and frequent commits. This keeps the change
+log readable and lets the project evolve in small, reviewable steps.
+
+A recent example: `docs/plans/2026-04-08-vm-e2e-hardening.md`,
+which drained 13 P0/P1/P2 backlog items in one session, every
+behavior change gated on TDD + `just check` + `./scripts/e2e_test.sh`.
+
 ## Pull Request Process
 
 1. Create a feature branch from `develop`: `git checkout -b feature/my-new-thing`

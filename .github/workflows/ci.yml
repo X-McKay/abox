@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (workspace, all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+
+  e2e-phases-1-5:
+    name: e2e (phases 1-5; phase 6 skipped — no /dev/kvm on CI)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python (for proxy_send helper in e2e_test.sh)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run e2e script
+        # Phase 6 is gated on ~/.abox/vm/cloud-hypervisor + rootfs.raw
+        # existing, which they don't on a stock GitHub runner. The script
+        # prints "skipped: VM artifacts not found" and continues.
+        run: ./scripts/e2e_test.sh

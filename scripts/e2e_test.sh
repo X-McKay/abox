@@ -101,6 +101,10 @@ SCRATCH="$REPO_ROOT/.scratch/e2e-run-$$"
 ABOX_BIN="$REPO_ROOT/target/debug/abox"
 PROXYD_BIN="$REPO_ROOT/target/debug/abox-proxyd"
 
+# Register the cleanup trap as early as possible — before any `set -u`
+# expansion or `set -e`-sensitive command — so a startup failure still
+# removes the scratch dir. Don't reference any variables that aren't set
+# yet (PROXYD_PID is checked with ${VAR:-}).
 cleanup() {
     if [[ -n "${PROXYD_PID:-}" ]] && kill -0 "$PROXYD_PID" 2>/dev/null; then
         kill "$PROXYD_PID" 2>/dev/null || true
@@ -108,7 +112,13 @@ cleanup() {
     fi
     rm -rf "$SCRATCH"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
+
+# Sweep stale scratch dirs from previous runs that were SIGKILL'd before
+# their EXIT trap could fire (>1 hour old, so we never race a concurrent
+# run). Best-effort, ignored if the parent dir doesn't exist yet.
+find "$REPO_ROOT/.scratch" -maxdepth 1 -name 'e2e-run-*' -type d -mmin +60 \
+    -exec rm -rf {} + 2>/dev/null || true
 
 section "abox end-to-end test"
 printf '%srepo:%s    %s\n' "$DIM" "$RESET" "$REPO_ROOT"
@@ -163,9 +173,13 @@ assert_contains "scratch repo has init commit" "init" "$INIT_LOG"
 step "Write config that points runtime_dir into scratch (no /run/abox needed)"
 how "write TOML at $SCRATCH/config.toml"
 expect "abox CLI works as a non-root user"
+# NOTE: runtime_dir is a *short* path ('$SCRATCH/r') because Cloud
+# Hypervisor / virtiofsd unix sockets are capped at SUN_LEN (108 bytes)
+# and the scratch dir path already eats 70+ characters before we append
+# the per-sandbox socket suffix.
 cat > "$SCRATCH/config.toml" <<EOF
 state_dir = "$SCRATCH/state"
-runtime_dir = "$SCRATCH/state/run"
+runtime_dir = "$SCRATCH/r"
 
 [vm_defaults]
 memory_mib = 512
@@ -175,7 +189,7 @@ vcpus = 1
 egress_port = 28443
 policy_dir = "$SCRATCH/state/policies"
 EOF
-mkdir -p "$SCRATCH/state/policies"
+mkdir -p "$SCRATCH/state/policies" "$SCRATCH/r"
 cp "$REPO_ROOT/policies/default.toml" "$SCRATCH/state/policies/default.toml"
 pass "config + default policy installed"
 
@@ -264,7 +278,7 @@ ABOX_HOME_DEFAULT="$HOME/.abox"
 "$PROXYD_BIN" --config "$SCRATCH/config.toml" >"$SCRATCH/proxyd.log" 2>&1 &
 PROXYD_PID=$!
 # Wait for socket to appear (max ~2s).
-SOCK="$SCRATCH/state/run/cli-proxy.sock"
+SOCK="$SCRATCH/r/cli-proxy.sock"
 for _ in $(seq 1 40); do
     [[ -S "$SOCK" ]] && break
     sleep 0.05
@@ -354,6 +368,86 @@ assert_eq "legacy request exit_code" "0" "$EXIT_CODE"
 LEGACY_UNKNOWN=$(grep -c '"sandbox_id":"unknown"' "$AUDIT" || true)
 [[ "$LEGACY_UNKNOWN" -ge 1 ]] && pass "legacy entry recorded as unknown" \
     || fail "legacy entry attribution"
+
+# ─── Phase 6: full VM end-to-end (gated on bootstrap artifacts) ─────────────
+section "phase 6 — full VM end-to-end (gated)"
+
+ABOX_VM="$HOME/.abox/vm"
+if [[ ! -x "$ABOX_VM/cloud-hypervisor" ]] || [[ ! -f "$ABOX_VM/rootfs.raw" ]]; then
+    printf '  %sskipped:%s VM artifacts not found. Run `just bootstrap-vm` to enable this phase.\n' \
+        "$YELLOW" "$RESET"
+else
+    # Make CH/virtiofsd discoverable to the abox adapter (it spawns
+    # them as `cloud-hypervisor` and `virtiofsd` from PATH).
+    export PATH="$ABOX_VM:$PATH"
+
+    step "Inject VM image/kernel paths into the scratch config"
+    how "inserting image_path/kernel_path after vcpus line in [vm_defaults] in $SCRATCH/config.toml"
+    expect "abox run can find the kernel + rootfs"
+    # The [vm_defaults] section already exists (memory_mib/vcpus from phase 3).
+    # The [proxy] section follows it, so we cannot simply append to the file.
+    # Use sed to insert image_path/kernel_path immediately after 'vcpus = 1'.
+    sed -i "s|vcpus = 1|vcpus = 1\nimage_path  = \"$ABOX_VM/rootfs.raw\"\nkernel_path = \"$ABOX_VM/vmlinux\"|" \
+        "$SCRATCH/config.toml"
+    pass "config updated"
+
+    step "Boot a real VM and run \`git status\` inside the guest"
+    how 'abox run --task vm-e2e --base main -- /usr/local/bin/git status'
+    expect "agent exits 0; audit log records sandbox_id=vm-e2e for the git call"
+
+    # Run with a generous timeout so a stuck VM cannot hang the test.
+    # Capture stdout+stderr to a file so we can also assert on the live
+    # console output (D4): the guest init banner must reach the host.
+    RUN_OUT_FILE="$SCRATCH/vm-e2e-run.out"
+    if timeout 90 $ABOX run --task vm-e2e --base main -- \
+        /usr/local/bin/git status >"$RUN_OUT_FILE" 2>&1; then
+        pass "vm boot + agent exec"
+    else
+        rc=$?
+        fail "vm boot + agent exec" "exit=$rc; tail of output below"
+        tail -20 "$RUN_OUT_FILE" | sed "s/^/    /"
+    fi
+
+    AUDIT_VM="$SCRATCH/state/logs/audit.jsonl"
+    if [[ -f "$AUDIT_VM" ]] && grep -q '"sandbox_id":"vm-e2e"' "$AUDIT_VM"; then
+        pass "audit log attributes guest call to vm-e2e"
+    else
+        fail "audit log attribution from real guest" \
+             "no vm-e2e entries in $AUDIT_VM"
+    fi
+
+    # D4: assert the guest's init banner ('abox guest init: online')
+    # actually reached the orchestrator's stdout. The console streamer
+    # is the channel; without this assertion phase 6 could pass even
+    # when console output is silently dropped.
+    if grep -q "abox guest init: online" "$RUN_OUT_FILE"; then
+        pass "guest init banner reached host stdout"
+    else
+        fail "console streaming" "no 'guest init: online' banner in run output"
+        tail -20 "$RUN_OUT_FILE" | sed "s/^/    /"
+    fi
+
+    # Cleanup the leftover sandbox state so the test can be re-run.
+    $ABOX stop vm-e2e --clean 2>/dev/null || true
+
+    step "Non-zero agent exit propagates to abox run"
+    how 'abox run --task vm-e2e-fail -- /bin/sh -c "exit 7"'
+    expect "abox run exits with 7 (guest runner.sh RC bubbled out through aboxstatus)"
+    if timeout 90 $ABOX run --task vm-e2e-fail --base main -- \
+        /bin/sh -c "exit 7" >"$SCRATCH/fail-run.log" 2>&1; then
+        fail "exit code propagation" "abox run returned 0 but guest exited 7"
+        tail -20 "$SCRATCH/fail-run.log" | sed "s/^/    /"
+    else
+        rc=$?
+        if [[ "$rc" == "7" ]]; then
+            pass "exit code propagation (rc=7)"
+        else
+            fail "exit code propagation" "expected rc=7, got rc=$rc"
+            tail -20 "$SCRATCH/fail-run.log" | sed "s/^/    /"
+        fi
+    fi
+    $ABOX stop vm-e2e-fail --clean 2>/dev/null || true
+fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 section "summary"

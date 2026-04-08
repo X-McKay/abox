@@ -15,10 +15,13 @@
 //! - **Orchestration** happens in [`sandbox::SandboxOrchestrator`]
 
 pub mod adapters;
+pub mod boot_meta;
 pub mod config;
+pub mod console;
 pub mod error;
 pub mod policy;
 pub mod protocol;
+pub mod proxy_bridge;
 pub mod sandbox;
 pub mod snapshot;
 pub mod util;

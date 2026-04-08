@@ -913,3 +913,135 @@ async fn test_orchestrator_vm_config_overrides() {
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].id, "task-custom");
 }
+
+#[tokio::test]
+async fn test_run_sandbox_polls_until_vm_exits() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A mock VM port whose `info()` returns Ok on the first call and Err
+    /// on all subsequent calls, simulating a VM whose guest agent exited
+    /// promptly with code 0. The mock exposes a `status_dir` so
+    /// `run_sandbox` can read a pre-staged "0\n" exit-code file (mirroring
+    /// what the real `aboxstatus` virtiofs share would contain after a
+    /// clean guest poweroff).
+    struct ExitingMockVm {
+        info_calls: AtomicUsize,
+        status_dir: PathBuf,
+    }
+
+    impl VmPort for ExitingMockVm {
+        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
+            Ok(VmInfo {
+                id: config.id,
+                pid: 12345,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
+            // First call: VM still exists. All subsequent calls: VM is gone.
+            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(VmInfo {
+                    id: id.to_string(),
+                    pid: 12345,
+                    state: VmState::Running,
+                    api_socket: PathBuf::from("/tmp/api.sock"),
+                    console_socket: PathBuf::from("/tmp/console.sock"),
+                })
+            } else {
+                anyhow::bail!("VM exited")
+            }
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+
+        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
+            Some(self.status_dir.clone())
+        }
+    }
+
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    config.ensure_dirs().unwrap();
+
+    // Pre-stage a clean exit code (0) like a real guest poweroff would.
+    let status_dir = tmp.path().join("status-run-sandbox-test");
+    std::fs::create_dir_all(&status_dir).unwrap();
+    std::fs::write(status_dir.join("exit-code"), "0\n").unwrap();
+
+    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0), status_dir };
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+
+    let params = CreateSandboxParams {
+        task_id: "run-sandbox-test".into(),
+        base_branch: "main".into(),
+        template: None,
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["true".into()],
+    };
+
+    let policy = std::sync::Arc::new(
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "allow".into(),
+            default_egress_action: "deny".into(),
+        })
+        .unwrap(),
+    );
+
+    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    assert_eq!(exit, 0);
+
+    // The worktree should have been created on disk.
+    assert!(wt_base.join("run-sandbox-test").exists());
+}
+
+// ─── read_exit_code tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_read_exit_code_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("exit-code"), "42\n").unwrap();
+    let code = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path())
+        .expect("read_exit_code succeeds");
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn test_read_exit_code_missing_file_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let result = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path());
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_read_exit_code_malformed_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("exit-code"), "not-a-number").unwrap();
+    let code = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path());
+    assert_eq!(code, None);
+}
