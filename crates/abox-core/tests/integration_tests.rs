@@ -919,9 +919,14 @@ async fn test_run_sandbox_polls_until_vm_exits() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A mock VM port whose `info()` returns Ok on the first call and Err
-    /// on all subsequent calls, simulating a VM that exits promptly.
+    /// on all subsequent calls, simulating a VM whose guest agent exited
+    /// promptly with code 0. The mock exposes a `status_dir` so
+    /// `run_sandbox` can read a pre-staged "0\n" exit-code file (mirroring
+    /// what the real `aboxstatus` virtiofs share would contain after a
+    /// clean guest poweroff).
     struct ExitingMockVm {
         info_calls: AtomicUsize,
+        status_dir: PathBuf,
     }
 
     impl VmPort for ExitingMockVm {
@@ -966,6 +971,10 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
             Ok(vec![])
         }
+
+        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
+            Some(self.status_dir.clone())
+        }
     }
 
     let (tmp, repo_path) = setup_test_repo();
@@ -975,7 +984,12 @@ async fn test_run_sandbox_polls_until_vm_exits() {
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
     config.ensure_dirs().unwrap();
 
-    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0) };
+    // Pre-stage a clean exit code (0) like a real guest poweroff would.
+    let status_dir = tmp.path().join("status-run-sandbox-test");
+    std::fs::create_dir_all(&status_dir).unwrap();
+    std::fs::write(status_dir.join("exit-code"), "0\n").unwrap();
+
+    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0), status_dir };
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {

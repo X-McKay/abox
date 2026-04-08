@@ -55,6 +55,13 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         Self { config, workspace, vm_manager }
     }
 
+    /// Runtime directory (where sockets, console logs, and detached
+    /// supervisor PID files live). Exposed so CLI commands like
+    /// `abox run --detach` can write per-sandbox state next to the rest.
+    pub fn runtime_dir(&self) -> std::path::PathBuf {
+        self.config.runtime_dir()
+    }
+
     /// Create and start a new sandbox.
     ///
     /// This performs the full lifecycle:
@@ -306,19 +313,36 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), console_handle).await;
 
         // Read the exit code the guest wrote into /abox-status/exit-code.
-        // If the status dir isn't available (in-memory adapter) or the file
-        // is missing/malformed, fall back to 0.
-        let exit_code = self
+        let exit_code_opt = self
             .vm_manager
             .status_dir(&task_id)
-            .and_then(|d| crate::adapters::cloud_hypervisor::read_exit_code(&d))
-            .unwrap_or(0);
+            .and_then(|d| crate::adapters::cloud_hypervisor::read_exit_code(&d));
 
-        // Tear down the status dir now that we've read it.
+        // Tear down the status dir now that we've read (or failed to read) it.
         if let Some(sd) = self.vm_manager.status_dir(&task_id) {
             let _ = std::fs::remove_dir_all(&sd);
         }
 
-        Ok(exit_code)
+        match exit_code_opt {
+            Some(code) => Ok(code),
+            None => {
+                // The guest never wrote an exit code — the VM died before
+                // init.sh got that far (kernel panic, missing rootfs,
+                // virtiofs failure, etc.). Roll back the worktree like a
+                // failed VM start would, since this run produced nothing.
+                tracing::warn!(
+                    task_id = %task_id,
+                    "Guest did not write an exit code; rolling back worktree"
+                );
+                if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
+                    tracing::error!(
+                        task_id = %task_id,
+                        error = %e,
+                        "Worktree rollback after silent VM failure also failed"
+                    );
+                }
+                Ok(1)
+            }
+        }
     }
 }
