@@ -20,6 +20,7 @@ pub mod config;
 pub mod error;
 pub mod policy;
 pub mod protocol;
+pub mod proxy_bridge;
 pub mod sandbox;
 pub mod snapshot;
 pub mod util;
