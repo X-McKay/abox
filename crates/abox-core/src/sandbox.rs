@@ -323,26 +323,25 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             let _ = std::fs::remove_dir_all(&sd);
         }
 
-        match exit_code_opt {
-            Some(code) => Ok(code),
-            None => {
-                // The guest never wrote an exit code — the VM died before
-                // init.sh got that far (kernel panic, missing rootfs,
-                // virtiofs failure, etc.). Roll back the worktree like a
-                // failed VM start would, since this run produced nothing.
-                tracing::warn!(
+        if let Some(code) = exit_code_opt {
+            Ok(code)
+        } else {
+            // The guest never wrote an exit code — the VM died before
+            // init.sh got that far (kernel panic, missing rootfs,
+            // virtiofs failure, etc.). Roll back the worktree like a
+            // failed VM start would, since this run produced nothing.
+            tracing::warn!(
+                task_id = %task_id,
+                "Guest did not write an exit code; rolling back worktree"
+            );
+            if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
+                tracing::error!(
                     task_id = %task_id,
-                    "Guest did not write an exit code; rolling back worktree"
+                    error = %e,
+                    "Worktree rollback after silent VM failure also failed"
                 );
-                if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
-                    tracing::error!(
-                        task_id = %task_id,
-                        error = %e,
-                        "Worktree rollback after silent VM failure also failed"
-                    );
-                }
-                Ok(1)
             }
+            Ok(1)
         }
     }
 }
