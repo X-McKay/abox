@@ -35,20 +35,59 @@ trap 'rm -rf "$STAGE"' EXIT
 echo "  staging Alpine miniroot..."
 tar -xzf "$ABOX_VM_DIR/alpine-minirootfs.tar.gz" -C "$STAGE"
 
-echo "  extracting socat from apk..."
-# .apk files are gzipped tar archives. They contain a mix of file trees
-# and metadata; we only need the binary (and any shared libs it needs on
-# Alpine). On Alpine, socat is a dynamically linked binary that depends on
-# libcrypto/libssl — but the Alpine miniroot already includes these in
-# /lib and /usr/lib. So we only need to extract the socat binary itself.
-mkdir -p "$STAGE/usr/bin"
+echo "  extracting socat + shared libraries from apks..."
+# .apk files are gzipped tar archives.
+# socat on Alpine is dynamically linked and requires:
+#   - libcrypto/libssl (included in the Alpine miniroot)
+#   - libreadline → libncursesw (NOT in the miniroot by default)
+# We download and embed these here so socat starts correctly inside the guest.
+# Note: /usr/bin/socat is a symlink to /usr/bin/socat1; extract both.
+
+_download_apk() {
+    local dst="$1" url="$2" expected_sha="$3"
+    if [[ ! -f "$dst" ]]; then
+        echo "  downloading $(basename "$dst")..."
+        curl -fsSL -o "$dst" "$url"
+        local actual
+        actual="$(sha256sum "$dst" | awk '{print $1}')"
+        if [[ "$actual" != "$expected_sha" ]]; then
+            echo "ERROR: $(basename "$dst") checksum mismatch (got $actual, want $expected_sha)" >&2
+            rm -f "$dst"
+            exit 1
+        fi
+    fi
+}
+
+_download_apk "$ABOX_VM_DIR/readline.apk" \
+    "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/readline-8.2.1-r2.apk" \
+    "8b57deab29fa2230318065f83b45bb17d386f0352e29d9a7e5224722a3722365"
+
+_download_apk "$ABOX_VM_DIR/libncursesw.apk" \
+    "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/libncursesw-6.4_p20231125-r0.apk" \
+    "94830f70d5b4480be58e01c3bcdf6b05a95181603e31339d59411eacaedbf0e0"
+
+mkdir -p "$STAGE/usr/bin" "$STAGE/usr/lib"
 tar -xzf "$ABOX_VM_DIR/socat.apk" -C "$STAGE" \
     --warning=no-unknown-keyword \
     --wildcards \
-    'usr/bin/socat' 2>/dev/null || {
-    echo "ERROR: failed to extract usr/bin/socat from socat.apk" >&2
+    'usr/bin/socat' 'usr/bin/socat1' 2>/dev/null || {
+    echo "ERROR: failed to extract socat binaries from socat.apk" >&2
     echo "Listing socat.apk contents for debugging:" >&2
     tar -tzf "$ABOX_VM_DIR/socat.apk" --warning=no-unknown-keyword 2>/dev/null | head -40 >&2
+    exit 1
+}
+tar -xzf "$ABOX_VM_DIR/readline.apk" -C "$STAGE" \
+    --warning=no-unknown-keyword \
+    --wildcards \
+    'usr/lib/libreadline*' 2>/dev/null || {
+    echo "ERROR: failed to extract libreadline from readline.apk" >&2
+    exit 1
+}
+tar -xzf "$ABOX_VM_DIR/libncursesw.apk" -C "$STAGE" \
+    --warning=no-unknown-keyword \
+    --wildcards \
+    'usr/lib/libncursesw*' 2>/dev/null || {
+    echo "ERROR: failed to extract libncursesw from libncursesw.apk" >&2
     exit 1
 }
 

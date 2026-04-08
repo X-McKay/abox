@@ -355,6 +355,54 @@ LEGACY_UNKNOWN=$(grep -c '"sandbox_id":"unknown"' "$AUDIT" || true)
 [[ "$LEGACY_UNKNOWN" -ge 1 ]] && pass "legacy entry recorded as unknown" \
     || fail "legacy entry attribution"
 
+# ─── Phase 6: full VM end-to-end (gated on bootstrap artifacts) ─────────────
+section "phase 6 — full VM end-to-end (gated)"
+
+ABOX_VM="$HOME/.abox/vm"
+if [[ ! -x "$ABOX_VM/cloud-hypervisor" ]] || [[ ! -f "$ABOX_VM/rootfs.raw" ]]; then
+    printf '  %sskipped:%s VM artifacts not found. Run `just bootstrap-vm` to enable this phase.\n' \
+        "$YELLOW" "$RESET"
+else
+    # Make CH/virtiofsd discoverable to the abox adapter (it spawns
+    # them as `cloud-hypervisor` and `virtiofsd` from PATH).
+    export PATH="$ABOX_VM:$PATH"
+
+    step "Inject VM image/kernel paths into the scratch config"
+    how "inserting image_path/kernel_path after vcpus line in [vm_defaults] in $SCRATCH/config.toml"
+    expect "abox run can find the kernel + rootfs"
+    # The [vm_defaults] section already exists (memory_mib/vcpus from phase 3).
+    # The [proxy] section follows it, so we cannot simply append to the file.
+    # Use sed to insert image_path/kernel_path immediately after 'vcpus = 1'.
+    sed -i "s|vcpus = 1|vcpus = 1\nimage_path  = \"$ABOX_VM/rootfs.raw\"\nkernel_path = \"$ABOX_VM/vmlinux\"|" \
+        "$SCRATCH/config.toml"
+    pass "config updated"
+
+    step "Boot a real VM and run \`git status\` inside the guest"
+    how 'abox run --task vm-e2e --base main -- /usr/local/bin/git status'
+    expect "agent exits 0; audit log records sandbox_id=vm-e2e for the git call"
+
+    # Run with a generous timeout so a stuck VM cannot hang the test.
+    if RUN_OUT=$(timeout 90 $ABOX run --task vm-e2e --base main -- \
+        /usr/local/bin/git status 2>&1); then
+        pass "vm boot + agent exec"
+    else
+        rc=$?
+        fail "vm boot + agent exec" "exit=$rc; tail of output below"
+        echo "$RUN_OUT" | tail -20 | sed "s/^/    /"
+    fi
+
+    AUDIT_VM="$SCRATCH/state/logs/audit.jsonl"
+    if [[ -f "$AUDIT_VM" ]] && grep -q '"sandbox_id":"vm-e2e"' "$AUDIT_VM"; then
+        pass "audit log attributes guest call to vm-e2e"
+    else
+        fail "audit log attribution from real guest" \
+             "no vm-e2e entries in $AUDIT_VM"
+    fi
+
+    # Cleanup the leftover sandbox state so the test can be re-run.
+    $ABOX stop vm-e2e --clean 2>/dev/null || true
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 section "summary"
 TOTAL=$((PASS_COUNT + FAIL_COUNT))

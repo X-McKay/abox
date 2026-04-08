@@ -34,7 +34,13 @@ impl BootMeta {
     /// escaped using the standard `'\''` shell idiom. Environment
     /// variables are exported before the `exec`.
     pub fn runner_script(&self) -> String {
-        let mut s = String::from("#!/bin/sh\nexport ABOX_SANDBOX_ID='");
+        let mut s = String::from("#!/bin/sh\n");
+        // Change to the workspace mount so the agent's CWD is the git worktree.
+        // Also export ABOX_CWD so the shim can use it directly if getcwd(2)
+        // fails (e.g. virtiofs mount points can confuse getcwd on some kernels).
+        s.push_str("cd /workspace 2>/dev/null || true\n");
+        s.push_str("export ABOX_CWD=/workspace\n");
+        s.push_str("export ABOX_SANDBOX_ID='");
         s.push_str(&sh_escape(&self.sandbox_id));
         s.push_str("'\n");
         for (k, v) in &self.env {

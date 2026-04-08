@@ -32,6 +32,10 @@ const PROXY_SOCKET: &str = "/run/abox-proxy.sock";
 /// attribute every request to the originating sandbox.
 const SANDBOX_ID_ENV: &str = "ABOX_SANDBOX_ID";
 
+/// Optional environment variable that overrides `getcwd(2)` for the CWD
+/// passed to the proxy. Useful when virtiofs mount points confuse getcwd.
+const CWD_OVERRIDE_ENV: &str = "ABOX_CWD";
+
 // ─── Entry point ────────────────────────────────────────────────────────────
 
 fn main() -> ExitCode {
@@ -46,8 +50,12 @@ fn main() -> ExitCode {
 
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let (command, cmd_args) = parse_args()?;
-    let cwd = std::env::current_dir()
-        .map_or_else(|_| "/workspace".to_string(), |p| p.display().to_string());
+    // ABOX_CWD overrides getcwd(2) — used when virtiofs mounts confuse the
+    // kernel's getcwd path resolution.
+    let cwd = std::env::var(CWD_OVERRIDE_ENV).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map_or_else(|_| "/workspace".to_string(), |p| p.display().to_string())
+    });
     let sandbox_id = std::env::var(SANDBOX_ID_ENV).ok();
 
     let request = ProxyRequest { command, args: cmd_args, cwd, sandbox_id };

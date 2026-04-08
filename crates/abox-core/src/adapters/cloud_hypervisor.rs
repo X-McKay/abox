@@ -60,7 +60,8 @@ impl VmPort for CloudHypervisorAdapter {
         let virtiofs_socket = self.runtime_dir.join(format!("virtiofs-{}.sock", config.id));
         let meta_socket = self.runtime_dir.join(format!("virtiofs-meta-{}.sock", config.id));
         let api_socket = self.runtime_dir.join(format!("ch-api-{}.sock", config.id));
-        let console_socket = self.runtime_dir.join(format!("console-{}.sock", config.id));
+        // cloud-hypervisor v44 supports file= for console but not socket=.
+        let console_socket = self.runtime_dir.join(format!("console-{}.log", config.id));
         let vsock_socket = self.runtime_dir.join(format!("vsock-{}.sock", config.id));
         let meta_dir = self.runtime_dir.join(format!("meta-{}", config.id));
 
@@ -73,10 +74,11 @@ impl VmPort for CloudHypervisorAdapter {
         meta.stage(&meta_dir)
             .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
 
-        // Clean up any stale sockets from a previous run
-        for sock in [&virtiofs_socket, &meta_socket, &api_socket, &console_socket, &vsock_socket] {
+        // Clean up any stale sockets/files from a previous run
+        for sock in [&virtiofs_socket, &meta_socket, &api_socket, &vsock_socket] {
             let _ = std::fs::remove_file(sock);
         }
+        let _ = std::fs::remove_file(&console_socket);
 
         // ── Step 1: Start workspace virtiofsd ──
         // virtiofsd serves the git worktree to the VM via the vhost-user protocol.
@@ -98,13 +100,14 @@ impl VmPort for CloudHypervisorAdapter {
             .await
             .context("workspace virtiofsd socket did not appear within 5 seconds")?;
 
-        // ── Step 1b: Start meta virtiofsd (read-only) ──
+        // ── Step 1b: Start meta virtiofsd ──
+        // Note: virtiofsd 1.x removed the --readonly flag; the guest only reads
+        // this mount in practice.
         let meta_virtiofsd_child = Command::new("virtiofsd")
             .arg(format!("--socket-path={}", meta_socket.display()))
             .arg(format!("--shared-dir={}", meta_dir.display()))
             .arg("--cache=never")
             .arg("--sandbox=none")
-            .arg("--readonly")
             .kill_on_drop(true)
             .spawn()
             .context("Failed to start meta virtiofsd")?;
@@ -123,7 +126,7 @@ impl VmPort for CloudHypervisorAdapter {
         // ── Step 2: Start Cloud Hypervisor ──
         // --memory shared=on is REQUIRED for virtiofs (enables shared memory mapping).
         // --fs connects both virtiofsd sockets as virtio-fs devices.
-        // --console socket connects the VM's serial console for `abox attach`.
+        // --console file= captures the VM's serial console for debugging.
         // --vsock allows the guest shim to communicate with the host proxy daemon.
         let ch_child = Command::new("cloud-hypervisor")
             .arg("--api-socket")
@@ -138,12 +141,13 @@ impl VmPort for CloudHypervisorAdapter {
             .arg(config.kernel_path.display().to_string())
             .arg("--cmdline")
             .arg("console=hvc0 root=/dev/vda rw quiet")
+            // cloud-hypervisor v44+ requires multiple --fs values as separate
+            // positional values after a single --fs flag (not repeated --fs flags).
             .arg("--fs")
             .arg(format!(
                 "tag=workspace,socket={},num_queues=1,queue_size=1024",
                 virtiofs_socket.display()
             ))
-            .arg("--fs")
             .arg(format!(
                 "tag=aboxmeta,socket={},num_queues=1,queue_size=512",
                 meta_socket.display()
@@ -151,7 +155,7 @@ impl VmPort for CloudHypervisorAdapter {
             .arg("--vsock")
             .arg(format!("cid=3,socket={}", vsock_socket.display()))
             .arg("--console")
-            .arg(format!("socket={}", console_socket.display()))
+            .arg(format!("file={}", console_socket.display()))
             .kill_on_drop(true)
             .spawn()
             .context(
@@ -256,8 +260,17 @@ impl VmPort for CloudHypervisorAdapter {
     }
 
     async fn info(&self, id: &str) -> Result<VmInfo> {
-        let vms = self.vms.lock().await;
-        let vm = vms.get(id).context("VM not found")?;
+        let mut vms = self.vms.lock().await;
+        let vm = vms.get_mut(id).context("VM not found")?;
+        // If the cloud-hypervisor process has exited, treat the VM as gone.
+        if let Ok(Some(_)) = vm.ch_child.try_wait() {
+            drop(vms);
+            // Remove from registry so the next info() call returns an error,
+            // which is what sandbox.rs's polling loop watches for.
+            let mut vms = self.vms.lock().await;
+            vms.remove(id);
+            bail!("VM '{}' has exited", id);
+        }
         Ok(VmInfo {
             id: id.to_string(),
             pid: vm.ch_child.id().unwrap_or(0),

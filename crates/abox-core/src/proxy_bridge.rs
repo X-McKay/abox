@@ -53,6 +53,11 @@ pub struct ProxyBridge {
     policy: Arc<PolicyEngine>,
     audit: Arc<dyn AuditSink>,
     attribution: SandboxAttribution,
+    /// Optional: translate guest CWD prefix to a host path.
+    /// When set, a guest CWD starting with `guest_prefix` has that prefix
+    /// replaced with `host_prefix`. Used so that `/workspace` in the VM maps
+    /// to the actual git worktree on the host.
+    cwd_map: Option<(String, PathBuf)>,
 }
 
 impl ProxyBridge {
@@ -63,7 +68,14 @@ impl ProxyBridge {
         audit: Arc<dyn AuditSink>,
         attribution: SandboxAttribution,
     ) -> Self {
-        Self { socket_path, policy, audit, attribution }
+        Self { socket_path, policy, audit, attribution, cwd_map: None }
+    }
+
+    /// Set a CWD translation: requests whose `cwd` starts with `guest_prefix`
+    /// will have that prefix replaced by `host_root` when executing on the host.
+    pub fn with_cwd_map(mut self, guest_prefix: impl Into<String>, host_root: PathBuf) -> Self {
+        self.cwd_map = Some((guest_prefix.into(), host_root));
+        self
     }
 
     /// Bind the listener and serve forever. Removes any stale socket file
@@ -83,13 +95,16 @@ impl ProxyBridge {
         let policy = self.policy;
         let audit = self.audit;
         let attribution = Arc::new(self.attribution);
+        let cwd_map = self.cwd_map.map(Arc::new);
         loop {
             let (stream, _) = listener.accept().await?;
             let policy = Arc::clone(&policy);
             let audit = Arc::clone(&audit);
             let attribution = Arc::clone(&attribution);
+            let cwd_map = cwd_map.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle(stream, &policy, audit.as_ref(), attribution.as_ref()).await
+                if let Err(e) =
+                    handle(stream, &policy, audit.as_ref(), attribution.as_ref(), cwd_map.as_deref()).await
                 {
                     tracing::error!(error = %e, "proxy bridge connection error");
                 }
@@ -103,6 +118,7 @@ async fn handle(
     policy: &PolicyEngine,
     audit: &dyn AuditSink,
     attribution: &SandboxAttribution,
+    cwd_map: Option<&(String, PathBuf)>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -111,7 +127,20 @@ async fn handle(
     if line.trim().is_empty() {
         return Ok(());
     }
-    let request: ProxyRequest = serde_json::from_str(line.trim())?;
+    let mut request: ProxyRequest = serde_json::from_str(line.trim())?;
+
+    // Translate guest CWD to host path if a cwd_map was configured.
+    if let Some((guest_prefix, host_root)) = cwd_map {
+        if request.cwd.starts_with(guest_prefix.as_str()) {
+            let suffix = request.cwd.trim_start_matches(guest_prefix.as_str()).trim_start_matches('/');
+            let host_cwd = if suffix.is_empty() {
+                host_root.clone()
+            } else {
+                host_root.join(suffix)
+            };
+            request.cwd = host_cwd.display().to_string();
+        }
+    }
 
     let sandbox_id = match attribution {
         SandboxAttribution::Fixed(id) => id.clone(),
@@ -124,6 +153,7 @@ async fn handle(
         sandbox_id = %sandbox_id,
         command = %request.command,
         args = ?request.args,
+        cwd = %request.cwd,
         "proxy bridge request"
     );
 
@@ -185,6 +215,61 @@ fn resolve_cwd(guest_cwd: &str) -> PathBuf {
 /// audit log lives in `abox-proxyd::audit::AuditLog`, which has its own
 /// `AuditSink` impl.
 pub struct TracingAuditSink;
+
+/// A file-based audit sink that writes JSON lines to a log file.
+/// Used by the per-VM proxy bridge so that guest requests appear in the
+/// same audit file as requests through `abox-proxyd`.
+pub struct FileAuditSink {
+    writer: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
+}
+
+impl FileAuditSink {
+    /// Open (or create + append to) the given path as an audit log.
+    pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file =
+            std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self { writer: std::sync::Mutex::new(std::io::BufWriter::new(file)) })
+    }
+}
+
+impl AuditSink for FileAuditSink {
+    fn log_cli(
+        &self,
+        sandbox_id: &str,
+        command: &str,
+        args: &[String],
+        decision: &str,
+        exit_code: i32,
+    ) {
+        use std::io::Write;
+        use chrono::Utc;
+        let entry = serde_json::json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "sandbox_id": sandbox_id,
+            "request_type": "cli",
+            "target": command,
+            "detail": args.join(" "),
+            "decision": decision,
+            "result_code": exit_code,
+        });
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = writeln!(w, "{}", entry);
+            let _ = w.flush();
+        }
+        // Also emit through tracing for visibility.
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            command = %command,
+            args = ?args,
+            decision = %decision,
+            exit_code,
+            "cli"
+        );
+    }
+}
 
 impl AuditSink for TracingAuditSink {
     fn log_cli(

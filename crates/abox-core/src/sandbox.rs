@@ -234,15 +234,35 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     ) -> Result<i32> {
         let status = self.create_sandbox(params).await?;
         let task_id = status.id.clone();
+        let worktree_path = std::path::PathBuf::from(&status.worktree_path);
 
         // Spawn the per-VM proxy bridge bound to vsock-<id>.sock_5000.
         let bridge_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5000"));
+        // Use a file-based audit sink so guest requests appear in the same
+        // audit JSONL file used by abox-proxyd. Fall back to TracingAuditSink
+        // if the log file can't be opened.
+        let audit_path = self.config.logs_dir().join("audit.jsonl");
+        let audit_sink: std::sync::Arc<dyn crate::proxy_bridge::AuditSink> =
+            match crate::proxy_bridge::FileAuditSink::open(&audit_path) {
+                Ok(sink) => std::sync::Arc::new(sink),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %audit_path.display(),
+                        "Could not open audit log; falling back to tracing-only"
+                    );
+                    std::sync::Arc::new(crate::proxy_bridge::TracingAuditSink)
+                }
+            };
+        // Map guest /workspace → host worktree so that the shim's CWD
+        // (which is /workspace inside the VM) resolves to the real path.
         let bridge = crate::proxy_bridge::ProxyBridge::new(
             bridge_socket,
             policy,
-            std::sync::Arc::new(crate::proxy_bridge::TracingAuditSink),
+            audit_sink,
             crate::proxy_bridge::SandboxAttribution::Fixed(task_id.clone()),
-        );
+        )
+        .with_cwd_map("/workspace", worktree_path);
         let bridge_handle = tokio::spawn(async move {
             if let Err(e) = bridge.run().await {
                 tracing::error!(error = %e, "proxy bridge crashed");

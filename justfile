@@ -81,3 +81,17 @@ deps:
 # Check for outdated dependencies (requires cargo-outdated)
 outdated:
     cargo outdated --workspace
+
+# ─── VM ──────────────────────────────────────────────────────────────────────
+
+# Bootstrap the host: download cloud-hypervisor, virtiofsd, kernel, and rootfs.
+bootstrap-vm:
+    ./scripts/bootstrap_vm.sh
+
+# Wipe the local VM install (does not touch the vendor cache).
+clean-vm:
+    rm -rf ~/.abox/vm
+
+# Run the e2e test, including phase 6 (live VM) if the bootstrap is present.
+e2e-vm:
+    ./scripts/e2e_test.sh
