@@ -101,6 +101,10 @@ SCRATCH="$REPO_ROOT/.scratch/e2e-run-$$"
 ABOX_BIN="$REPO_ROOT/target/debug/abox"
 PROXYD_BIN="$REPO_ROOT/target/debug/abox-proxyd"
 
+# Register the cleanup trap as early as possible — before any `set -u`
+# expansion or `set -e`-sensitive command — so a startup failure still
+# removes the scratch dir. Don't reference any variables that aren't set
+# yet (PROXYD_PID is checked with ${VAR:-}).
 cleanup() {
     if [[ -n "${PROXYD_PID:-}" ]] && kill -0 "$PROXYD_PID" 2>/dev/null; then
         kill "$PROXYD_PID" 2>/dev/null || true
@@ -108,7 +112,13 @@ cleanup() {
     fi
     rm -rf "$SCRATCH"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
+
+# Sweep stale scratch dirs from previous runs that were SIGKILL'd before
+# their EXIT trap could fire (>1 hour old, so we never race a concurrent
+# run). Best-effort, ignored if the parent dir doesn't exist yet.
+find "$REPO_ROOT/.scratch" -maxdepth 1 -name 'e2e-run-*' -type d -mmin +60 \
+    -exec rm -rf {} + 2>/dev/null || true
 
 section "abox end-to-end test"
 printf '%srepo:%s    %s\n' "$DIM" "$RESET" "$REPO_ROOT"
