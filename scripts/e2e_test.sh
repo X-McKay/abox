@@ -447,6 +447,88 @@ else
         fi
     fi
     $ABOX stop vm-e2e-fail --clean 2>/dev/null || true
+
+    # ─── Phase 7: agent lifecycle (commit, divergence, deny, merge) ───────
+    section "phase 7 — agent lifecycle (gated)"
+
+    step "Boot a sandbox that creates a file, commits it, and exits"
+    how 'abox run --task lifecycle -- /bin/sh -c "create LICENSE, git add, git commit"'
+    expect "agent exits 0; worktree has 1 commit ahead of main"
+    if timeout 90 $ABOX run --task lifecycle --base main -- \
+        /bin/sh -c 'echo "MIT License" > LICENSE && git add LICENSE && git -c user.email=e2e@abox -c user.name=e2e commit -q -m "add license"' \
+        >"$SCRATCH/lifecycle-run.log" 2>&1; then
+        pass "agent commit sandbox booted and exited cleanly"
+    else
+        rc=$?
+        fail "agent commit sandbox" "exit=$rc"
+        tail -20 "$SCRATCH/lifecycle-run.log" | sed "s/^/    /"
+    fi
+
+    step "abox list shows the sandbox with commits ahead"
+    how "abox list"
+    expect "lifecycle sandbox is listed with AHEAD >= 1"
+    LIST_OUT=$($ABOX list 2>&1)
+    if echo "$LIST_OUT" | grep -q "lifecycle"; then
+        pass "list shows lifecycle sandbox"
+    else
+        fail "list shows lifecycle sandbox" "not found in list output"
+        echo "$LIST_OUT" | sed "s/^/    /"
+    fi
+
+    step "abox divergence shows the new file"
+    how "abox divergence"
+    expect "LICENSE appears with status Added"
+    DIV_OUT=$($ABOX divergence 2>&1)
+    if echo "$DIV_OUT" | grep -q "LICENSE"; then
+        pass "divergence shows LICENSE"
+    else
+        fail "divergence shows LICENSE" "LICENSE not in divergence output"
+        echo "$DIV_OUT" | sed "s/^/    /"
+    fi
+
+    step "Policy denies git push --force from inside a sandbox"
+    how 'abox run --task deny-test -- git push --force origin main'
+    expect "exit 126; stderr mentions denied"
+    DENY_OUT=$(timeout 90 $ABOX run --task deny-test --base main -- \
+        /usr/local/bin/git push --force origin main 2>&1 || true)
+    if echo "$DENY_OUT" | grep -qi "denied"; then
+        pass "force push denied by policy"
+    else
+        fail "force push denied by policy" "no 'denied' in output"
+        echo "$DENY_OUT" | tail -10 | sed "s/^/    /"
+    fi
+    $ABOX stop deny-test --clean 2>/dev/null || true
+
+    step "abox merge integrates the agent's commit into main"
+    how "abox merge lifecycle"
+    expect "merge succeeds; git log on main contains 'add license'"
+    MERGE_OUT=$($ABOX merge lifecycle 2>&1)
+    if echo "$MERGE_OUT" | grep -qi "successfully merged"; then
+        pass "merge succeeded"
+    else
+        fail "merge succeeded" "unexpected output"
+        echo "$MERGE_OUT" | sed "s/^/    /"
+    fi
+    # Verify the commit actually landed on main.
+    MAIN_LOG=$(cd "$SCRATCH/repo" && git log --oneline main -5)
+    if echo "$MAIN_LOG" | grep -q "add license"; then
+        pass "agent commit is on main after merge"
+    else
+        fail "agent commit on main" "not found in git log"
+        echo "$MAIN_LOG" | sed "s/^/    /"
+    fi
+
+    step "abox stop --clean removes the sandbox completely"
+    how "abox stop lifecycle --clean && abox list"
+    expect "no active sandboxes"
+    $ABOX stop lifecycle --clean 2>/dev/null || true
+    FINAL_LIST=$($ABOX list 2>&1)
+    if echo "$FINAL_LIST" | grep -q "No active sandboxes"; then
+        pass "sandbox fully cleaned up"
+    else
+        fail "sandbox cleanup" "sandboxes still present"
+        echo "$FINAL_LIST" | sed "s/^/    /"
+    fi
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
