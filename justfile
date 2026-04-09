@@ -96,6 +96,16 @@ bench-vm:
 bench-vm-n n="5":
     ./scripts/bench.sh --runs {{n}}
 
+# ─── Release ────────────────────────────────────────────────────────────────
+
+# Cut a release: bump version, run all checks + benchmarks, update README, tag.
+release version:
+    ./scripts/release.sh {{version}}
+
+# Dry-run a release (no commit, no tag — shows what would happen).
+release-dry version:
+    ./scripts/release.sh {{version}} --dry
+
 # ─── VM ──────────────────────────────────────────────────────────────────────
 
 # Bootstrap the host: download cloud-hypervisor, virtiofsd, kernel, and rootfs.
