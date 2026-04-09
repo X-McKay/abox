@@ -82,6 +82,20 @@ deps:
 outdated:
     cargo outdated --workspace
 
+# ─── Benchmarks ─────────────────────────────────────────────────────────────
+
+# Run criterion microbenchmarks (policy, serialization, boot meta). No VM needed.
+bench:
+    cargo bench -p abox-core
+
+# Run real VM latency benchmarks (requires bootstrap + /dev/kvm).
+bench-vm:
+    ./scripts/bench.sh
+
+# Run VM latency benchmarks averaged over N runs.
+bench-vm-n n="5":
+    ./scripts/bench.sh --runs {{n}}
+
 # ─── VM ──────────────────────────────────────────────────────────────────────
 
 # Bootstrap the host: download cloud-hypervisor, virtiofsd, kernel, and rootfs.
