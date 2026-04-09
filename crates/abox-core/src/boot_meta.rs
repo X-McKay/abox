@@ -39,6 +39,7 @@ impl BootMeta {
         // Also export ABOX_CWD so the shim can use it directly if getcwd(2)
         // fails (e.g. virtiofs mount points can confuse getcwd on some kernels).
         s.push_str("cd /workspace 2>/dev/null || true\n");
+        s.push_str("export PATH='/usr/local/bin:/usr/bin:/bin:/sbin'\n");
         s.push_str("export ABOX_CWD=/workspace\n");
         s.push_str("export ABOX_SANDBOX_ID='");
         s.push_str(&sh_escape(&self.sandbox_id));
@@ -112,6 +113,7 @@ mod tests {
         };
         let script = meta.runner_script();
         assert!(script.starts_with("#!/bin/sh\n"));
+        assert!(script.contains("export PATH='/usr/local/bin:/usr/bin:/bin:/sbin'\n"));
         assert!(script.contains("export ABOX_SANDBOX_ID='task-a'\n"));
         assert!(script.contains("\nexec '/bin/echo' 'hello'\n"));
     }
