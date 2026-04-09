@@ -195,9 +195,9 @@ Updated at release v${VERSION} ($(date +%Y-%m-%d)).
 | Proxy round-trip | ${proxy_rt} ms | Bridge ready to \`git status\` response |
 | Full \`abox run\` | ${full_run} ms | Total wall time for trivial guest command |
 | Sandbox cleanup | ${cleanup} ms | \`abox stop --clean\` teardown |
-| Policy evaluation | ~${policy_ns} ns | \`evaluate_cli\` for \`git status\` (allowed) |
-| Request serialization | ~${serial_ns} ns | JSON encode of \`ProxyRequest\` |
-| Boot meta generation | ~${bootmeta_ns} ns | \`BootMeta::to_json()\` |
+| Policy evaluation | ~${policy_ns} | \`evaluate_cli\` for \`git status\` (allowed) |
+| Request serialization | ~${serial_ns} | JSON encode of \`ProxyRequest\` |
+| Boot meta generation | ~${bootmeta_ns} | \`BootMeta::to_json()\` |
 | Release binary | ${binary_mb} MB | \`target/release/abox\` (LTO + strip) |
 
 Run \`just bench\` (criterion, no VM) or \`just bench-vm-n 5\` (VM latency) to reproduce."
