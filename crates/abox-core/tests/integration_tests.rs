@@ -731,6 +731,8 @@ async fn test_orchestrator_create_sandbox() {
             user: None,
             env_vars: vec![],
             command: vec!["claude".to_string()],
+            timeout_secs: None,
+            ephemeral: false,
         })
         .await
         .unwrap();
@@ -762,6 +764,8 @@ async fn test_orchestrator_create_multiple_sandboxes() {
             user: None,
             env_vars: vec![],
             command: vec!["claude".to_string()],
+            timeout_secs: None,
+            ephemeral: false,
         })
         .await
         .unwrap();
@@ -796,6 +800,8 @@ async fn test_orchestrator_stop_sandbox() {
         user: None,
         env_vars: vec![],
         command: vec!["claude".to_string()],
+        timeout_secs: None,
+        ephemeral: false,
     })
     .await
     .unwrap();
@@ -827,6 +833,8 @@ async fn test_orchestrator_stop_with_clean() {
         user: None,
         env_vars: vec![],
         command: vec!["claude".to_string()],
+        timeout_secs: None,
+        ephemeral: false,
     })
     .await
     .unwrap();
@@ -859,6 +867,8 @@ async fn test_orchestrator_divergence() {
             user: None,
             env_vars: vec![],
             command: vec!["claude".to_string()],
+            timeout_secs: None,
+            ephemeral: false,
         })
         .await
         .unwrap();
@@ -901,6 +911,8 @@ async fn test_orchestrator_vm_config_overrides() {
         user: Some("agent-user".to_string()),
         env_vars: vec![("FOO".to_string(), "bar".to_string())],
         command: vec!["claude".to_string()],
+        timeout_secs: None,
+        ephemeral: false,
     })
     .await
     .unwrap();
@@ -1001,6 +1013,8 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         user: None,
         env_vars: vec![],
         command: vec!["true".into()],
+        timeout_secs: None,
+        ephemeral: false,
     };
 
     let policy = std::sync::Arc::new(
@@ -1044,4 +1058,405 @@ fn test_read_exit_code_malformed_returns_none() {
     std::fs::write(tmp.path().join("exit-code"), "not-a-number").unwrap();
     let code = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path());
     assert_eq!(code, None);
+}
+
+// ─── Timeout Tests ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_run_sandbox_timeout_returns_124() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A mock VM that never exits on its own — `info()` always returns Ok.
+    /// `stop()` records calls so we can verify graceful shutdown was attempted,
+    /// and after stop is called, `info()` starts returning Err (simulating
+    /// the VM exiting after graceful shutdown).
+    struct NeverExitVm {
+        stop_calls: AtomicUsize,
+    }
+
+    impl VmPort for NeverExitVm {
+        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
+            Ok(VmInfo {
+                id: config.id,
+                pid: 99999,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
+            // After stop() is called, simulate VM gone.
+            if self.stop_calls.load(Ordering::SeqCst) > 0 {
+                anyhow::bail!("VM exited after stop");
+            }
+            Ok(VmInfo {
+                id: id.to_string(),
+                pid: 99999,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+    }
+
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    config.ensure_dirs().unwrap();
+
+    let vm = NeverExitVm { stop_calls: AtomicUsize::new(0) };
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+
+    let params = CreateSandboxParams {
+        task_id: "timeout-test".into(),
+        base_branch: "main".into(),
+        template: None,
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["sleep".into(), "infinity".into()],
+        timeout_secs: Some(1), // 1-second timeout
+        ephemeral: false,
+    };
+
+    let policy = std::sync::Arc::new(
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "allow".into(),
+            default_egress_action: "deny".into(),
+        })
+        .unwrap(),
+    );
+
+    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    assert_eq!(exit, 124, "timeout should produce exit code 124");
+}
+
+#[tokio::test]
+async fn test_run_sandbox_exits_before_timeout() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A mock VM that exits after 1 info() call, well before any timeout.
+    struct QuickExitVm {
+        info_calls: AtomicUsize,
+        status_dir: PathBuf,
+    }
+
+    impl VmPort for QuickExitVm {
+        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
+            Ok(VmInfo {
+                id: config.id,
+                pid: 12345,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
+            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(VmInfo {
+                    id: id.to_string(),
+                    pid: 12345,
+                    state: VmState::Running,
+                    api_socket: PathBuf::from("/tmp/api.sock"),
+                    console_socket: PathBuf::from("/tmp/console.sock"),
+                })
+            } else {
+                anyhow::bail!("VM exited")
+            }
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+
+        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
+            Some(self.status_dir.clone())
+        }
+    }
+
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    config.ensure_dirs().unwrap();
+
+    // Pre-stage exit code 42.
+    let status_dir = tmp.path().join("status-quick-exit");
+    std::fs::create_dir_all(&status_dir).unwrap();
+    std::fs::write(status_dir.join("exit-code"), "42\n").unwrap();
+
+    let vm = QuickExitVm { info_calls: AtomicUsize::new(0), status_dir };
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+
+    let params = CreateSandboxParams {
+        task_id: "quick-exit".into(),
+        base_branch: "main".into(),
+        template: None,
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["true".into()],
+        timeout_secs: Some(60), // generous timeout — should not fire
+        ephemeral: false,
+    };
+
+    let policy = std::sync::Arc::new(
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "allow".into(),
+            default_egress_action: "deny".into(),
+        })
+        .unwrap(),
+    );
+
+    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    assert_eq!(exit, 42, "should return the guest's exit code, not 124");
+}
+
+// ─── Ephemeral Tests ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_run_sandbox_ephemeral_cleans_up() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ExitingMockVm {
+        info_calls: AtomicUsize,
+        status_dir: PathBuf,
+    }
+
+    impl VmPort for ExitingMockVm {
+        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
+            Ok(VmInfo {
+                id: config.id,
+                pid: 12345,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
+            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(VmInfo {
+                    id: id.to_string(),
+                    pid: 12345,
+                    state: VmState::Running,
+                    api_socket: PathBuf::from("/tmp/api.sock"),
+                    console_socket: PathBuf::from("/tmp/console.sock"),
+                })
+            } else {
+                anyhow::bail!("VM exited")
+            }
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+
+        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
+            Some(self.status_dir.clone())
+        }
+    }
+
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    config.ensure_dirs().unwrap();
+
+    let status_dir = tmp.path().join("status-ephemeral");
+    std::fs::create_dir_all(&status_dir).unwrap();
+    std::fs::write(status_dir.join("exit-code"), "0\n").unwrap();
+
+    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0), status_dir };
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+
+    let params = CreateSandboxParams {
+        task_id: "ephemeral-test".into(),
+        base_branch: "main".into(),
+        template: None,
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["true".into()],
+        timeout_secs: None,
+        ephemeral: true,
+    };
+
+    let policy = std::sync::Arc::new(
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "allow".into(),
+            default_egress_action: "deny".into(),
+        })
+        .unwrap(),
+    );
+
+    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    assert_eq!(exit, 0);
+
+    // Worktree should be cleaned up in ephemeral mode.
+    assert!(
+        !wt_base.join("ephemeral-test").exists(),
+        "ephemeral mode should remove the worktree"
+    );
+}
+
+#[tokio::test]
+async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ExitingMockVm {
+        info_calls: AtomicUsize,
+        status_dir: PathBuf,
+    }
+
+    impl VmPort for ExitingMockVm {
+        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
+            Ok(VmInfo {
+                id: config.id,
+                pid: 12345,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
+            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(VmInfo {
+                    id: id.to_string(),
+                    pid: 12345,
+                    state: VmState::Running,
+                    api_socket: PathBuf::from("/tmp/api.sock"),
+                    console_socket: PathBuf::from("/tmp/console.sock"),
+                })
+            } else {
+                anyhow::bail!("VM exited")
+            }
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+
+        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
+            Some(self.status_dir.clone())
+        }
+    }
+
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    config.ensure_dirs().unwrap();
+
+    let status_dir = tmp.path().join("status-non-ephemeral");
+    std::fs::create_dir_all(&status_dir).unwrap();
+    std::fs::write(status_dir.join("exit-code"), "0\n").unwrap();
+
+    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0), status_dir };
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+
+    let params = CreateSandboxParams {
+        task_id: "non-ephemeral-test".into(),
+        base_branch: "main".into(),
+        template: None,
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["true".into()],
+        timeout_secs: None,
+        ephemeral: false,
+    };
+
+    let policy = std::sync::Arc::new(
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "allow".into(),
+            default_egress_action: "deny".into(),
+        })
+        .unwrap(),
+    );
+
+    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    assert_eq!(exit, 0);
+
+    // Worktree should still exist when NOT ephemeral.
+    assert!(
+        wt_base.join("non-ephemeral-test").exists(),
+        "non-ephemeral mode should preserve the worktree"
+    );
 }
