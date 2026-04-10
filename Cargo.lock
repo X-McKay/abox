@@ -78,6 +78,7 @@ version = "0.1.0"
 dependencies = [
  "abox-protocol",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
