@@ -3,7 +3,7 @@
 //! Orchestrates `virtiofsd` and `cloud-hypervisor` processes to create
 //! hardware-isolated MicroVMs with virtiofs-mounted git worktrees.
 
-use crate::vm::{VmConfig, VmInfo, VmPort, VmState};
+use crate::vm::{StartMode, VmConfig, VmInfo, VmPort, VmState};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -190,51 +190,83 @@ impl VmPort for CloudHypervisorAdapter {
         );
 
         // ── Step 2: Start Cloud Hypervisor ──
-        // --memory shared=on is REQUIRED for virtiofs (enables shared memory mapping).
-        // --fs connects both virtiofsd sockets as virtio-fs devices.
-        // --console file= captures the VM's serial console for debugging.
-        // --vsock allows the guest shim to communicate with the host proxy daemon.
-        let ch_child = Command::new("cloud-hypervisor")
-            .arg("--api-socket")
-            .arg(api_socket.display().to_string())
-            .arg("--cpus")
-            .arg(format!("boot={}", config.vcpus))
-            .arg("--memory")
-            .arg(format!("size={}M,shared=on", config.memory_mib))
-            .arg("--disk")
-            .arg(format!("path={}", config.image_path.display()))
-            .arg("--kernel")
-            .arg(config.kernel_path.display().to_string())
-            .arg("--cmdline")
-            .arg("console=hvc0 root=/dev/vda rw quiet")
-            // cloud-hypervisor v44+ requires multiple --fs values as separate
-            // positional values after a single --fs flag (not repeated --fs flags).
-            .arg("--fs")
-            .arg(format!(
-                "tag=workspace,socket={},num_queues=1,queue_size=1024",
-                virtiofs_socket.display()
-            ))
-            .arg(format!(
-                "tag=aboxmeta,socket={},num_queues=1,queue_size=512",
-                meta_socket.display()
-            ))
-            .arg(format!(
-                "tag=aboxstatus,socket={},num_queues=1,queue_size=256",
-                status_socket.display()
-            ))
-            .arg("--vsock")
-            .arg(format!("cid=3,socket={}", vsock_socket.display()))
-            .arg("--console")
-            .arg(format!("file={}", console_socket.display()))
-            .kill_on_drop(true)
-            .spawn()
-            .context(
-                "Failed to start cloud-hypervisor. Run scripts/bootstrap_vm.sh to install it.",
-            )?;
+        let ch_child = match &config.start_mode {
+            StartMode::Fresh => {
+                // --memory shared=on is REQUIRED for virtiofs (enables shared memory mapping).
+                // --fs connects virtiofsd sockets as virtio-fs devices.
+                // --console file= captures the VM's serial console for debugging.
+                // --vsock allows the guest shim to communicate with the host proxy daemon.
+                let child = Command::new("cloud-hypervisor")
+                    .arg("--api-socket")
+                    .arg(api_socket.display().to_string())
+                    .arg("--cpus")
+                    .arg(format!("boot={}", config.vcpus))
+                    .arg("--memory")
+                    .arg(format!("size={}M,shared=on", config.memory_mib))
+                    .arg("--disk")
+                    .arg(format!("path={}", config.image_path.display()))
+                    .arg("--kernel")
+                    .arg(config.kernel_path.display().to_string())
+                    .arg("--cmdline")
+                    .arg("console=hvc0 root=/dev/vda rw quiet")
+                    // cloud-hypervisor v44+ requires multiple --fs values as separate
+                    // positional values after a single --fs flag (not repeated --fs flags).
+                    .arg("--fs")
+                    .arg(format!(
+                        "tag=workspace,socket={},num_queues=1,queue_size=1024",
+                        virtiofs_socket.display()
+                    ))
+                    .arg(format!(
+                        "tag=aboxmeta,socket={},num_queues=1,queue_size=512",
+                        meta_socket.display()
+                    ))
+                    .arg(format!(
+                        "tag=aboxstatus,socket={},num_queues=1,queue_size=256",
+                        status_socket.display()
+                    ))
+                    .arg("--vsock")
+                    .arg(format!("cid=3,socket={}", vsock_socket.display()))
+                    .arg("--console")
+                    .arg(format!("file={}", console_socket.display()))
+                    .kill_on_drop(true)
+                    .spawn()
+                    .context(
+                        "Failed to start cloud-hypervisor. Run scripts/bootstrap_vm.sh to install it.",
+                    )?;
+                child
+            }
+            StartMode::Restore { template_path } => {
+                // Restore from snapshot: CH starts paused, then we resume.
+                let child = Command::new("cloud-hypervisor")
+                    .arg("--api-socket")
+                    .arg(api_socket.display().to_string())
+                    .arg("--restore")
+                    .arg(format!("source_url=file://{}", template_path.display()))
+                    .kill_on_drop(true)
+                    .spawn()
+                    .context("Failed to start cloud-hypervisor in restore mode")?;
+                child
+            }
+        };
 
         Self::wait_for_socket(&api_socket, 10000)
             .await
             .context("Cloud Hypervisor API socket did not appear within 10 seconds")?;
+
+        // In restore mode the VM comes up paused; resume it now that
+        // virtiofsd instances are listening on the expected socket paths.
+        if matches!(&config.start_mode, StartMode::Restore { .. }) {
+            let status = Command::new("ch-remote")
+                .arg("--api-socket")
+                .arg(api_socket.display().to_string())
+                .arg("resume")
+                .status()
+                .await
+                .context("Failed to resume restored VM")?;
+            if !status.success() {
+                bail!("ch-remote resume failed after snapshot restore for '{}'", config.id);
+            }
+        }
 
         let pid = ch_child.id().unwrap_or(0);
 

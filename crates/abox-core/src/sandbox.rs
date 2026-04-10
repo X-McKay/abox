@@ -103,6 +103,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             env_vars: params.env_vars,
             agent_command: params.command.clone(),
             proxy_port: self.config.proxy.egress_port,
+            start_mode: crate::vm::StartMode::default(),
         };
 
         // Step 3: Start the VM. If this fails, roll back the worktree we just
