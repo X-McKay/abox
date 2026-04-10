@@ -46,6 +46,7 @@ fn policy_evaluation(c: &mut Criterion) {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();

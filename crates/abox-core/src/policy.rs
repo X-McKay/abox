@@ -74,6 +74,12 @@ pub struct PolicyFile {
     /// "allow" or "deny". Default: "deny".
     #[serde(default = "default_action")]
     pub default_egress_action: String,
+
+    /// Domains that should bypass TLS termination (passthrough).
+    /// Useful for cert-pinned clients that would reject MITM certs.
+    /// Supports exact match and wildcard prefix (e.g., "*.pinned.io").
+    #[serde(default)]
+    pub bypass_tls: Vec<String>,
 }
 
 fn default_header_template() -> String {
@@ -90,6 +96,7 @@ pub struct PolicyEngine {
     egress_rules: Vec<EgressRule>,
     default_cli_action: String,
     default_egress_action: String,
+    bypass_tls: Vec<String>,
 }
 
 struct CompiledCliPolicy {
@@ -139,6 +146,7 @@ impl PolicyEngine {
             egress_rules: policy.egress,
             default_cli_action: policy.default_cli_action,
             default_egress_action: policy.default_egress_action,
+            bypass_tls: policy.bypass_tls,
         })
     }
 
@@ -209,6 +217,24 @@ impl PolicyEngine {
     /// (and to deliberately unset it for commands that did not opt in).
     pub fn forward_ssh_agent(&self, command: &str) -> bool {
         self.cli_policies.iter().find(|p| p.command == command).is_some_and(|p| p.forward_ssh_agent)
+    }
+
+    /// Check if a domain should bypass TLS termination (passthrough).
+    ///
+    /// Returns `true` for domains in the `bypass_tls` list, which means
+    /// the proxy should use plain TCP passthrough instead of MITM.
+    pub fn is_tls_bypassed(&self, domain: &str) -> bool {
+        for pattern in &self.bypass_tls {
+            if domain_matches(pattern, domain) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Return the list of TLS bypass patterns (for passing to egress proxy).
+    pub fn bypass_tls_patterns(&self) -> &[String] {
+        &self.bypass_tls
     }
 
     /// Evaluate an HTTP egress request.
@@ -350,6 +376,7 @@ mod tests {
             }],
             default_cli_action: "deny".to_string(),
             default_egress_action: "deny".to_string(),
+            bypass_tls: vec![],
         }
     }
 
@@ -556,5 +583,31 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         assert_eq!(decision, Decision::Allow);
+    }
+
+    // ─── TLS bypass tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_tls_bypass_exact_match() {
+        let mut policy = test_policy();
+        policy.bypass_tls = vec!["pinned.example.com".to_string()];
+        let engine = PolicyEngine::from_policy_file(policy).unwrap();
+        assert!(engine.is_tls_bypassed("pinned.example.com"));
+        assert!(!engine.is_tls_bypassed("other.example.com"));
+    }
+
+    #[test]
+    fn test_tls_bypass_wildcard() {
+        let mut policy = test_policy();
+        policy.bypass_tls = vec!["*.pinned.io".to_string()];
+        let engine = PolicyEngine::from_policy_file(policy).unwrap();
+        assert!(engine.is_tls_bypassed("api.pinned.io"));
+        assert!(!engine.is_tls_bypassed("pinned.io"));
+    }
+
+    #[test]
+    fn test_tls_bypass_empty_list() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        assert!(!engine.is_tls_bypassed("anything.com"));
     }
 }

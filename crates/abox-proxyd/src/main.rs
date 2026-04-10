@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
             egress: vec![],
             default_cli_action: "deny".to_string(),
             default_egress_action: "deny".to_string(),
+            bypass_tls: vec![],
         })?
     };
     let policy = Arc::new(policy);
@@ -94,7 +95,8 @@ async fn main() -> Result<()> {
         Arc::clone(&policy),
         Arc::clone(&audit),
         Arc::clone(&root_ca),
-    );
+    )
+    .with_bypass_tls(policy.bypass_tls_patterns().to_vec());
 
     tokio::select! {
         result = cli_server.run() => {

@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
             egress: vec![],
             default_cli_action: "deny".to_string(),
             default_egress_action: "deny".to_string(),
+            bypass_tls: vec![],
         })?
     };
     let policy = std::sync::Arc::new(policy);

@@ -169,6 +169,7 @@ async fn test_cli_proxy_unix_socket_roundtrip() {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
 
@@ -269,6 +270,7 @@ async fn test_cli_proxy_denied_command() {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
 
@@ -353,6 +355,7 @@ fn test_egress_policy_wildcard_matching() {
         }],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
@@ -379,6 +382,7 @@ fn test_egress_policy_exact_domain_matching() {
         }],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
@@ -489,6 +493,7 @@ fn test_policy_multiple_cli_commands() {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
