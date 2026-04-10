@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     }
 
     // CA command does not need the orchestrator
-    if let Commands::Ca(cmd) = cli.command {
+    if let Commands::Ca(ref cmd) = cli.command {
         return commands::ca::execute(cmd);
     }
 

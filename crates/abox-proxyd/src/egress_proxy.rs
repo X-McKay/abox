@@ -19,7 +19,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, ServerName};
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -56,6 +56,7 @@ impl EgressProxyServer {
     }
 
     /// Set the sandbox ID for audit attribution.
+    #[allow(dead_code)] // used when spawning per-sandbox proxy instances
     pub fn with_sandbox_id(mut self, id: String) -> Self {
         self.sandbox_id = Some(id);
         self
@@ -110,6 +111,7 @@ impl EgressProxyServer {
     }
 }
 
+#[allow(clippy::unused_async)] // hyper's service requires async fn signature
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     policy: &PolicyEngine,
@@ -410,7 +412,7 @@ fn build_server_config(
 
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(cert_chain, PrivateKeyDer::from(key))
+        .with_single_cert(cert_chain, key)
         .context("building server TLS config")?;
 
     Ok(config)

@@ -14,7 +14,7 @@ pub enum CaCommand {
     Path,
 }
 
-pub fn execute(cmd: CaCommand) -> Result<()> {
+pub fn execute(cmd: &CaCommand) -> Result<()> {
     let ca_dir = RootCa::default_dir()?;
 
     match cmd {
