@@ -320,7 +320,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             match tokio::time::timeout(std::time::Duration::from_secs(secs), poll_future).await {
                 Ok(()) => false,
                 Err(_elapsed) => {
-                    eprintln!("abox: sandbox '{task_id}' timed out after {secs}s");
+                    tracing::warn!(task_id = %task_id, secs, "sandbox timed out");
                     // Graceful shutdown first.
                     if let Err(e) = self.vm_manager.stop(&task_id).await {
                         tracing::warn!(
@@ -338,7 +338,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                             }
                         }
                     };
-                    if tokio::time::timeout(std::time::Duration::from_secs(10), grace)
+                    if tokio::time::timeout(tuning.vm_timeout_grace_period, grace)
                         .await
                         .is_err()
                     {

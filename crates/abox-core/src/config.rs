@@ -79,6 +79,8 @@ pub struct VmRuntimeTuning {
     /// How long to wait for a virtiofsd / cloud-hypervisor socket file to
     /// appear before bailing out.
     pub socket_wait_timeout: std::time::Duration,
+    /// Grace period after sending a stop command before force-killing the VM.
+    pub vm_timeout_grace_period: std::time::Duration,
 }
 
 impl VmRuntimeTuning {
@@ -88,6 +90,7 @@ impl VmRuntimeTuning {
         vm_exit_poll_interval: std::time::Duration::from_millis(250),
         console_poll_interval: std::time::Duration::from_millis(50),
         socket_wait_timeout: std::time::Duration::from_secs(5),
+        vm_timeout_grace_period: std::time::Duration::from_secs(10),
     };
 }
 
