@@ -36,6 +36,14 @@ When running multiple autonomous agents on a single codebase, you face three pro
 
 ### Installation
 
+**One-command install** (downloads pre-built binary + VM assets from GitHub Releases):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/X-McKay/abox/main/scripts/install.sh | bash
+```
+
+**From source:**
+
 ```bash
 git clone https://github.com/X-McKay/abox.git
 cd abox
@@ -45,8 +53,9 @@ just bootstrap-vm     # downloads the VMM, kernel, builds the rootfs,
 ```
 
 `bootstrap-vm` is idempotent and uses checksummed cached downloads, so
-re-running it is fast (seconds, not minutes). See
-[`docs/vm-setup.md`](docs/vm-setup.md) for the full setup walkthrough.
+re-running it is fast (seconds, not minutes). Supports both x86_64 and
+aarch64 hosts. See [`docs/vm-setup.md`](docs/vm-setup.md) for the full
+setup walkthrough.
 
 ### Documentation
 
@@ -77,25 +86,38 @@ logs, and the runtime socket directory). No root access required.
 
 1. **Start an agent sandbox:**
    ```bash
-   abox run --task fix-auth --base main --command "claude"
+   abox run --task fix-auth --base main -- claude
    ```
 
-2. **List running sandboxes:**
+2. **Start with runtime controls:**
+   ```bash
+   abox run --task fix-auth --timeout 300 --ephemeral -- claude
+   # --timeout N: kill after N seconds (exit code 124)
+   # --ephemeral: auto-remove sandbox after exit
+   ```
+
+3. **Fast start from a template (snapshot restore, ~100ms):**
+   ```bash
+   abox template create --name base --from running-sandbox
+   abox run --template base --task fix-auth -- claude
+   ```
+
+4. **List running sandboxes:**
    ```bash
    abox list
    ```
 
-3. **Check divergence across agents:**
+5. **Check divergence across agents:**
    ```bash
    abox divergence
    ```
 
-4. **Merge a completed task:**
+6. **Merge a completed task:**
    ```bash
    abox merge fix-auth
    ```
 
-5. **Manage the CA (for HTTPS credential injection):**
+7. **Manage the CA (for HTTPS credential injection):**
    ```bash
    abox ca show      # fingerprint + expiry
    abox ca rotate    # regenerate CA + rebuild rootfs
@@ -108,7 +130,7 @@ We use `just` as our command runner. Install it with `cargo install just`.
 
 - `just check`: Run formatting, lints, and tests.
 - `just lint`: Run clippy with strict warnings.
-- `just build-shim`: Build the guest shim (requires `x86_64-unknown-linux-musl` target).
+- `just build-shim`: Build the guest shim (requires the musl target for your host architecture).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development guidelines.
 

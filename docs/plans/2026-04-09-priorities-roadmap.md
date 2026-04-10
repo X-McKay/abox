@@ -1,7 +1,7 @@
 # Implementation Plan: abox Priorities Roadmap
 
 **Date:** 2026-04-09
-**Status:** Draft — for review
+**Status:** Executed — all 5 priorities landed 2026-04-10
 **Source:** DRAFT_PLAN.md priorities, adjusted after codebase analysis
 
 ---

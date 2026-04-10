@@ -227,7 +227,7 @@ The `env_var` is read from the **host** environment, not the guest. The `header_
 **What it is:** The state machine that owns the lifecycle of a sandbox. Lives in `crates/abox-core/src/sandbox.rs`. The two main methods are:
 
 - **`create_sandbox(params)`** — creates a git worktree on `agent/<task>`, builds a `VmConfig`, calls `vm_manager.start(config)`. If VM start fails, rolls back the worktree.
-- **`run_sandbox(params, policy)`** — calls `create_sandbox`, then spawns a per-VM proxy bridge bound to vsock-5000, spawns a console streamer that tails the CH console log to stdout, polls `vm_manager.info()` until the VM exits, drains the console pump, reads the guest exit code from `aboxstatus/exit-code`, and returns it. If the guest never wrote an exit code (catastrophic VM failure before init.sh ran), it logs a warning, rolls the worktree back, and returns 1.
+- **`run_sandbox(params, policy)`** — calls `create_sandbox`, then spawns a per-VM proxy bridge bound to vsock-5000, spawns a console streamer that tails the CH console log to stdout, polls `vm_manager.info()` until the VM exits (or `--timeout` fires), drains the console pump, reads the guest exit code from `aboxstatus/exit-code`, and returns it. If `--timeout` was specified and the VM exceeds it, the orchestrator attempts graceful shutdown, waits a 10-second grace period, force-kills if needed, and returns exit code 124. If `--ephemeral` was set, the worktree and branch are cleaned up regardless of exit code. If the guest never wrote an exit code (catastrophic VM failure before init.sh ran), it logs a warning to both tracing and stderr, rolls the worktree back, and returns 1.
 
 **State machine diagram (rough):**
 
@@ -248,7 +248,7 @@ The `env_var` is read from the **host** environment, not the guest. The `header_
 
 ## 10. The bootstrap script: `bootstrap_vm.sh`
 
-**What it is:** A 200-line bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles a 96 MiB ext4 rootfs containing busybox + socat + the shim + a guest init script.
+**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles a 96 MiB ext4 rootfs containing busybox + socat + the shim + a guest init script. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
 
 **Why it's bash and not Rust:** Bootstrapping is a one-time operation per machine. Bash is universal, easy to read, and avoids the chicken-and-egg problem of "you need cargo to build the bootstrap, but the bootstrap installs cargo's musl target". The `vendor/` cache and SHA256 checksums make it idempotent and recoverable from network blips. The 200 lines are ~50% comments and pinned-version constants — the actual logic is small.
 
@@ -278,18 +278,19 @@ If any of these get re-published or corrupted in transit, the bootstrap fails fa
 
 ## 11. The end-to-end test: `scripts/e2e_test.sh`
 
-**What it is:** A six-phase bash script (`./scripts/e2e_test.sh` or `just e2e`) that exercises every major component without needing a CI runner with KVM enabled.
+**What it is:** A seven-phase bash script (`./scripts/e2e_test.sh` or `just e2e`) that exercises every major component without needing a CI runner with KVM enabled.
 
-**The six phases:**
+**The seven phases:**
 
 1. **build** — `cargo build --workspace`. Catches compile errors before anything else.
 2. **unit + integration tests** — `cargo test --workspace`. Catches test regressions.
 3. **scratch git repo + abox config** — Sets up a self-contained test environment under `.scratch/e2e-run-<pid>`.
 4. **abox CLI workspace ops** — Tests `abox list`, the rollback path when VM start fails, simulated worktrees, `divergence`, `merge`, `stop --clean`.
 5. **abox-proxyd CLI policy enforcement** — Starts the standalone proxy daemon, sends allowed and denied requests to it, verifies the audit log attribution and the legacy-shim fallback.
-6. **full VM end-to-end** *(gated)* — Boots a real microVM, runs `git status` inside it, asserts the audit log contains a `sandbox_id=vm-e2e` entry, then runs `sh -c "exit 7"` and asserts `abox run` returns rc=7. Skipped if `~/.abox/vm/` artifacts aren't present (so phases 1-5 work in CI).
+6. **full VM end-to-end** *(gated)* — Boots a real microVM, runs `git status` inside it, verifies audit log attribution, tests `--detach` lifecycle, and asserts exit code propagation. Skipped if `~/.abox/vm/` artifacts aren't present (so phases 1-5 work in CI).
+7. **agent lifecycle** *(gated)* — Full agent commit/diverge/deny/merge cycle: boots a sandbox that creates a file and commits, verifies divergence reporting, tests policy denial of `git push --force`, merges the work into main, and cleans up. Also runs the HTTPS credential injection e2e (gated on `ANTHROPIC_API_KEY`).
 
-**How to add a seventh phase:** Append a `section "phase 7 — ..."` block at the end of `scripts/e2e_test.sh`. Use `step` / `how` / `expect` / `pass` / `fail` for each assertion. The summary footer counts every `pass`/`fail` invocation, so new phases are picked up automatically.
+**How to add an eighth phase:** Append a `section "phase 8 — ..."` block at the end of `scripts/e2e_test.sh`. Use `step` / `how` / `expect` / `pass` / `fail` for each assertion. The summary footer counts every `pass`/`fail` invocation, so new phases are picked up automatically.
 
 **Why the e2e is in bash and not Rust:** Because phases 4-6 test the *binary* (`./target/debug/abox`) and its actual filesystem and process side effects, not its library API. Bash + the abox CLI is the most accurate simulation of how a user invokes it. The Rust unit tests in `cargo test --workspace` cover the library-level cases (mocks, bypass parsers, exit code helpers); the e2e covers the integration cases.
 
@@ -354,6 +355,6 @@ That's the whole lifecycle. Every step has a single owner and a clear failure mo
 - **[`docs/tutorial.md`](tutorial.md)** — actually do all of this on your machine in 10 minutes.
 - **[`docs/decisions/`](decisions/)** — the architecture decision records for the choices that shaped abox.
 - **[`docs/plans/`](plans/)** — historical and planned implementation work.
-- **[`scripts/e2e_test.sh`](../scripts/e2e_test.sh)** — the canonical "is this thing working?" gate.
-- **[`docs/backlog/2026-04-08-vm-e2e-mvp-followups.md`](backlog/2026-04-08-vm-e2e-mvp-followups.md)** — what's still open after the hardening pass.
-- **[`docs/plans/2026-04-08-credential-injection.md`](plans/2026-04-08-credential-injection.md)** — the deferred plan for the HTTPS MITM proxy.
+- **[`scripts/e2e_test.sh`](../scripts/e2e_test.sh)** — the canonical "is this thing working?" gate (46 assertions across 7 phases).
+- **[`docs/future-work.md`](future-work.md)** — what's next after the priorities roadmap landed.
+- **[`docs/decisions/003-https-credential-injection.md`](decisions/003-https-credential-injection.md)** — ADR for the TLS-terminating MITM proxy architecture.
