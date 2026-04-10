@@ -51,18 +51,7 @@ fn main() -> ExitCode {
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let (command, cmd_args) = parse_args()?;
 
-    // CWD resolution order (most authoritative first):
-    //   1. ABOX_CWD env var (set by /abox-meta/runner.sh; host-known truth)
-    //   2. /proc/self/cwd symlink target — kernel-maintained, more reliable
-    //      than getcwd(2) on some virtiofs kernels which can return the
-    //      wrong path when the process is inside a virtiofs mount.
-    //   3. getcwd(2) fallback
-    //   4. hardcoded "/workspace" if everything else failed
-    let cwd = std::env::var(CWD_OVERRIDE_ENV)
-        .ok()
-        .or_else(|| std::fs::read_link("/proc/self/cwd").ok().map(|p| p.display().to_string()))
-        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
-        .unwrap_or_else(|| "/workspace".to_string());
+    let cwd = resolve_cwd();
     let sandbox_id = std::env::var(SANDBOX_ID_ENV).ok();
 
     let request = ProxyRequest { command, args: cmd_args, cwd, sandbox_id };
@@ -76,6 +65,23 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     }
 
     Ok(response.exit_code)
+}
+
+/// Resolve the current working directory.
+///
+/// Resolution order (most authoritative first):
+///   1. `ABOX_CWD` env var (set by `/abox-meta/runner.sh`; host-known truth)
+///   2. `/proc/self/cwd` symlink target -- kernel-maintained, more reliable
+///      than `getcwd(2)` on some virtiofs kernels which can return the
+///      wrong path when the process is inside a virtiofs mount.
+///   3. `getcwd(2)` fallback
+///   4. Hardcoded `"/workspace"` if everything else failed
+fn resolve_cwd() -> String {
+    std::env::var(CWD_OVERRIDE_ENV)
+        .ok()
+        .or_else(|| std::fs::read_link("/proc/self/cwd").ok().map(|p| p.display().to_string()))
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| "/workspace".to_string())
 }
 
 /// Parse argv to determine the command and arguments.
@@ -127,4 +133,101 @@ fn send_request(request: &ProxyRequest) -> Result<ProxyResponse, Box<dyn std::er
     }
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    // Tests that touch environment variables or cwd must run serially to
+    // avoid races with other tests in the same process.
+
+    #[test]
+    #[serial]
+    fn resolve_cwd_returns_abox_cwd_when_set() {
+        // Temporarily set ABOX_CWD and verify it wins.
+        let _guard = EnvGuard::set(CWD_OVERRIDE_ENV, "/custom/cwd");
+        let cwd = resolve_cwd();
+        assert_eq!(cwd, "/custom/cwd");
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_cwd_falls_back_to_proc_self_cwd() {
+        // With ABOX_CWD unset and a valid cwd, /proc/self/cwd should
+        // resolve to the process's actual working directory.
+        let _guard = EnvGuard::remove(CWD_OVERRIDE_ENV);
+        let cwd = resolve_cwd();
+        // On a normal Linux host /proc/self/cwd is valid, so we should
+        // get either the readlink result or getcwd — both are real paths.
+        assert!(!cwd.is_empty());
+        assert_ne!(cwd, "/workspace", "should not hit the hardcoded fallback on a real host");
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_cwd_uses_real_current_dir() {
+        let _guard = EnvGuard::remove(CWD_OVERRIDE_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let _cwd_guard = CwdGuard::set(tmp.path()).unwrap();
+
+        let cwd = resolve_cwd();
+
+        // The resolved cwd should contain the tmpdir's path (canonicalized).
+        let canonical = tmp.path().canonicalize().unwrap();
+        assert_eq!(cwd, canonical.display().to_string());
+    }
+
+    // ── Helper: RAII env‑var guard ──────────────────────────────────────────
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    // ── Helper: RAII cwd guard ─────────────────────────────────────────────
+
+    /// Saves the current working directory and restores it on drop,
+    /// ensuring `set_current_dir` tests don't leak cwd changes on panic.
+    struct CwdGuard {
+        prev: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+            let prev = std::env::current_dir()?;
+            std::env::set_current_dir(path)?;
+            Ok(Self { prev })
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev);
+        }
+    }
 }

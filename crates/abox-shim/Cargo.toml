@@ -15,5 +15,9 @@ path = "src/main.rs"
 abox-protocol = { path = "../abox-protocol" }
 serde_json = "1"
 
+[dev-dependencies]
+serial_test = "3"
+tempfile = "3"
+
 [lints]
 workspace = true
