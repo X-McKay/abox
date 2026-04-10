@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: x86_64
+          # aarch64 support to be added after N7 lands
+          # - target: aarch64-unknown-linux-gnu
+          #   os: ubuntu-24.04-arm
+          #   arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} -p abox-cli
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abox-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/abox
+
+  vm-assets:
+    name: Bundle VM assets (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vm-assets-${{ matrix.arch }}
+
+      - name: Bootstrap VM stack
+        run: ./scripts/bootstrap_vm.sh --yes --no-symlink
+
+      - name: Create VM assets tarball
+        run: tar czf abox-vm-assets-${{ matrix.arch }}.tar.gz -C "$HOME/.abox/vm" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abox-vm-assets-${{ matrix.arch }}
+          path: abox-vm-assets-${{ matrix.arch }}.tar.gz
+
+  release:
+    name: Publish GitHub Release
+    needs: [build, vm-assets]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Arrange release files
+        run: |
+          mkdir -p release
+          # Copy binaries — rename to include target
+          for dir in artifacts/abox-*-unknown-linux-*; do
+            target="$(basename "$dir")"
+            cp "$dir/abox" "release/$target"
+            chmod +x "release/$target"
+          done
+          # Copy VM asset tarballs
+          cp artifacts/abox-vm-assets-*/abox-vm-assets-*.tar.gz release/
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS
+
+      - name: Extract changelog section
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Extract from "## [VERSION]" or "## vVERSION" to next "## " heading
+          sed -n "/^## .*${VERSION}/,/^## /p" CHANGELOG.md | head -n -1 > RELEASE_NOTES.md
+          # Fallback if extraction is empty
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Release ${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            release/*
