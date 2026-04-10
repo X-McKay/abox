@@ -8,6 +8,7 @@ use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use std::collections::HashMap;
 
 #[derive(Debug, Args)]
 pub struct TemplateArgs {
@@ -88,9 +89,15 @@ pub async fn execute_create<W: WorkspacePort, V: VmPort>(
     // Pause the sandbox so the snapshot is consistent.
     orchestrator.pause_sandbox(from).await?;
 
+    // Record the virtiofsd socket filenames so restores can recreate them.
+    let mut virtiofs_sockets = HashMap::new();
+    virtiofs_sockets.insert("workspace".to_string(), format!("vfs-{from}.sock"));
+    virtiofs_sockets.insert("meta".to_string(), format!("vfs-meta-{from}.sock"));
+    virtiofs_sockets.insert("status".to_string(), format!("vfs-status-{from}.sock"));
+
     // Create the snapshot. On failure, attempt to resume the sandbox so we
     // don't leave it stuck in the paused state.
-    match snap_mgr.create_snapshot(&info.api_socket, name).await {
+    match snap_mgr.create_snapshot(&info.api_socket, name, virtiofs_sockets).await {
         Ok(_path) => {
             orchestrator.resume_sandbox(from).await?;
             println!("Template '{}' created from sandbox '{}'", name, from);

@@ -94,18 +94,43 @@ impl CloudHypervisorAdapter {
 
 impl VmPort for CloudHypervisorAdapter {
     async fn start(&self, config: VmConfig) -> Result<VmInfo> {
-        // NB: socket path prefixes are deliberately short ("vfs-", "vfs-meta-",
-        // "vfs-status-") so the fully-qualified path stays under the Linux
-        // SUN_LEN limit (108 bytes) even for long scratch dirs + task ids.
-        let virtiofs_socket = self.runtime_dir.join(format!("vfs-{}.sock", config.id));
-        let meta_socket = self.runtime_dir.join(format!("vfs-meta-{}.sock", config.id));
-        let status_socket = self.runtime_dir.join(format!("vfs-status-{}.sock", config.id));
         let api_socket = self.runtime_dir.join(format!("ch-api-{}.sock", config.id));
         // cloud-hypervisor v44 supports file= for console but not socket=.
         let console_socket = self.runtime_dir.join(format!("console-{}.log", config.id));
         let vsock_socket = self.runtime_dir.join(format!("vsock-{}.sock", config.id));
         let meta_dir = self.runtime_dir.join(format!("meta-{}", config.id));
         let status_dir = self.runtime_dir.join(format!("status-{}", config.id));
+
+        // In restore mode, virtiofsd sockets must match the original paths
+        // baked into the snapshot. Read them from the template metadata.
+        // In fresh mode, use the standard naming convention.
+        let (virtiofs_socket, meta_socket, status_socket) = match &config.start_mode {
+            StartMode::Fresh => (
+                self.runtime_dir.join(format!("vfs-{}.sock", config.id)),
+                self.runtime_dir.join(format!("vfs-meta-{}.sock", config.id)),
+                self.runtime_dir.join(format!("vfs-status-{}.sock", config.id)),
+            ),
+            StartMode::Restore { template_path } => {
+                let tmpl_meta = crate::snapshot::TemplateMeta::load(template_path)?;
+                let ws = tmpl_meta
+                    .virtiofs_sockets
+                    .get("workspace")
+                    .context("template metadata missing 'workspace' socket")?;
+                let mt = tmpl_meta
+                    .virtiofs_sockets
+                    .get("meta")
+                    .context("template metadata missing 'meta' socket")?;
+                let st = tmpl_meta
+                    .virtiofs_sockets
+                    .get("status")
+                    .context("template metadata missing 'status' socket")?;
+                (
+                    self.runtime_dir.join(ws),
+                    self.runtime_dir.join(mt),
+                    self.runtime_dir.join(st),
+                )
+            }
+        };
 
         // Stage boot metadata into meta_dir.
         let meta = crate::boot_meta::BootMeta {
