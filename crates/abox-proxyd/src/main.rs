@@ -78,11 +78,23 @@ async fn main() -> Result<()> {
     let audit = Arc::new(AuditLog::new(&audit_path)?);
     tracing::info!(path = %audit_path.display(), "Audit log initialized");
 
+    // Load the root CA for TLS-terminating MITM proxy
+    let ca_dir = abox_core::ca::RootCa::default_dir()?;
+    let root_ca = Arc::new(
+        abox_core::ca::RootCa::load_or_generate(&ca_dir)
+            .context("Failed to load or generate root CA")?,
+    );
+    tracing::info!(ca_dir = %ca_dir.display(), "Root CA loaded");
+
     // Start both proxy servers concurrently
     let cli_socket = config.runtime_dir().join("cli-proxy.sock");
     let cli_server = CliProxyServer::new(cli_socket, Arc::clone(&policy), Arc::clone(&audit));
-    let egress_server =
-        EgressProxyServer::new(config.proxy.egress_port, Arc::clone(&policy), Arc::clone(&audit));
+    let egress_server = EgressProxyServer::new(
+        config.proxy.egress_port,
+        Arc::clone(&policy),
+        Arc::clone(&audit),
+        Arc::clone(&root_ca),
+    );
 
     tokio::select! {
         result = cli_server.run() => {
