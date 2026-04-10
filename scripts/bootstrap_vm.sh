@@ -31,8 +31,8 @@ Usage: $(basename "$0") [--no-symlink] [--yes]
   --no-symlink   Do NOT create symlinks in ~/.local/bin. You will need
                  to add $ABOX_VM_DIR to your PATH manually.
   --yes, -y      Non-interactive mode: silently install missing rust
-                 toolchain components (e.g. the x86_64-unknown-linux-musl
-                 target). Without this flag the script fails fast and
+                 toolchain components (e.g. the musl cross-compilation
+                 target for the host architecture). Without this flag the script fails fast and
                  prints the rustup command for you to run yourself.
                  Honored from the BOOTSTRAP_YES=1 environment variable too.
 HELP
@@ -48,47 +48,79 @@ done
 
 source "$REPO_ROOT/scripts/lib/download.sh"
 
+# ─── Architecture detection ─────────────────────────────────────────────────
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64)  ARCH=x86_64;  RUST_TARGET=x86_64-unknown-linux-musl;  DEB_ARCH=amd64 ;;
+    aarch64) ARCH=aarch64;  RUST_TARGET=aarch64-unknown-linux-musl; DEB_ARCH=arm64 ;;
+    *)       echo "ERROR: Unsupported architecture: $HOST_ARCH" >&2; exit 1 ;;
+esac
+
 mkdir -p "$ABOX_VM_DIR" "$REPO_ROOT/vendor"
 
 # ---------------------------------------------------------------------------
 # Artifact versions and URLs
 # ---------------------------------------------------------------------------
 
-# cloud-hypervisor v44.0 — static musl builds (x86_64)
+# cloud-hypervisor v44.0 — static musl builds
 # Source: https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v44.0
 readonly CH_VERSION="v44.0"
-readonly CH_BIN_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static"
-readonly CH_BIN_SHA="f58e5d8684a5cbd7c4b8a001a1188ac79b9d4dda8115e1b3d5faa8c29038119c"
-readonly CH_REMOTE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/ch-remote-static"
-readonly CH_REMOTE_SHA="6d268b947adf2b9b72c13cc8bda156e27c9a450474001d762e9bd211f90136fa"
+if [[ "$ARCH" == "aarch64" ]]; then
+    readonly CH_BIN_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static-aarch64"
+    readonly CH_BIN_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
+    readonly CH_REMOTE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/ch-remote-static-aarch64"
+    readonly CH_REMOTE_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
+else
+    readonly CH_BIN_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static"
+    readonly CH_BIN_SHA="f58e5d8684a5cbd7c4b8a001a1188ac79b9d4dda8115e1b3d5faa8c29038119c"
+    readonly CH_REMOTE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/ch-remote-static"
+    readonly CH_REMOTE_SHA="6d268b947adf2b9b72c13cc8bda156e27c9a450474001d762e9bd211f90136fa"
+fi
 
 # virtiofsd 1.10.0 — from Ubuntu noble universe (dynamically linked, requires host libc/libcap-ng/libseccomp)
 # Sourced as a .deb from the Ubuntu archive; binary extracted without root.
 # Source: https://packages.ubuntu.com/noble/virtiofsd
 readonly VIRTIOFSD_VERSION="1.10.0-1"
-readonly VIRTIOFSD_DEB_URL="http://archive.ubuntu.com/ubuntu/pool/universe/r/rust-virtiofsd/virtiofsd_${VIRTIOFSD_VERSION}_amd64.deb"
-readonly VIRTIOFSD_DEB_SHA="1e4e817925b92f8c4ec59eff65b9825d044ecbd06c7bfcdca624e8562e90188a"
-# SHA256 of the extracted binary itself (for post-extraction verification)
-readonly VIRTIOFSD_BIN_SHA="597ae1edfda17185def026974a0ec0c3d3c6f536b018bb517aa566a4495dbf0d"
+readonly VIRTIOFSD_DEB_URL="http://archive.ubuntu.com/ubuntu/pool/universe/r/rust-virtiofsd/virtiofsd_${VIRTIOFSD_VERSION}_${DEB_ARCH}.deb"
+if [[ "$ARCH" == "aarch64" ]]; then
+    readonly VIRTIOFSD_DEB_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
+    readonly VIRTIOFSD_BIN_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
+else
+    readonly VIRTIOFSD_DEB_SHA="1e4e817925b92f8c4ec59eff65b9825d044ecbd06c7bfcdca624e8562e90188a"
+    # SHA256 of the extracted binary itself (for post-extraction verification)
+    readonly VIRTIOFSD_BIN_SHA="597ae1edfda17185def026974a0ec0c3d3c6f536b018bb517aa566a4495dbf0d"
+fi
 
 # Linux kernel — built by the cloud-hypervisor team against CH's kernel tree
 # Source: https://github.com/cloud-hypervisor/linux/releases/tag/ch-release-v6.16.9-20260324
 readonly VMLINUX_VERSION="ch-release-v6.16.9-20260324"
-readonly VMLINUX_URL="https://github.com/cloud-hypervisor/linux/releases/download/${VMLINUX_VERSION}/vmlinux-x86_64"
-readonly VMLINUX_SHA="22c640f02b750dea5d0c4419436aac8f2a6ea60fe02732435e25138d04eaaa86"
+readonly VMLINUX_URL="https://github.com/cloud-hypervisor/linux/releases/download/${VMLINUX_VERSION}/vmlinux-${ARCH}"
+if [[ "$ARCH" == "aarch64" ]]; then
+    readonly VMLINUX_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
+else
+    readonly VMLINUX_SHA="22c640f02b750dea5d0c4419436aac8f2a6ea60fe02732435e25138d04eaaa86"
+fi
 
 # Alpine Linux 3.19.9 miniroot filesystem tarball
-# Source: https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/
+# Source: https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/$ARCH/
 readonly ALPINE_VERSION="3.19.9"
 readonly ALPINE_MINOR="v3.19"
-readonly ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_MINOR}/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
-readonly ALPINE_SHA="6b4444630d3c349edb99847da31591a91d529b4bf8235a4990d4cb2cab45b8e5"
+readonly ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_MINOR}/releases/${ARCH}/alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
+if [[ "$ARCH" == "aarch64" ]]; then
+    readonly ALPINE_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
+else
+    readonly ALPINE_SHA="6b4444630d3c349edb99847da31591a91d529b4bf8235a4990d4cb2cab45b8e5"
+fi
 
 # socat Alpine package (not yet extracted — used in rootfs assembly phase)
-# Source: https://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/
+# Source: https://dl-cdn.alpinelinux.org/alpine/v3.19/main/$ARCH/
 readonly SOCAT_VERSION="1.8.0.0-r0"
-readonly SOCAT_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/socat-${SOCAT_VERSION}.apk"
-readonly SOCAT_SHA="ddf3be46f3a319737817246b238089dc58f39f32b0f515358c40e9e6e363eee6"
+readonly SOCAT_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/main/${ARCH}/socat-${SOCAT_VERSION}.apk"
+if [[ "$ARCH" == "aarch64" ]]; then
+    readonly SOCAT_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
+else
+    readonly SOCAT_SHA="ddf3be46f3a319737817246b238089dc58f39f32b0f515358c40e9e6e363eee6"
+fi
 
 # ---------------------------------------------------------------------------
 
@@ -126,20 +158,20 @@ download_to "$ALPINE_URL"   "$ABOX_VM_DIR/alpine-minirootfs.tar.gz"   "$ALPINE_S
 download_to "$SOCAT_URL"    "$ABOX_VM_DIR/socat.apk"                  "$SOCAT_SHA"
 
 # ─── Phase 4: Build abox-shim for static musl ────────────────────────────
-echo "[4/5] Building abox-shim for static musl..."
-if ! rustup target list --installed 2>/dev/null | grep -q '^x86_64-unknown-linux-musl$'; then
+echo "[4/5] Building abox-shim for static musl ($RUST_TARGET)..."
+if ! rustup target list --installed 2>/dev/null | grep -q "^${RUST_TARGET}\$"; then
     if [[ "$ASSUME_YES" == "1" ]] || [[ "${CI:-}" == "true" ]]; then
-        echo "  adding x86_64-unknown-linux-musl rust target..."
-        rustup target add x86_64-unknown-linux-musl
+        echo "  adding $RUST_TARGET rust target..."
+        rustup target add "$RUST_TARGET"
     else
         cat <<MISSING_MUSL >&2
 
-ERROR: x86_64-unknown-linux-musl rust target is not installed.
+ERROR: $RUST_TARGET rust target is not installed.
 
 The abox-shim is built as a static-musl binary so it can run inside
 the minimal Alpine guest rootfs. Install the target manually:
 
-    rustup target add x86_64-unknown-linux-musl
+    rustup target add $RUST_TARGET
 
 …or re-run this script with --yes to let it do that for you:
 
@@ -148,8 +180,8 @@ MISSING_MUSL
         exit 1
     fi
 fi
-( cd "$REPO_ROOT" && cargo build --release --target x86_64-unknown-linux-musl -p abox-shim )
-SHIM_BIN="$REPO_ROOT/target/x86_64-unknown-linux-musl/release/abox-shim"
+( cd "$REPO_ROOT" && cargo build --release --target "$RUST_TARGET" -p abox-shim )
+SHIM_BIN="$REPO_ROOT/target/$RUST_TARGET/release/abox-shim"
 if [[ ! -f "$SHIM_BIN" ]]; then
     echo "ERROR: shim binary was not produced at $SHIM_BIN" >&2
     exit 1
