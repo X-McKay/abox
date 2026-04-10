@@ -56,6 +56,10 @@ enum Commands {
     /// Manage VM snapshot templates.
     Template(commands::template::TemplateArgs),
 
+    /// Manage the root CA for HTTPS credential injection.
+    #[command(subcommand)]
+    Ca(commands::ca::CaCommand),
+
     /// Open the TUI dashboard.
     Tui,
 }
@@ -78,6 +82,11 @@ async fn main() -> Result<()> {
     // Template command does not need the orchestrator
     if let Commands::Template(args) = cli.command {
         return commands::template::execute(args, &config);
+    }
+
+    // CA command does not need the orchestrator
+    if let Commands::Ca(cmd) = cli.command {
+        return commands::ca::execute(cmd);
     }
 
     // TUI command
@@ -122,6 +131,6 @@ async fn main() -> Result<()> {
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,
         Commands::Divergence(ref args) => commands::divergence::execute(args, &orchestrator),
         Commands::Merge(ref args) => commands::merge::execute(args, &orchestrator),
-        Commands::Template(_) | Commands::Tui => unreachable!(),
+        Commands::Template(_) | Commands::Ca(_) | Commands::Tui => unreachable!(),
     }
 }
