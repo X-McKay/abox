@@ -91,6 +91,13 @@ tar -xzf "$ABOX_VM_DIR/libncursesw.apk" -C "$STAGE" \
     exit 1
 }
 
+# ── Copy CA cert into guest trust store (for TLS-terminating proxy) ─────
+if [ -f "$HOME/.abox/ca/root.crt" ]; then
+    echo "  installing abox CA cert into guest trust store..."
+    mkdir -p "$STAGE/etc/ssl/certs"
+    cp "$HOME/.abox/ca/root.crt" "$STAGE/etc/ssl/certs/abox-ca.pem"
+fi
+
 echo "  installing abox-shim and symlinks..."
 mkdir -p "$STAGE/usr/local/bin" "$STAGE/sbin"
 install -m 0755 "$SHIM_BIN" "$STAGE/usr/local/bin/abox-shim"

@@ -45,6 +45,9 @@ pub struct SandboxStatus {
     pub vm_state: String,
     pub vm_pid: u32,
     pub commits_ahead: usize,
+    /// Port allocated for this sandbox's egress proxy listener.
+    #[serde(default)]
+    pub egress_port: u16,
 }
 
 /// The sandbox orchestrator. This is the main entry point for all operations.
@@ -89,11 +92,24 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let start_mode = match &params.template {
             Some(name) => {
                 let template_path = self.config.templates_dir().join(name);
-                anyhow::ensure!(template_path.exists(), "template '{}' not found", name);
+                anyhow::ensure!(template_path.exists(), "template '{name}' not found");
                 crate::vm::StartMode::Restore { template_path }
             }
             None => crate::vm::StartMode::Fresh,
         };
+
+        // Allocate an ephemeral port for the per-sandbox egress proxy.
+        let egress_port = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            listener.local_addr()?.port()
+        };
+
+        // Inject HTTPS_PROXY env vars so the guest routes HTTPS through the
+        // per-sandbox egress proxy on the host.
+        let mut env_vars = params.env_vars;
+        let proxy_url = format!("http://10.0.2.2:{egress_port}");
+        env_vars.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
+        env_vars.push(("https_proxy".to_string(), proxy_url));
 
         // Step 3: Build VM config
         let vm_config = VmConfig {
@@ -114,9 +130,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             memory_mib: params.memory_mib.unwrap_or(self.config.vm_defaults.memory_mib),
             vcpus: params.vcpus.unwrap_or(self.config.vm_defaults.vcpus),
             user: params.user,
-            env_vars: params.env_vars,
+            env_vars,
             agent_command: params.command.clone(),
-            proxy_port: self.config.proxy.egress_port,
+            proxy_port: egress_port,
             start_mode,
         };
 
@@ -150,6 +166,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             vm_state: vm_info.state.to_string(),
             vm_pid: vm_info.pid,
             commits_ahead: 0,
+            egress_port,
         })
     }
 
@@ -201,6 +218,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 vm_state,
                 vm_pid,
                 commits_ahead: wt.commits_ahead,
+                egress_port: 0, // not tracked for listed sandboxes
             });
         }
 

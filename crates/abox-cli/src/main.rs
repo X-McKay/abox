@@ -56,6 +56,10 @@ enum Commands {
     /// Manage VM snapshot templates.
     Template(commands::template::TemplateArgs),
 
+    /// Manage the root CA for HTTPS credential injection.
+    #[command(subcommand)]
+    Ca(commands::ca::CaCommand),
+
     /// Open the TUI dashboard.
     Tui,
 }
@@ -83,6 +87,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    // CA command does not need the orchestrator
+    if let Commands::Ca(ref cmd) = cli.command {
+        return commands::ca::execute(cmd);
+    }
+
     // TUI command
     if let Commands::Tui = cli.command {
         let mut state = tui::dashboard::DashboardState::new();
@@ -105,6 +114,7 @@ async fn main() -> Result<()> {
             egress: vec![],
             default_cli_action: "deny".to_string(),
             default_egress_action: "deny".to_string(),
+            bypass_tls: vec![],
         })?
     };
     let policy = std::sync::Arc::new(policy);
@@ -128,9 +138,8 @@ async fn main() -> Result<()> {
             commands::template::TemplateAction::Create { name, from } => {
                 commands::template::execute_create(name, from, &orchestrator, &config).await
             }
-            // List and Delete were already handled above.
             _ => unreachable!(),
         },
-        Commands::Tui => unreachable!(),
+        Commands::Ca(_) | Commands::Tui => unreachable!(),
     }
 }

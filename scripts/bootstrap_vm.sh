@@ -187,6 +187,12 @@ if [[ ! -f "$SHIM_BIN" ]]; then
     exit 1
 fi
 
+# ─── Phase 4b: Ensure CA cert exists for guest rootfs ───────────────────
+if [ ! -f "$HOME/.abox/ca/root.crt" ]; then
+    echo "  generating abox root CA (for TLS-terminating proxy)..."
+    cargo run -p abox-core --example ca_init
+fi
+
 # ─── Phase 5: Assemble the guest rootfs ──────────────────────────────────
 echo "[5/5] Assembling guest rootfs..."
 SHIM_BIN="$SHIM_BIN" \

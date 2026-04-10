@@ -157,6 +157,7 @@ fn test_policy_invalid_regex_fails() {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let result = PolicyEngine::from_policy_file(policy);
@@ -170,6 +171,7 @@ fn test_policy_default_allow_cli() {
         egress: vec![],
         default_cli_action: "allow".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
@@ -185,6 +187,7 @@ fn test_policy_default_allow_egress() {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "allow".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
@@ -206,6 +209,7 @@ fn test_policy_deny_takes_precedence_over_allow() {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
@@ -235,6 +239,7 @@ fn test_policy_empty_allow_list_allows_everything() {
         egress: vec![],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
@@ -275,6 +280,7 @@ fn test_policy_multiple_egress_rules() {
         ],
         default_cli_action: "deny".to_string(),
         default_egress_action: "deny".to_string(),
+        bypass_tls: vec![],
     };
 
     let engine = PolicyEngine::from_policy_file(policy).unwrap();
@@ -1023,6 +1029,7 @@ async fn test_run_sandbox_polls_until_vm_exits() {
             egress: vec![],
             default_cli_action: "allow".into(),
             default_egress_action: "deny".into(),
+            bypass_tls: vec![],
         })
         .unwrap(),
     );
@@ -1126,6 +1133,7 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
             egress: vec![],
             default_cli_action: "allow".into(),
             default_egress_action: "deny".into(),
+            bypass_tls: vec![],
         })
         .unwrap(),
     );
@@ -1252,6 +1260,7 @@ async fn test_run_sandbox_timeout_returns_124() {
             egress: vec![],
             default_cli_action: "allow".into(),
             default_egress_action: "deny".into(),
+            bypass_tls: vec![],
         })
         .unwrap(),
     );
@@ -1351,6 +1360,7 @@ async fn test_run_sandbox_exits_before_timeout() {
             egress: vec![],
             default_cli_action: "allow".into(),
             default_egress_action: "deny".into(),
+            bypass_tls: vec![],
         })
         .unwrap(),
     );
@@ -1450,6 +1460,7 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
             egress: vec![],
             default_cli_action: "allow".into(),
             default_egress_action: "deny".into(),
+            bypass_tls: vec![],
         })
         .unwrap(),
     );
@@ -1553,6 +1564,7 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
             egress: vec![],
             default_cli_action: "allow".into(),
             default_egress_action: "deny".into(),
+            bypass_tls: vec![],
         })
         .unwrap(),
     );

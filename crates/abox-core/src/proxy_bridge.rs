@@ -323,6 +323,7 @@ mod tests {
                 egress: vec![],
                 default_cli_action: "allow".to_string(),
                 default_egress_action: "deny".to_string(),
+                bypass_tls: vec![],
             })
             .unwrap(),
         )

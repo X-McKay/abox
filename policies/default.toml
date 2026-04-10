@@ -84,6 +84,12 @@ deny = [
     "^sts\\s+assume-role",
 ]
 
+# ── TLS Bypass List ─────────────────────────────────────────────────────
+# Domains listed here use plain TCP passthrough (no TLS termination).
+# Use this for cert-pinned clients that would reject the MITM CA cert.
+# Supports exact match and wildcard prefix (e.g., "*.pinned.io").
+bypass_tls = []
+
 # ── HTTP Egress Rules ────────────────────────────────────────────────────
 # Each rule matches a domain and injects a credential header.
 

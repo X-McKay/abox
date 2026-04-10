@@ -1,4 +1,5 @@
 pub mod attach;
+pub mod ca;
 pub mod divergence;
 pub mod list;
 pub mod merge;

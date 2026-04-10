@@ -100,7 +100,7 @@ pub async fn execute_create<W: WorkspacePort, V: VmPort>(
     match snap_mgr.create_snapshot(&info.api_socket, name, virtiofs_sockets).await {
         Ok(_path) => {
             orchestrator.resume_sandbox(from).await?;
-            println!("Template '{}' created from sandbox '{}'", name, from);
+            println!("Template '{name}' created from sandbox '{from}'");
             Ok(())
         }
         Err(e) => {

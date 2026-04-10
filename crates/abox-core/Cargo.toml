@@ -18,6 +18,8 @@ regex.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 git2 = "0.20"
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+time = "0.3"
 
 [lints]
 workspace = true
