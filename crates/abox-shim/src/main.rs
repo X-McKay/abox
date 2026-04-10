@@ -138,11 +138,13 @@ fn send_request(request: &ProxyRequest) -> Result<ProxyResponse, Box<dyn std::er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Tests that touch environment variables or cwd must run serially to
     // avoid races with other tests in the same process.
 
     #[test]
+    #[serial]
     fn resolve_cwd_returns_abox_cwd_when_set() {
         // Temporarily set ABOX_CWD and verify it wins.
         let _guard = EnvGuard::set(CWD_OVERRIDE_ENV, "/custom/cwd");
@@ -151,6 +153,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_cwd_falls_back_to_proc_self_cwd() {
         // With ABOX_CWD unset and a valid cwd, /proc/self/cwd should
         // resolve to the process's actual working directory.
@@ -163,16 +166,13 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_cwd_uses_real_current_dir() {
         let _guard = EnvGuard::remove(CWD_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::set(tmp.path()).unwrap();
 
         let cwd = resolve_cwd();
-
-        // Restore before any assertions so a panic doesn't leave cwd changed.
-        std::env::set_current_dir(&original).unwrap();
 
         // The resolved cwd should contain the tmpdir's path (canonicalized).
         let canonical = tmp.path().canonicalize().unwrap();
@@ -206,6 +206,28 @@ mod tests {
                 Some(v) => std::env::set_var(self.key, v),
                 None => std::env::remove_var(self.key),
             }
+        }
+    }
+
+    // ── Helper: RAII cwd guard ─────────────────────────────────────────────
+
+    /// Saves the current working directory and restores it on drop,
+    /// ensuring `set_current_dir` tests don't leak cwd changes on panic.
+    struct CwdGuard {
+        prev: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+            let prev = std::env::current_dir()?;
+            std::env::set_current_dir(path)?;
+            Ok(Self { prev })
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev);
         }
     }
 }
