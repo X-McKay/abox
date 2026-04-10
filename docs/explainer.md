@@ -191,15 +191,34 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 ---
 
-## 8. The HTTPS egress proxy
+## 8. The HTTPS egress proxy (TLS-terminating MITM)
 
-**What it does today:** Almost nothing. `abox-proxyd::egress_proxy` is a TCP CONNECT tunnel that forwards bytes between the guest and the upstream. It logs the destination domain to the audit log but doesn't inspect or modify the traffic.
+**What it does:** The egress proxy (`abox-proxyd::egress_proxy`) intercepts outbound HTTPS traffic from the guest and injects API credentials into requests, so secrets never enter the VM. See [ADR-003](decisions/003-https-credential-injection.md) for the full design rationale.
 
-**What it's *supposed* to do:** Terminate TLS, look up the destination in the policy file, inject API-key headers from host environment variables, then re-establish TLS to the real upstream and forward the rewritten request. The agent never sees the API keys; the user's `ANTHROPIC_API_KEY` lives only on the host, and the guest just sees "outbound HTTPS to api.anthropic.com works".
+**How it works:**
 
-**Why it's not done yet:** TLS termination requires generating a self-signed CA, baking it into the guest rootfs as a trusted root, generating leaf certs on the fly for each requested SNI, and handling the various forms of certificate pinning that some clients do. This is a 2-3 day project that was carved out of the hardening branch to keep that branch focused. Spec at [`docs/plans/2026-04-08-credential-injection.md`](plans/2026-04-08-credential-injection.md).
+1. The guest sets `HTTPS_PROXY=http://10.0.2.2:<port>` (injected automatically by the orchestrator). When the agent's HTTPS client sends a CONNECT request, it arrives at the proxy.
+2. The proxy evaluates the target domain against egress policy rules. If denied, it returns 403.
+3. If the domain is in the `bypass_tls` list (for cert-pinned clients), the proxy does a plain TCP passthrough — no TLS termination.
+4. Otherwise, the proxy generates a per-host leaf certificate signed by the abox root CA (`~/.abox/ca/root.crt`), sends `200 Connection Established`, and accepts the client's TLS using that leaf cert. The guest trusts it because the root CA was baked into the rootfs at build time.
+5. The proxy reads the plaintext HTTP request, injects the credential header (e.g., `x-api-key: <value>` for Anthropic, `Authorization: Bearer <value>` for OpenAI), then opens a new TLS connection to the real upstream using system root certificates.
+6. The modified request is forwarded upstream and the response is relayed back to the client.
 
-**What this means for you today:** If your agent needs to talk to Anthropic or OpenAI, set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` inside the guest via `--env KEY=VAL` on `abox run`. That's not great (the key ends up in guest memory), but it's the current state. After F3 lands, you'll set them on the host and the proxy will inject them per-request.
+**The credential mapping** is defined in `policies/default.toml`:
+
+```toml
+[[egress]]
+domain = "api.anthropic.com"
+inject_header = "x-api-key"
+env_var = "ANTHROPIC_API_KEY"
+header_template = "{value}"
+```
+
+The `env_var` is read from the **host** environment, not the guest. The `header_template` supports `{value}` substitution (e.g., `"Bearer {value}"` for OAuth-style headers).
+
+**What this means for you:** Set your API keys as host environment variables (`export ANTHROPIC_API_KEY=sk-...`). The proxy injects them automatically. The agent never sees the key.
+
+**CA management:** The root CA is generated on first use and lives at `~/.abox/ca/`. Use `abox ca show` to inspect it, `abox ca rotate` to regenerate (triggers a rootfs rebuild), and `abox ca path` to find it.
 
 ---
 

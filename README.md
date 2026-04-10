@@ -13,6 +13,7 @@ When running multiple autonomous agents on a single codebase, you face three pro
 - Isolating each agent in a fast-booting **Cloud Hypervisor microVM**.
 - Mounting independent **git worktrees** into the VM via `virtiofs`.
 - Proxying commands and HTTP requests out of the VM through a **strict, TOML-configured policy engine**.
+- Injecting API credentials into outbound HTTPS requests via a **TLS-terminating MITM proxy**, so secrets never enter the VM.
 
 ## Architecture
 
@@ -92,6 +93,13 @@ logs, and the runtime socket directory). No root access required.
 4. **Merge a completed task:**
    ```bash
    abox merge fix-auth
+   ```
+
+5. **Manage the CA (for HTTPS credential injection):**
+   ```bash
+   abox ca show      # fingerprint + expiry
+   abox ca rotate    # regenerate CA + rebuild rootfs
+   abox ca path      # print CA directory
    ```
 
 ## Development
