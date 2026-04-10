@@ -332,6 +332,12 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             // init.sh got that far (kernel panic, missing rootfs,
             // virtiofs failure, etc.). Roll back the worktree like a
             // failed VM start would, since this run produced nothing.
+            eprintln!(
+                "abox: sandbox '{}' did not report an exit code; \
+                 rolling back worktree (the VM may have crashed before \
+                 guest init ran -- check the console log)",
+                task_id
+            );
             tracing::warn!(
                 task_id = %task_id,
                 "Guest did not write an exit code; rolling back worktree"
