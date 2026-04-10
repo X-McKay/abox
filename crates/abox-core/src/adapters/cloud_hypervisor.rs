@@ -28,6 +28,8 @@ struct RunningVm {
     status_dir: PathBuf,
     api_socket: PathBuf,
     console_socket: PathBuf,
+    /// Actual virtiofsd socket paths (may differ from standard naming in restore mode).
+    virtiofs_sockets: Vec<PathBuf>,
     #[allow(dead_code)]
     config: VmConfig,
 }
@@ -64,10 +66,13 @@ impl CloudHypervisorAdapter {
     /// read `exit-code` from it after the VM exits; `stop()` and
     /// `run_sandbox` (after reading the file) pass `true`.
     fn cleanup_vm_files(&self, id: &str, vm: &RunningVm, remove_status_dir: bool) {
-        for suffix in ["vfs", "vfs-meta", "vfs-status", "ch-api", "vsock"] {
-            let sock = self.runtime_dir.join(format!("{suffix}-{id}.sock"));
+        // Remove virtiofsd sockets (may differ from standard naming in restore mode).
+        for sock in &vm.virtiofs_sockets {
             let _ = std::fs::remove_file(sock);
         }
+        // Remove CH API and vsock sockets (always use current sandbox id).
+        let _ = std::fs::remove_file(self.runtime_dir.join(format!("ch-api-{id}.sock")));
+        let _ = std::fs::remove_file(self.runtime_dir.join(format!("vsock-{id}.sock")));
         // Console is a plain file (CH v44's --console file=...), not a socket.
         let _ = std::fs::remove_file(&vm.console_socket);
         let _ = std::fs::remove_file(self.runtime_dir.join(format!("vsock-{id}.sock_5000")));
@@ -312,6 +317,11 @@ impl VmPort for CloudHypervisorAdapter {
             status_dir: status_dir.clone(),
             api_socket: api_socket.clone(),
             console_socket: console_socket.clone(),
+            virtiofs_sockets: vec![
+                virtiofs_socket,
+                meta_socket,
+                status_socket,
+            ],
             config,
         };
 
