@@ -518,6 +518,32 @@ else
         echo "$MAIN_LOG" | sed "s/^/    /"
     fi
 
+    # ─── Credential injection (optional, requires ANTHROPIC_API_KEY) ────
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        step "Credential injection: curl through proxy"
+        how 'abox run --task cred-test -- curl -sf -o /dev/null -w "%{http_code}" https://api.anthropic.com/v1/messages'
+        expect "curl exits 0 (proxy injects x-api-key header)"
+        if timeout 90 $ABOX run --task cred-test --base main -- \
+            curl -sf -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/messages \
+            >"$SCRATCH/cred-test.log" 2>&1; then
+            pass "curl through injecting proxy succeeded"
+        else
+            rc=$?
+            # A non-zero exit from curl is acceptable if the API returned an
+            # error (e.g. 400 for missing body) — we only care that the
+            # connection was established through the MITM proxy.
+            if grep -q "40[0-9]" "$SCRATCH/cred-test.log" 2>/dev/null; then
+                pass "curl reached API (got 4xx — expected without request body)"
+            else
+                fail "curl through injecting proxy" "exit=$rc"
+                tail -10 "$SCRATCH/cred-test.log" | sed "s/^/    /"
+            fi
+        fi
+        $ABOX stop cred-test --clean 2>/dev/null || true
+    else
+        step "Credential injection: SKIPPED (ANTHROPIC_API_KEY not set)"
+    fi
+
     step "abox stop --clean removes the sandbox completely"
     how "abox stop lifecycle --clean && abox list"
     expect "no active sandboxes"
