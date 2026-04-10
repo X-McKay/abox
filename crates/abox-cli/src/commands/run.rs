@@ -40,6 +40,14 @@ pub struct RunArgs {
     #[arg(long = "env", short = 'e')]
     pub env_vars: Vec<String>,
 
+    /// Kill sandbox after N seconds (exit code 124, like GNU timeout).
+    #[arg(long)]
+    pub timeout: Option<u64>,
+
+    /// Auto-remove sandbox (worktree + branch) after exit.
+    #[arg(long)]
+    pub ephemeral: bool,
+
     /// Detach after launching the sandbox instead of blocking on the agent.
     ///
     /// The supervisor is re-exec'd as a background process; its stdout/stderr
@@ -84,6 +92,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         user: args.user,
         env_vars,
         command: args.command,
+        timeout_secs: args.timeout,
+        ephemeral: args.ephemeral,
     };
 
     println!("Sandbox '{}' starting...", args.task);

@@ -30,6 +30,10 @@ pub struct CreateSandboxParams {
     pub env_vars: Vec<(String, String)>,
     /// Command to execute inside the VM (the agent).
     pub command: Vec<String>,
+    /// Kill the sandbox after this many seconds (exit code 124).
+    pub timeout_secs: Option<u64>,
+    /// Automatically remove the sandbox (worktree + branch) after exit.
+    pub ephemeral: bool,
 }
 
 /// Full sandbox status combining workspace and VM info.
@@ -239,6 +243,8 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         params: CreateSandboxParams,
         policy: std::sync::Arc<crate::policy::PolicyEngine>,
     ) -> Result<i32> {
+        let timeout_secs = params.timeout_secs;
+        let ephemeral = params.ephemeral;
         let status = self.create_sandbox(params).await?;
         let task_id = status.id.clone();
         let worktree_path = std::path::PathBuf::from(&status.worktree_path);
@@ -300,12 +306,58 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         // been removed from the map). Interval is centralized in
         // VmRuntimeTuning so tests can tighten it.
         let tuning = VmRuntimeTuning::DEFAULT;
-        loop {
-            tokio::time::sleep(tuning.vm_exit_poll_interval).await;
-            if self.vm_manager.info(&task_id).await.is_err() {
-                break;
+
+        let poll_future = async {
+            loop {
+                tokio::time::sleep(tuning.vm_exit_poll_interval).await;
+                if self.vm_manager.info(&task_id).await.is_err() {
+                    break;
+                }
             }
-        }
+        };
+
+        let timed_out = if let Some(secs) = timeout_secs {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), poll_future).await {
+                Ok(()) => false,
+                Err(_elapsed) => {
+                    tracing::warn!(task_id = %task_id, secs, "sandbox timed out");
+                    // Graceful shutdown first.
+                    if let Err(e) = self.vm_manager.stop(&task_id).await {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            error = %e,
+                            "Graceful shutdown after timeout failed"
+                        );
+                    }
+                    // Wait up to 10s for the VM to actually exit.
+                    let grace = async {
+                        loop {
+                            tokio::time::sleep(tuning.vm_exit_poll_interval).await;
+                            if self.vm_manager.info(&task_id).await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+                    if tokio::time::timeout(tuning.vm_timeout_grace_period, grace)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "VM did not exit within grace period; force-killing"
+                        );
+                        // Force kill — best effort. The existing stop() on
+                        // Cloud Hypervisor calls `shutdown-vmm` which is
+                        // already forceful; a second call is our best bet.
+                        let _ = self.vm_manager.stop(&task_id).await;
+                    }
+                    true
+                }
+            }
+        } else {
+            poll_future.await;
+            false
+        };
 
         bridge_handle.abort();
         // Signal the console tailer to drain and exit. Wait briefly for it
@@ -314,42 +366,60 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         console_shutdown.notify_one();
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), console_handle).await;
 
-        // Read the exit code the guest wrote into /abox-status/exit-code.
-        let exit_code_opt = self
-            .vm_manager
-            .status_dir(&task_id)
-            .and_then(|d| crate::adapters::cloud_hypervisor::read_exit_code(&d));
-
-        // Tear down the status dir now that we've read (or failed to read) it.
-        if let Some(sd) = self.vm_manager.status_dir(&task_id) {
-            let _ = std::fs::remove_dir_all(&sd);
-        }
-
-        if let Some(code) = exit_code_opt {
-            Ok(code)
+        // Determine exit code: 124 on timeout, otherwise read from guest.
+        let exit_code = if timed_out {
+            124
         } else {
-            // The guest never wrote an exit code — the VM died before
-            // init.sh got that far (kernel panic, missing rootfs,
-            // virtiofs failure, etc.). Roll back the worktree like a
-            // failed VM start would, since this run produced nothing.
-            eprintln!(
-                "abox: sandbox '{}' did not report an exit code; \
-                 rolling back worktree (the VM may have crashed before \
-                 guest init ran -- check the console log)",
-                task_id
-            );
-            tracing::warn!(
-                task_id = %task_id,
-                "Guest did not write an exit code; rolling back worktree"
-            );
-            if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
+            // Read the exit code the guest wrote into /abox-status/exit-code.
+            let exit_code_opt = self
+                .vm_manager
+                .status_dir(&task_id)
+                .and_then(|d| crate::adapters::cloud_hypervisor::read_exit_code(&d));
+
+            // Tear down the status dir now that we've read (or failed to read) it.
+            if let Some(sd) = self.vm_manager.status_dir(&task_id) {
+                let _ = std::fs::remove_dir_all(&sd);
+            }
+
+            if let Some(code) = exit_code_opt {
+                code
+            } else {
+                // The guest never wrote an exit code — the VM died before
+                // init.sh got that far (kernel panic, missing rootfs,
+                // virtiofs failure, etc.). Roll back the worktree like a
+                // failed VM start would, since this run produced nothing.
+                eprintln!(
+                    "abox: sandbox '{task_id}' did not report an exit code; \
+                     rolling back worktree (the VM may have crashed before \
+                     guest init ran -- check the console log)"
+                );
+                tracing::warn!(
+                    task_id = %task_id,
+                    "Guest did not write an exit code; rolling back worktree"
+                );
+                if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
+                    tracing::error!(
+                        task_id = %task_id,
+                        error = %e,
+                        "Worktree rollback after silent VM failure also failed"
+                    );
+                }
+                1
+            }
+        };
+
+        // Ephemeral mode: clean up worktree + branch regardless of exit code.
+        if ephemeral {
+            tracing::info!(task_id = %task_id, "ephemeral mode: cleaning up sandbox");
+            if let Err(e) = self.stop_sandbox(&task_id, /*clean=*/ true).await {
                 tracing::error!(
                     task_id = %task_id,
                     error = %e,
-                    "Worktree rollback after silent VM failure also failed"
+                    "Ephemeral cleanup failed"
                 );
             }
-            Ok(1)
         }
+
+        Ok(exit_code)
     }
 }
