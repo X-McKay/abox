@@ -5,6 +5,19 @@
 
 use std::path::PathBuf;
 
+/// How to start a VM — fresh boot or restore from snapshot.
+#[derive(Debug, Clone, Default)]
+pub enum StartMode {
+    /// Normal boot from kernel + disk image.
+    #[default]
+    Fresh,
+    /// Restore from a snapshot template directory.
+    Restore {
+        /// Path to the template directory containing the snapshot files.
+        template_path: PathBuf,
+    },
+}
+
 /// Configuration for creating a new sandbox VM.
 #[derive(Debug, Clone)]
 pub struct VmConfig {
@@ -28,6 +41,9 @@ pub struct VmConfig {
     pub agent_command: Vec<String>,
     /// Port of the HTTP egress proxy on the host.
     pub proxy_port: u16,
+    /// How to start the VM: fresh boot or restore from snapshot.
+    #[allow(dead_code)]
+    pub start_mode: StartMode,
 }
 
 /// Information about a running or stopped VM.

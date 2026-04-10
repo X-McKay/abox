@@ -5,6 +5,8 @@
 //! that can be restored in sub-second time.
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -17,6 +19,39 @@ pub struct TemplateInfo {
     pub path: PathBuf,
     /// Size on disk in bytes.
     pub size_bytes: u64,
+}
+
+/// Metadata stored alongside a snapshot template.
+///
+/// Records the virtiofsd socket filenames so a restore can recreate them at
+/// the same paths the snapshotted VM was configured with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateMeta {
+    /// Map of share tag to socket filename (just the filename, not full path).
+    /// E.g. `{"workspace": "vfs-fix-auth.sock", "meta": "vfs-meta-fix-auth.sock", ...}`
+    pub virtiofs_sockets: HashMap<String, String>,
+}
+
+impl TemplateMeta {
+    /// Name of the metadata file inside a template directory.
+    pub const FILENAME: &'static str = "meta.json";
+
+    /// Write metadata to `<template_dir>/meta.json`.
+    pub fn save(&self, template_dir: &Path) -> Result<()> {
+        let path = template_dir.join(Self::FILENAME);
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, json).context("Failed to write template metadata")?;
+        Ok(())
+    }
+
+    /// Read metadata from `<template_dir>/meta.json`.
+    pub fn load(template_dir: &Path) -> Result<Self> {
+        let path = template_dir.join(Self::FILENAME);
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read template metadata from {}", path.display()))?;
+        let meta: Self = serde_json::from_str(&json)?;
+        Ok(meta)
+    }
 }
 
 /// Manages VM snapshots and templates.
@@ -36,7 +71,14 @@ impl SnapshotManager {
     /// Create a snapshot of a paused VM and store it as a template.
     ///
     /// The VM must be paused before calling this (via `VmPort::pause`).
-    pub async fn create_snapshot(&self, api_socket: &Path, template_name: &str) -> Result<PathBuf> {
+    /// `virtiofs_sockets` maps share tags (e.g. "workspace") to socket
+    /// filenames so restores can recreate virtiofsd on the same paths.
+    pub async fn create_snapshot(
+        &self,
+        api_socket: &Path,
+        template_name: &str,
+        virtiofs_sockets: HashMap<String, String>,
+    ) -> Result<PathBuf> {
         let snap_dir = self.template_dir.join(template_name);
 
         if snap_dir.exists() {
@@ -60,6 +102,11 @@ impl SnapshotManager {
             let _ = std::fs::remove_dir_all(&snap_dir);
             bail!("Snapshot creation failed for template '{template_name}'");
         }
+
+        // Save virtiofsd socket metadata so restores know which socket
+        // filenames the snapshotted VM was configured with.
+        let meta = TemplateMeta { virtiofs_sockets };
+        meta.save(&snap_dir)?;
 
         tracing::info!(
             template = template_name,
@@ -179,4 +226,49 @@ fn dir_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_meta_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sockets = HashMap::new();
+        sockets.insert("workspace".to_string(), "vfs-fix-auth.sock".to_string());
+        sockets.insert("meta".to_string(), "vfs-meta-fix-auth.sock".to_string());
+        sockets.insert("status".to_string(), "vfs-status-fix-auth.sock".to_string());
+
+        let meta = TemplateMeta { virtiofs_sockets: sockets };
+        meta.save(dir.path()).unwrap();
+
+        let loaded = TemplateMeta::load(dir.path()).unwrap();
+        assert_eq!(loaded.virtiofs_sockets.get("workspace").unwrap(), "vfs-fix-auth.sock");
+        assert_eq!(loaded.virtiofs_sockets.get("meta").unwrap(), "vfs-meta-fix-auth.sock");
+        assert_eq!(loaded.virtiofs_sockets.get("status").unwrap(), "vfs-status-fix-auth.sock");
+    }
+
+    #[test]
+    fn template_meta_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(TemplateMeta::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn snapshot_manager_list_empty() {
+        let tdir = tempfile::tempdir().unwrap();
+        let rdir = tempfile::tempdir().unwrap();
+        let mgr = SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
+        let list = mgr.list_templates().unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn snapshot_manager_delete_missing_errors() {
+        let tdir = tempfile::tempdir().unwrap();
+        let rdir = tempfile::tempdir().unwrap();
+        let mgr = SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
+        assert!(mgr.delete_template("nonexistent").is_err());
+    }
 }

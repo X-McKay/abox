@@ -85,7 +85,17 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             "Worktree created"
         );
 
-        // Step 2: Build VM config
+        // Step 2: Determine start mode (fresh boot or restore from template).
+        let start_mode = match &params.template {
+            Some(name) => {
+                let template_path = self.config.templates_dir().join(name);
+                anyhow::ensure!(template_path.exists(), "template '{}' not found", name);
+                crate::vm::StartMode::Restore { template_path }
+            }
+            None => crate::vm::StartMode::Fresh,
+        };
+
+        // Step 3: Build VM config
         let vm_config = VmConfig {
             id: params.task_id.clone(),
             worktree_path: worktree_path.clone(),
@@ -107,9 +117,10 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             env_vars: params.env_vars,
             agent_command: params.command.clone(),
             proxy_port: self.config.proxy.egress_port,
+            start_mode,
         };
 
-        // Step 3: Start the VM. If this fails, roll back the worktree we just
+        // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just
         // created so the user is not left with orphaned state.
         let vm_info = match self.vm_manager.start(vm_config).await {
             Ok(info) => info,

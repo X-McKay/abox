@@ -75,9 +75,12 @@ async fn main() -> Result<()> {
     let config = AboxConfig::load(&config_path)?;
     config.ensure_dirs()?;
 
-    // Template command does not need the orchestrator
-    if let Commands::Template(args) = cli.command {
-        return commands::template::execute(args, &config);
+    // Template List and Delete do not need the orchestrator.
+    // Template Create does — it falls through to the orchestrator block below.
+    if let Commands::Template(ref args) = cli.command {
+        if commands::template::execute_without_orchestrator(args, &config)? {
+            return Ok(());
+        }
     }
 
     // TUI command
@@ -121,6 +124,13 @@ async fn main() -> Result<()> {
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,
         Commands::Divergence(ref args) => commands::divergence::execute(args, &orchestrator),
         Commands::Merge(ref args) => commands::merge::execute(args, &orchestrator),
-        Commands::Template(_) | Commands::Tui => unreachable!(),
+        Commands::Template(ref args) => match &args.action {
+            commands::template::TemplateAction::Create { name, from } => {
+                commands::template::execute_create(name, from, &orchestrator, &config).await
+            }
+            // List and Delete were already handled above.
+            _ => unreachable!(),
+        },
+        Commands::Tui => unreachable!(),
     }
 }
