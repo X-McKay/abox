@@ -430,6 +430,29 @@ else
     # Cleanup the leftover sandbox state so the test can be re-run.
     $ABOX stop vm-e2e --clean 2>/dev/null || true
 
+    step "Detach lifecycle: start background sandbox"
+    how 'abox run --task test-detach --detach --base main -- sleep 60'
+    expect "PID file created, sandbox listed, stop cleans up"
+    $ABOX run --task test-detach --detach --base main -- sleep 60 >"$SCRATCH/detach.log" 2>&1
+    # Give the child a moment to write the PID file.
+    sleep 0.5
+    assert_file_exists "PID file created" "$SCRATCH/r/run-test-detach.pid"
+
+    step "Detach lifecycle: sandbox appears in list"
+    how "abox list | grep test-detach"
+    LIST_OUT=$($ABOX list 2>&1)
+    if echo "$LIST_OUT" | grep -q "test-detach"; then
+        pass "detach sandbox listed"
+    else
+        fail "detach sandbox listed" "not found in list output"
+        echo "$LIST_OUT" | sed "s/^/    /"
+    fi
+
+    step "Detach lifecycle: stop and cleanup"
+    how "abox stop test-detach --clean"
+    $ABOX stop test-detach --clean 2>/dev/null || true
+    assert_file_absent "PID file removed" "$SCRATCH/r/run-test-detach.pid"
+
     step "Non-zero agent exit propagates to abox run"
     how 'abox run --task vm-e2e-fail -- /bin/sh -c "exit 7"'
     expect "abox run exits with 7 (guest runner.sh RC bubbled out through aboxstatus)"
