@@ -282,26 +282,82 @@ async fn handle_mitm(
     Ok(())
 }
 
-/// Handle MITM with header injection: parse the plaintext HTTP request from
-/// the client, inject credential headers, forward to upstream, relay response.
+/// Handle MITM with header injection: read the raw HTTP request from the
+/// client, inject credential headers, forward to upstream, then relay the
+/// response and any subsequent data bidirectionally.
+///
+/// This uses a simple line-based HTTP/1.1 parser rather than a full HTTP
+/// stack, because we only need to inject headers into the first request
+/// before switching to bidirectional copy for the response + body.
 async fn handle_mitm_with_injection(
-    client_tls: tokio_rustls::server::TlsStream<TokioIo<hyper::upgrade::Upgraded>>,
-    upstream_tls: tokio_rustls::client::TlsStream<TcpStream>,
+    mut client_tls: tokio_rustls::server::TlsStream<TokioIo<hyper::upgrade::Upgraded>>,
+    mut upstream_tls: tokio_rustls::client::TlsStream<TcpStream>,
     rule: Option<&abox_core::policy::EgressRule>,
 ) -> Result<()> {
-    // For the simple v1 approach: just do bidirectional copy.
-    // Task 5 will implement proper HTTP request parsing and header injection.
-    let mut client = client_tls;
-    let mut upstream = upstream_tls;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Read the HTTP request head from the client.
+    // We read until we see \r\n\r\n (end of headers).
+    let mut head_buf = Vec::with_capacity(8192);
+    let mut temp = [0u8; 1];
+    let mut found_end = false;
+
+    while head_buf.len() < 65536 {
+        let n = client_tls.read(&mut temp).await?;
+        if n == 0 {
+            break;
+        }
+        head_buf.push(temp[0]);
+
+        // Check for \r\n\r\n
+        if head_buf.len() >= 4
+            && head_buf[head_buf.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
+        {
+            found_end = true;
+            break;
+        }
+    }
+
+    if !found_end {
+        // Couldn't parse headers — just forward what we have and relay
+        upstream_tls.write_all(&head_buf).await?;
+        let _ = tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls).await;
+        return Ok(());
+    }
+
+    // Parse the header block and inject credentials
+    let head_str = String::from_utf8_lossy(&head_buf);
+    let mut lines: Vec<String> = head_str.lines().map(String::from).collect();
 
     if let Some(rule) = rule {
-        // Attempt to read env var and log intent. Actual injection is Task 5.
         match std::env::var(&rule.env_var) {
-            Ok(_) => {
+            Ok(value) => {
+                let header_value = rule.header_template.replace("{value}", &value);
+                // Insert the header before the empty line (last element after split)
+                // Find insertion point: just before the trailing empty line
+                let inject_line = format!("{}: {}", rule.inject_header, header_value);
+
+                // Remove any existing header with the same name (case-insensitive)
+                let header_lower = rule.inject_header.to_lowercase();
+                lines.retain(|l| {
+                    if let Some(colon_pos) = l.find(':') {
+                        l[..colon_pos].trim().to_lowercase() != header_lower
+                    } else {
+                        true
+                    }
+                });
+
+                // Insert before the last empty line
+                if let Some(pos) = lines.iter().rposition(|l| !l.is_empty()) {
+                    lines.insert(pos + 1, inject_line);
+                } else {
+                    lines.push(inject_line);
+                }
+
                 tracing::debug!(
                     header = %rule.inject_header,
                     env_var = %rule.env_var,
-                    "Credential available for injection (full injection in Task 5)"
+                    "Injected credential header"
                 );
             }
             Err(_) => {
@@ -313,7 +369,13 @@ async fn handle_mitm_with_injection(
         }
     }
 
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    // Reconstruct the head and send to upstream
+    let mut reconstructed = lines.join("\r\n");
+    reconstructed.push_str("\r\n"); // final \r\n after headers
+    upstream_tls.write_all(reconstructed.as_bytes()).await?;
+
+    // Now relay the rest bidirectionally (body + response)
+    let _ = tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls).await;
     Ok(())
 }
 
