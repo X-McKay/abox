@@ -16,6 +16,7 @@ ABOX_VM_DIR="${ABOX_VM_DIR:-$HOME/.abox/vm}"
 # ─── Argument parsing ────────────────────────────────────────────────────
 DO_SYMLINK=1
 ASSUME_YES="${BOOTSTRAP_YES:-0}"
+FROM_BUNDLE="${FROM_BUNDLE:-}"
 for arg in "$@"; do
     case "$arg" in
         --no-symlink)
@@ -24,31 +25,65 @@ for arg in "$@"; do
         --yes|-y)
             ASSUME_YES=1
             ;;
+        --from-bundle)
+            # Next argument is the bundle path; handled below
+            FROM_BUNDLE="__NEXT__"
+            ;;
         --help|-h)
             cat <<HELP
-Usage: $(basename "$0") [--no-symlink] [--yes]
+Usage: $(basename "$0") [--no-symlink] [--yes] [--from-bundle <path>]
 
-  --no-symlink   Do NOT create symlinks in ~/.local/bin. You will need
-                 to add $ABOX_VM_DIR to your PATH manually.
-  --yes, -y      Non-interactive mode: silently install missing rust
-                 toolchain components (e.g. the x86_64-unknown-linux-musl
-                 target). Without this flag the script fails fast and
-                 prints the rustup command for you to run yourself.
-                 Honored from the BOOTSTRAP_YES=1 environment variable too.
+  --no-symlink          Do NOT create symlinks in ~/.local/bin. You will need
+                        to add $ABOX_VM_DIR to your PATH manually.
+  --yes, -y             Non-interactive mode: silently install missing rust
+                        toolchain components (e.g. the x86_64-unknown-linux-musl
+                        target). Without this flag the script fails fast and
+                        prints the rustup command for you to run yourself.
+                        Honored from the BOOTSTRAP_YES=1 environment variable too.
+  --from-bundle <path>  Restore VM assets from a pre-built tarball instead of
+                        downloading components individually. The tarball should
+                        be an abox-vm-assets-*.tar.gz from a GitHub release.
 HELP
             exit 0
             ;;
         *)
-            echo "Unknown argument: $arg" >&2
-            echo "Try '$(basename "$0") --help'" >&2
-            exit 1
+            if [[ "$FROM_BUNDLE" == "__NEXT__" ]]; then
+                FROM_BUNDLE="$arg"
+            else
+                echo "Unknown argument: $arg" >&2
+                echo "Try '$(basename "$0") --help'" >&2
+                exit 1
+            fi
             ;;
     esac
 done
 
+if [[ "$FROM_BUNDLE" == "__NEXT__" ]]; then
+    echo "ERROR: --from-bundle requires a path argument" >&2
+    exit 1
+fi
+
 source "$REPO_ROOT/scripts/lib/download.sh"
 
 mkdir -p "$ABOX_VM_DIR" "$REPO_ROOT/vendor"
+
+# ─── Fast path: restore from pre-built bundle ───────────────────────────
+if [[ -n "$FROM_BUNDLE" ]]; then
+    if [[ ! -f "$FROM_BUNDLE" ]]; then
+        echo "ERROR: bundle not found: $FROM_BUNDLE" >&2
+        exit 1
+    fi
+    echo "abox VM bootstrap (from bundle)"
+    echo "  bundle:      $FROM_BUNDLE"
+    echo "  install dir: $ABOX_VM_DIR"
+    echo
+    echo "[1/1] Extracting VM assets from bundle..."
+    tar xzf "$FROM_BUNDLE" -C "$ABOX_VM_DIR"
+    echo
+    echo "Bootstrap complete (from bundle). Files in $ABOX_VM_DIR:"
+    ls -lh "$ABOX_VM_DIR"
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Artifact versions and URLs
