@@ -1020,6 +1020,110 @@ async fn test_run_sandbox_polls_until_vm_exits() {
     assert!(wt_base.join("run-sandbox-test").exists());
 }
 
+#[tokio::test]
+async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A mock VM that exits without writing an exit-code file.
+    /// Simulates a VM crash before guest init completed.
+    struct ExitingMockVmNoStatus {
+        info_calls: AtomicUsize,
+        status_dir: PathBuf,
+    }
+
+    impl VmPort for ExitingMockVmNoStatus {
+        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
+            Ok(VmInfo {
+                id: config.id,
+                pid: 99999,
+                state: VmState::Running,
+                api_socket: PathBuf::from("/tmp/api.sock"),
+                console_socket: PathBuf::from("/tmp/console.sock"),
+            })
+        }
+
+        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
+            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(VmInfo {
+                    id: id.to_string(),
+                    pid: 99999,
+                    state: VmState::Running,
+                    api_socket: PathBuf::from("/tmp/api.sock"),
+                    console_socket: PathBuf::from("/tmp/console.sock"),
+                })
+            } else {
+                anyhow::bail!("VM exited")
+            }
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+
+        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
+            Some(self.status_dir.clone())
+        }
+    }
+
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    config.ensure_dirs().unwrap();
+
+    // Create a status dir with NO exit-code file (simulates crash).
+    let status_dir = tmp.path().join("status-silent-fail");
+    std::fs::create_dir_all(&status_dir).unwrap();
+
+    let vm =
+        ExitingMockVmNoStatus { info_calls: AtomicUsize::new(0), status_dir };
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+
+    let params = CreateSandboxParams {
+        task_id: "silent-fail".into(),
+        base_branch: "main".into(),
+        template: None,
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["true".into()],
+    };
+
+    let policy = std::sync::Arc::new(
+        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
+            cli: vec![],
+            egress: vec![],
+            default_cli_action: "allow".into(),
+            default_egress_action: "deny".into(),
+        })
+        .unwrap(),
+    );
+
+    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    assert_eq!(exit, 1, "missing exit-code should produce exit code 1");
+
+    // The worktree should have been rolled back (removed).
+    assert!(
+        !wt_base.join("silent-fail").exists(),
+        "worktree should be removed after silent VM failure"
+    );
+}
+
 // ─── read_exit_code tests ───────────────────────────────────────────────────
 
 #[test]
