@@ -13,6 +13,10 @@
 
 set -e
 
+# Ensure a complete PATH — the kernel may start PID 1 with a minimal or
+# empty PATH, which causes BusyBox applets in /bin to be invisible.
+export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sys /sys 2>/dev/null || true
 mount -t devtmpfs dev /dev 2>/dev/null || true
@@ -70,11 +74,13 @@ fi
 # Report exit code back to host through the writable status share.
 echo "$RC" > /abox-status/exit-code 2>/dev/null || \
     echo "WARNING: could not write /abox-status/exit-code"
-sync
+sync 2>/dev/null || true
 
 # Tear down the socat bridge (best-effort).
 kill "$SOCAT_PID" 2>/dev/null || true
 
 echo
 echo "==> abox guest init: poweroff (rc=$RC)"
-poweroff -f
+# Use exec so poweroff replaces this shell — if poweroff somehow fails,
+# PID 1 must never exit (that triggers a kernel panic).
+exec poweroff -f

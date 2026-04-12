@@ -13,7 +13,7 @@ set -euo pipefail
 : "${SHIM_BIN:?SHIM_BIN must be set}"
 : "${GUEST_INIT:?GUEST_INIT must be set}"
 
-for cmd in tar mkfs.ext4 dd install; do
+for cmd in tar mkfs.ext4 dd install fakeroot; do
     command -v "$cmd" >/dev/null 2>&1 || {
         echo "ERROR: required command '$cmd' not found in PATH" >&2
         exit 1
@@ -91,6 +91,38 @@ tar -xzf "$ABOX_VM_DIR/libncursesw.apk" -C "$STAGE" \
     exit 1
 }
 
+# ── Install packages via apk-static (rootless with fakeroot) ───────────
+echo "  downloading apk-tools-static..."
+APK_STATIC_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/apk-tools-static-2.14.4-r0.apk"
+APK_STATIC_APK="$ABOX_VM_DIR/apk-tools-static.apk"
+if [[ ! -f "$APK_STATIC_APK" ]]; then
+    curl -fsSL -o "$APK_STATIC_APK" "$APK_STATIC_URL"
+fi
+# Extract the static apk binary
+tar -xzf "$APK_STATIC_APK" --warning=no-unknown-keyword -C "$STAGE" \
+    sbin/apk.static 2>/dev/null
+APK_STATIC="$STAGE/sbin/apk.static"
+
+echo "  installing bash, nodejs, npm via apk.static..."
+# Configure Alpine repositories so apk can resolve packages.
+mkdir -p "$STAGE/etc/apk/keys"
+cp "$STAGE"/usr/share/apk/keys/x86/*.pub "$STAGE/etc/apk/keys/" 2>/dev/null || true
+echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/main" > "$STAGE/etc/apk/repositories"
+echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> "$STAGE/etc/apk/repositories"
+fakeroot "$APK_STATIC" --root "$STAGE" --initdb --no-cache --no-scripts add \
+    bash nodejs npm 2>&1 | tail -10
+# Clean up the static apk binary — not needed in the guest.
+rm -f "$APK_STATIC"
+
+# ── Install Claude Code and Codex CLIs via npm ─────────────────────────
+echo "  installing Claude Code and Codex CLIs..."
+# npm install into the staged rootfs's global prefix so the binaries
+# land at /usr/local/bin inside the guest.
+NPM_PREFIX="$STAGE/usr/local"
+mkdir -p "$NPM_PREFIX/lib" "$NPM_PREFIX/bin"
+npm install --global --prefix "$NPM_PREFIX" \
+    @anthropic-ai/claude-code @openai/codex 2>&1 | tail -5
+
 # ── Copy CA cert into guest trust store (for TLS-terminating proxy) ─────
 if [ -f "$HOME/.abox/ca/root.crt" ]; then
     echo "  installing abox CA cert into guest trust store..."
@@ -111,8 +143,8 @@ install -m 0755 "$GUEST_INIT" "$STAGE/sbin/init"
 echo "  creating ext4 image..."
 IMG="$ABOX_VM_DIR/rootfs.raw"
 rm -f "$IMG"
-# 96 MiB is plenty for miniroot + shim + socat (typical usage ~15 MiB)
-dd if=/dev/zero of="$IMG" bs=1M count=96 status=none
+# 512 MiB for miniroot + shim + socat + bash + nodejs + npm + CLI tools
+dd if=/dev/zero of="$IMG" bs=1M count=512 status=none
 mkfs.ext4 -q -F -E root_owner=0:0 -d "$STAGE" "$IMG"
 
 echo "  rootfs.raw built ($(du -h "$IMG" | cut -f1))"
