@@ -27,6 +27,10 @@ pub struct AboxConfig {
     /// Proxy daemon configuration.
     #[serde(default)]
     pub proxy: ProxyConfig,
+
+    /// Guest VM configuration.
+    #[serde(default)]
+    pub guest: GuestConfig,
 }
 
 /// Default VM resource allocation.
@@ -47,6 +51,28 @@ pub struct VmDefaults {
     /// Path to the kernel (vmlinux).
     #[serde(default)]
     pub kernel_path: Option<PathBuf>,
+}
+
+/// Guest VM configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GuestConfig {
+    /// Credential files to stage in the guest VM.
+    #[serde(default)]
+    pub credential_files: Vec<CredentialFileEntry>,
+}
+
+/// A credential file to place inside the guest VM at boot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialFileEntry {
+    /// Source path on the host. Supports `~` expansion.
+    pub host: String,
+    /// Absolute destination path inside the VM.
+    pub guest: String,
+    /// Unix permissions for the file. Default: "0600".
+    #[serde(default = "default_credential_mode")]
+    pub mode: String,
+    /// If set, generate a stub JSON file instead of copying the host file.
+    pub stub: Option<toml::Value>,
 }
 
 /// Proxy daemon configuration.
@@ -107,6 +133,7 @@ impl Default for AboxConfig {
             runtime_dir: None,
             vm_defaults: VmDefaults::default(),
             proxy: ProxyConfig::default(),
+            guest: GuestConfig::default(),
         }
     }
 }
@@ -184,6 +211,10 @@ impl AboxConfig {
     }
 }
 
+fn default_credential_mode() -> String {
+    "0600".to_string()
+}
+
 fn default_state_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join(".abox")
 }
@@ -207,6 +238,57 @@ fn default_policy_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_guest_credential_files() {
+        let toml_str = r#"
+        [guest]
+        [[guest.credential_files]]
+        host = "~/.claude/.credentials.json"
+        guest = "/.claude/.credentials.json"
+        mode = "0600"
+
+        [guest.credential_files.stub]
+        [guest.credential_files.stub.claudeAiOauth]
+        accessToken = "abox-proxy-managed"
+        refreshToken = "abox-proxy-managed"
+        expiresAt = 9999999999999
+        scopes = ["user:inference"]
+        subscriptionType = "pro"
+    "#;
+        let config: AboxConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.guest.credential_files.len(), 1);
+        let entry = &config.guest.credential_files[0];
+        assert_eq!(entry.host, "~/.claude/.credentials.json");
+        assert_eq!(entry.guest, "/.claude/.credentials.json");
+        assert_eq!(entry.mode, "0600");
+        assert!(entry.stub.is_some());
+    }
+
+    #[test]
+    fn test_parse_guest_credential_files_without_stub() {
+        let toml_str = r#"
+        [guest]
+        [[guest.credential_files]]
+        host = "~/.config/gh/hosts.yml"
+        guest = "/root/.config/gh/hosts.yml"
+    "#;
+        let config: AboxConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.guest.credential_files.len(), 1);
+        let entry = &config.guest.credential_files[0];
+        assert!(entry.stub.is_none());
+        assert_eq!(entry.mode, "0600"); // default
+    }
+
+    #[test]
+    fn test_parse_empty_guest_section() {
+        let toml_str = r"
+        [vm_defaults]
+        memory_mib = 2048
+    ";
+        let config: AboxConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.guest.credential_files.is_empty());
+    }
 
     #[test]
     fn test_default_config() {
