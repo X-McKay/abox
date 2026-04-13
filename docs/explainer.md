@@ -197,26 +197,53 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 **How it works:**
 
-1. The guest sets `HTTPS_PROXY=http://10.0.2.2:<port>` (injected automatically by the orchestrator). When the agent's HTTPS client sends a CONNECT request, it arrives at the proxy.
+1. The guest sets `HTTPS_PROXY=http://127.0.0.1:18443` (injected automatically by the orchestrator). `127.0.0.1:18443` is a `socat` bridge inside the guest that forwards to the host over vsock port 5001. When the agent's HTTPS client sends a CONNECT request, it arrives at the host-side proxy.
 2. The proxy evaluates the target domain against egress policy rules. If denied, it returns 403.
 3. If the domain is in the `bypass_tls` list (for cert-pinned clients), the proxy does a plain TCP passthrough — no TLS termination.
 4. Otherwise, the proxy generates a per-host leaf certificate signed by the abox root CA (`~/.abox/ca/root.crt`), sends `200 Connection Established`, and accepts the client's TLS using that leaf cert. The guest trusts it because the root CA was baked into the rootfs at build time.
 5. The proxy reads the plaintext HTTP request, injects the credential header (e.g., `x-api-key: <value>` for Anthropic, `Authorization: Bearer <value>` for OpenAI), then opens a new TLS connection to the real upstream using system root certificates.
 6. The modified request is forwarded upstream and the response is relayed back to the client.
 
-**The credential mapping** is defined in `policies/default.toml`:
+**The credential mapping** is defined in `policies/default.toml`. Credentials can come from a host environment variable or from a JSON credential file on the host:
 
 ```toml
+# API key from host environment variable
 [[egress]]
 domain = "api.anthropic.com"
 inject_header = "x-api-key"
 env_var = "ANTHROPIC_API_KEY"
 header_template = "{value}"
+
+# OAuth token from a JSON credential file on the host
+[[egress]]
+domain = "api.claude.ai"
+inject_header = "Authorization"
+credential_file = "~/.claude/.credentials.json"
+json_path = "claudeAiOauth.accessToken"
+header_template = "Bearer {value}"
 ```
 
-The `env_var` is read from the **host** environment, not the guest. The `header_template` supports `{value}` substitution (e.g., `"Bearer {value}"` for OAuth-style headers).
+The `env_var` and `credential_file` fields are both read from the **host**, not the guest. The `json_path` field is a dot-separated path into the JSON credential file (e.g., `claudeAiOauth.accessToken`). The `header_template` supports `{value}` substitution.
 
-**What this means for you:** Set your API keys as host environment variables (`export ANTHROPIC_API_KEY=sk-...`). The proxy injects them automatically. The agent never sees the key.
+**Stub credential files:** Some tools (e.g., Claude Code) check for a local credential file before making any network calls and refuse to start if the file is absent. To satisfy this check without placing real credentials in the VM, configure a `stub` in `~/.abox/config.toml`:
+
+```toml
+[guest]
+[[guest.credential_files]]
+host = "~/.claude/.credentials.json"
+guest = "/.claude/.credentials.json"
+
+[guest.credential_files.stub.claudeAiOauth]
+accessToken = "abox-proxy-managed"
+expiresAt = 9999999999999
+refreshToken = "abox-proxy-managed"
+```
+
+The stub is written into the guest filesystem at boot with placeholder values. The real token is injected by the proxy at the network layer; the stub value never reaches the upstream API.
+
+**Node.js CA trust:** Node.js does not use the system trust store by default. The orchestrator injects `NODE_EXTRA_CA_CERTS` pointing to the abox root CA so that Node.js-based tools (Claude Code, Codex CLI) trust the MITM certificate automatically.
+
+**What this means for you:** Set API keys as host environment variables (`export ANTHROPIC_API_KEY=sk-...`) for key-based APIs. For OAuth-based tools, configure `credential_file` in the egress policy and a `stub` in the guest config. The proxy injects the real credentials; the agent never sees them.
 
 **CA management:** The root CA is generated on first use and lives at `~/.abox/ca/`. Use `abox ca show` to inspect it, `abox ca rotate` to regenerate (triggers a rootfs rebuild), and `abox ca path` to find it.
 

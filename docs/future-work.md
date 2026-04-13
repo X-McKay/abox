@@ -1,6 +1,6 @@
 # Future Work and Roadmap
 
-**Last updated:** 2026-04-10 (after the priorities roadmap landed P1-P5)
+**Last updated:** 2026-04-12 (credential forwarding feature landed)
 
 This document is the **forward-looking** companion to
 [`docs/backlog/2026-04-08-vm-e2e-mvp-followups.md`](backlog/2026-04-08-vm-e2e-mvp-followups.md).
@@ -27,6 +27,24 @@ Five priorities were executed from
 Current state: 120 tests pass, clippy clean, 46/46 e2e assertions green
 across all 7 phases.
 
+## What landed in the 2026-04-12 credential forwarding work
+
+Closed the remaining gap in the OAuth tool authentication story:
+
+- **Per-sandbox egress proxy via vsock** — `run_sandbox()` now spawns a
+  per-sandbox `EgressProxyServer` on vsock port 5001. Guest `init.sh` bridges
+  vsock to TCP `127.0.0.1:18443` via socat. Audit entries now carry correct
+  per-sandbox attribution.
+- **Stub credential files** — `[guest] credential_files` config supports an
+  optional `stub` that writes a placeholder credential file into the guest,
+  satisfying tools like Claude Code that check for local credentials before
+  making any network calls.
+- **`credential_file` + `json_path` egress policy fields** — alternative to
+  `env_var` for reading the real token from a JSON credential file on the host
+  at proxy request time.
+- **`NODE_EXTRA_CA_CERTS` injection** — Node.js-based tools now trust the abox
+  MITM CA without a rootfs rebuild.
+
 ---
 
 ## TL;DR — recommended priority order
@@ -34,16 +52,11 @@ across all 7 phases.
 1. **CI runner with `/dev/kvm`** — Phases 6-7 of e2e only run when
    VM artifacts are present. A self-hosted runner or scheduled nightly
    job would catch regressions in the VM boot path.
-2. **Per-sandbox proxy spawning** — P1 allocated per-sandbox egress
-   ports and injects `HTTPS_PROXY`, but the actual per-sandbox
-   `EgressProxyServer` is not yet spawned from `run_sandbox()`.
-   The shared daemon works, but per-sandbox spawning completes the
-   audit attribution story.
-3. **F5** — TUI dashboard refresh. Cosmetic; nice-to-have.
-4. **aarch64 SHA verification** — N7 parameterized bootstrap for
+2. **F5** — TUI dashboard refresh. Cosmetic; nice-to-have.
+3. **aarch64 SHA verification** — N7 parameterized bootstrap for
    aarch64 but SHA256 checksums are placeholders. Needs ARM hardware
    to verify.
-5. **HTTP/2 support in MITM proxy** — Current proxy is HTTP/1.1 only.
+4. **HTTP/2 support in MITM proxy** — Current proxy is HTTP/1.1 only.
    Some clients negotiate HTTP/2 via ALPN.
 
 Everything else in "Longer-term ideas" is a "would be nice" not
@@ -56,7 +69,7 @@ a "must do".
 | Item | Status | How |
 |---|---|---|
 | **F3** HTTPS credential injection | **Done** | P1: TLS MITM proxy + header injection + ADR-003 |
-| **S2** Egress audit attribution | **Partial** | Per-sandbox ports allocated; shared proxy still tags `"unknown"` |
+| **S2** Egress audit attribution | **Done** | Per-sandbox egress proxy via vsock + credential file injection |
 | **F4** `abox template create` wiring | **Done** | P3: CLI + restore mode + virtiofsd metadata |
 | **N2** SUN_LEN guard | **Done** | P2: `anyhow::ensure!` in `CloudHypervisorAdapter::new()` |
 | **N3** Silent failure test | **Done** | P2: `ExitingMockVmNoStatus` + rollback assertion |
@@ -75,15 +88,6 @@ Phases 6-7 of `e2e_test.sh` (full VM boot, agent lifecycle, credential
 injection) are gated on VM artifacts. They pass locally but are skipped
 on stock GitHub runners. A self-hosted runner with KVM or a nightly
 scheduled job would close this gap.
-
-### Per-sandbox egress proxy spawning — P1, S
-
-`create_sandbox()` allocates an ephemeral port and injects
-`HTTPS_PROXY` into the guest env, but no per-sandbox
-`EgressProxyServer` is spawned. The orchestrator needs to hold an
-`Arc<RootCa>` and spawn a proxy task per sandbox. Until then, the
-shared `abox-proxyd` daemon works but audit entries show
-`sandbox_id="unknown"` for HTTPS traffic.
 
 ### aarch64 SHA256 verification — P2, S
 

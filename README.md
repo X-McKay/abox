@@ -151,6 +151,19 @@ problems.
    abox ca path      # print CA directory
    ```
 
+8. **Configure credential forwarding (for Claude Code, Codex, etc.):**
+   ```bash
+   # Edit ~/.abox/config.toml and add:
+   # [guest]
+   # [[guest.credential_files]]
+   # host = "~/.claude/.credentials.json"
+   # guest = "/.claude/.credentials.json"
+   # [guest.credential_files.stub.claudeAiOauth]
+   # accessToken = "abox-proxy-managed"
+   # ...
+   # See docs/explainer.md Section 8 for full details.
+   ```
+
 ## Development
 
 We use `just` as our command runner. Install it with `cargo install just`.
