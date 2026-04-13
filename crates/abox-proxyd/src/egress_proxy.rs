@@ -345,11 +345,9 @@ async fn handle_mitm_with_injection(
     let mut lines: Vec<String> = head_str.lines().map(String::from).collect();
 
     if let Some(rule) = rule {
-        match std::env::var(&rule.env_var) {
-            Ok(value) => {
+        match rule.resolve_credential() {
+            Some(value) => {
                 let header_value = rule.header_template.replace("{value}", &value);
-                // Insert the header before the empty line (last element after split)
-                // Find insertion point: just before the trailing empty line
                 let inject_line = format!("{}: {}", rule.inject_header, header_value);
 
                 // Remove any existing header with the same name (case-insensitive)
@@ -371,14 +369,13 @@ async fn handle_mitm_with_injection(
 
                 tracing::debug!(
                     header = %rule.inject_header,
-                    env_var = %rule.env_var,
                     "Injected credential header"
                 );
             }
-            Err(_) => {
+            None => {
                 tracing::warn!(
-                    env_var = %rule.env_var,
-                    "Credential env var not set, skipping injection"
+                    domain = %rule.domain,
+                    "No credential value available (env var not set or credential file not found)"
                 );
             }
         }

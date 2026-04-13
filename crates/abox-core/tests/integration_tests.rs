@@ -263,19 +263,25 @@ fn test_policy_multiple_egress_rules() {
             EgressRule {
                 domain: "api.anthropic.com".to_string(),
                 inject_header: "x-api-key".to_string(),
-                env_var: "ANTHROPIC_API_KEY".to_string(),
+                env_var: Some("ANTHROPIC_API_KEY".to_string()),
+                credential_file: None,
+                json_path: None,
                 header_template: "{value}".to_string(),
             },
             EgressRule {
                 domain: "api.openai.com".to_string(),
                 inject_header: "Authorization".to_string(),
-                env_var: "OPENAI_API_KEY".to_string(),
+                env_var: Some("OPENAI_API_KEY".to_string()),
+                credential_file: None,
+                json_path: None,
                 header_template: "Bearer {value}".to_string(),
             },
             EgressRule {
                 domain: "*.amazonaws.com".to_string(),
                 inject_header: "Authorization".to_string(),
-                env_var: "AWS_TOKEN".to_string(),
+                env_var: Some("AWS_TOKEN".to_string()),
+                credential_file: None,
+                json_path: None,
                 header_template: "AWS4-HMAC-SHA256 {value}".to_string(),
             },
         ],
@@ -288,15 +294,15 @@ fn test_policy_multiple_egress_rules() {
 
     // Anthropic
     let rule = engine.evaluate_egress("api.anthropic.com").unwrap().unwrap();
-    assert_eq!(rule.env_var, "ANTHROPIC_API_KEY");
+    assert_eq!(rule.env_var.as_deref(), Some("ANTHROPIC_API_KEY"));
 
     // OpenAI
     let rule = engine.evaluate_egress("api.openai.com").unwrap().unwrap();
-    assert_eq!(rule.env_var, "OPENAI_API_KEY");
+    assert_eq!(rule.env_var.as_deref(), Some("OPENAI_API_KEY"));
 
     // AWS wildcard
     let rule = engine.evaluate_egress("s3.us-east-1.amazonaws.com").unwrap().unwrap();
-    assert_eq!(rule.env_var, "AWS_TOKEN");
+    assert_eq!(rule.env_var.as_deref(), Some("AWS_TOKEN"));
 
     // Unknown domain → denied
     assert!(engine.evaluate_egress("evil.example.com").is_err());
