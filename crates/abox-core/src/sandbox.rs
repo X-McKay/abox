@@ -187,6 +187,12 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let proxy_url = "http://127.0.0.1:18443".to_string();
         env_vars.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
         env_vars.push(("https_proxy".to_string(), proxy_url));
+        // Node.js uses its own embedded CA bundle; tell it to also trust the
+        // abox root CA so the TLS-terminating MITM proxy is accepted.
+        env_vars.push((
+            "NODE_EXTRA_CA_CERTS".to_string(),
+            "/etc/ssl/certs/abox-ca.pem".to_string(),
+        ));
 
         // Step 3: Build VM config.
         // Resolve image and kernel paths: prefer explicit config values, then

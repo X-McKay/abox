@@ -21,6 +21,10 @@ mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sys /sys 2>/dev/null || true
 mount -t devtmpfs dev /dev 2>/dev/null || true
 
+# Bring up the loopback interface so 127.0.0.1 is reachable (needed for
+# the HTTPS egress proxy bridge on TCP port 18443).
+ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
+
 mkdir -p /run /workspace /abox-meta
 
 # Workspace share
