@@ -46,7 +46,16 @@ if [ -x "$SOCAT_BIN" ]; then
     "$SOCAT_BIN" UNIX-LISTEN:/run/abox-proxy.sock,fork,reuseaddr \
                  VSOCK-CONNECT:2:5000 &
     SOCAT_PID=$!
-    # Give socat a moment to bind the socket before exec'ing the agent.
+
+    # Also bridge vsock port 5001 for the HTTPS egress proxy.
+    # The host binds a per-sandbox egress proxy on vsock-<id>.sock_5001;
+    # this socat exposes it as a TCP listener inside the guest so that
+    # HTTPS_PROXY=http://127.0.0.1:18443 works.
+    "$SOCAT_BIN" TCP-LISTEN:18443,fork,reuseaddr \
+                 VSOCK-CONNECT:2:5001 &
+    EGRESS_SOCAT_PID=$!
+
+    # Give socat a moment to bind the sockets before exec'ing the agent.
     sleep 0.5
 else
     echo "WARNING: $SOCAT_BIN not found; proxy bridge unavailable"
@@ -76,8 +85,9 @@ echo "$RC" > /abox-status/exit-code 2>/dev/null || \
     echo "WARNING: could not write /abox-status/exit-code"
 sync 2>/dev/null || true
 
-# Tear down the socat bridge (best-effort).
+# Tear down the socat bridges (best-effort).
 kill "$SOCAT_PID" 2>/dev/null || true
+kill "$EGRESS_SOCAT_PID" 2>/dev/null || true
 
 echo
 echo "==> abox guest init: poweroff (rc=$RC)"

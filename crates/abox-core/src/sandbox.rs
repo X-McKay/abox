@@ -180,16 +180,11 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             None => crate::vm::StartMode::Fresh,
         };
 
-        // Allocate an ephemeral port for the per-sandbox egress proxy.
-        let egress_port = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            listener.local_addr()?.port()
-        };
-
         // Inject HTTPS_PROXY env vars so the guest routes HTTPS through the
-        // per-sandbox egress proxy on the host.
+        // per-sandbox egress proxy. The guest's init.sh bridges vsock port
+        // 5001 to a local TCP listener at 127.0.0.1:18443 via socat.
         let mut env_vars = params.env_vars;
-        let proxy_url = format!("http://10.0.2.2:{egress_port}");
+        let proxy_url = "http://127.0.0.1:18443".to_string();
         env_vars.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
         env_vars.push(("https_proxy".to_string(), proxy_url));
 
@@ -244,7 +239,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             user: params.user,
             env_vars,
             agent_command: params.command.clone(),
-            proxy_port: egress_port,
+            proxy_port: 0, // unused; egress proxy now routes through vsock
             start_mode,
             credential_files,
         };
@@ -279,7 +274,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             vm_state: vm_info.state.to_string(),
             vm_pid: vm_info.pid,
             commits_ahead: 0,
-            egress_port,
+            egress_port: 0, // unused; egress proxy now routes through vsock
         })
     }
 
@@ -425,29 +420,35 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             }
         });
 
-        // Spawn the per-sandbox egress proxy bound to the allocated port.
-        // This listens for HTTP CONNECT requests from the guest and performs
-        // TLS-terminating MITM with credential injection via the policy engine.
-        let egress_port = status.egress_port;
+        // Spawn the per-sandbox egress proxy bound to the vsock-bridged Unix
+        // socket. Cloud Hypervisor routes guest vsock port 5001 traffic to
+        // `vsock-<id>.sock_5001` — the same pattern used for the CLI proxy
+        // bridge on port 5000.
+        let egress_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5001"));
         let egress_policy = std::sync::Arc::clone(&policy);
         let egress_ca = std::sync::Arc::clone(&root_ca);
         let bypass_tls = policy.bypass_tls_patterns().to_vec();
         let egress_task_id = task_id.clone();
         let egress_audit_path = self.config.logs_dir().join("audit.jsonl");
         let egress_handle = tokio::spawn(async move {
-            let listener =
-                match tokio::net::TcpListener::bind(format!("127.0.0.1:{egress_port}")).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!(
-                            port = egress_port,
-                            error = %e,
-                            "Failed to bind egress proxy listener"
-                        );
-                        return;
-                    }
-                };
-            tracing::info!(port = egress_port, task_id = %egress_task_id, "Per-sandbox egress proxy listening");
+            // Remove any stale socket from a previous run.
+            let _ = std::fs::remove_file(&egress_socket);
+            let listener = match tokio::net::UnixListener::bind(&egress_socket) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(
+                        socket = %egress_socket.display(),
+                        error = %e,
+                        "Failed to bind egress proxy listener"
+                    );
+                    return;
+                }
+            };
+            tracing::info!(
+                socket = %egress_socket.display(),
+                task_id = %egress_task_id,
+                "Per-sandbox egress proxy listening (vsock port 5001)"
+            );
 
             loop {
                 let (stream, _peer_addr) = match listener.accept().await {
