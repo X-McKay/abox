@@ -18,6 +18,23 @@ pub enum StartMode {
     },
 }
 
+/// A credential file ready to be written into the boot metadata directory.
+///
+/// Produced by [`crate::sandbox::stage_credential_files()`] from
+/// [`crate::config::CredentialFileEntry`] entries. Carries the file content
+/// so the VM adapter can write it into the meta directory at boot time.
+#[derive(Debug, Clone)]
+pub struct CredentialToStage {
+    /// Index in the credentials directory (maps to `credentials/<index>`).
+    pub index: usize,
+    /// Absolute destination path inside the guest VM.
+    pub guest_path: String,
+    /// Unix permissions (e.g., "0600").
+    pub mode: String,
+    /// File content to write.
+    pub content: Vec<u8>,
+}
+
 /// Configuration for creating a new sandbox VM.
 #[derive(Debug, Clone)]
 pub struct VmConfig {
@@ -44,6 +61,8 @@ pub struct VmConfig {
     /// How to start the VM: fresh boot or restore from snapshot.
     #[allow(dead_code)]
     pub start_mode: StartMode,
+    /// Credential files to stage in the boot metadata directory.
+    pub credential_files: Vec<CredentialToStage>,
 }
 
 /// Information about a running or stopped VM.

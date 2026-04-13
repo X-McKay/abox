@@ -1072,7 +1072,13 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         .unwrap(),
     );
 
-    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    let exit = orchestrator
+        .run_sandbox(params, policy, {
+            let tmp_ca = tempfile::TempDir::new().unwrap();
+            std::sync::Arc::new(abox_core::ca::RootCa::generate_and_persist(tmp_ca.path()).unwrap())
+        })
+        .await
+        .unwrap();
     assert_eq!(exit, 0);
 
     // The worktree should have been created on disk.
@@ -1176,7 +1182,13 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
         .unwrap(),
     );
 
-    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    let exit = orchestrator
+        .run_sandbox(params, policy, {
+            let tmp_ca = tempfile::TempDir::new().unwrap();
+            std::sync::Arc::new(abox_core::ca::RootCa::generate_and_persist(tmp_ca.path()).unwrap())
+        })
+        .await
+        .unwrap();
     assert_eq!(exit, 1, "missing exit-code should produce exit code 1");
 
     // The worktree should have been rolled back (removed).
@@ -1304,7 +1316,13 @@ async fn test_run_sandbox_timeout_returns_124() {
         .unwrap(),
     );
 
-    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    let exit = orchestrator
+        .run_sandbox(params, policy, {
+            let tmp_ca = tempfile::TempDir::new().unwrap();
+            std::sync::Arc::new(abox_core::ca::RootCa::generate_and_persist(tmp_ca.path()).unwrap())
+        })
+        .await
+        .unwrap();
     assert_eq!(exit, 124, "timeout should produce exit code 124");
 }
 
@@ -1405,7 +1423,13 @@ async fn test_run_sandbox_exits_before_timeout() {
         .unwrap(),
     );
 
-    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    let exit = orchestrator
+        .run_sandbox(params, policy, {
+            let tmp_ca = tempfile::TempDir::new().unwrap();
+            std::sync::Arc::new(abox_core::ca::RootCa::generate_and_persist(tmp_ca.path()).unwrap())
+        })
+        .await
+        .unwrap();
     assert_eq!(exit, 42, "should return the guest's exit code, not 124");
 }
 
@@ -1506,7 +1530,13 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
         .unwrap(),
     );
 
-    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    let exit = orchestrator
+        .run_sandbox(params, policy, {
+            let tmp_ca = tempfile::TempDir::new().unwrap();
+            std::sync::Arc::new(abox_core::ca::RootCa::generate_and_persist(tmp_ca.path()).unwrap())
+        })
+        .await
+        .unwrap();
     assert_eq!(exit, 0);
 
     // Worktree should be cleaned up in ephemeral mode.
@@ -1608,7 +1638,13 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
         .unwrap(),
     );
 
-    let exit = orchestrator.run_sandbox(params, policy).await.unwrap();
+    let exit = orchestrator
+        .run_sandbox(params, policy, {
+            let tmp_ca = tempfile::TempDir::new().unwrap();
+            std::sync::Arc::new(abox_core::ca::RootCa::generate_and_persist(tmp_ca.path()).unwrap())
+        })
+        .await
+        .unwrap();
     assert_eq!(exit, 0);
 
     // Worktree should still exist when NOT ephemeral.
