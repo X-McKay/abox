@@ -7,7 +7,19 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::path::Path;
+
+/// A credential file staged in the boot metadata directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedCredential {
+    /// Index in the credentials directory (maps to `credentials/<index>`).
+    pub index: usize,
+    /// Absolute destination path inside the guest VM.
+    pub guest_path: String,
+    /// Unix permissions (e.g., "0600").
+    pub mode: String,
+}
 
 /// Metadata the host injects into the guest at boot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +30,9 @@ pub struct BootMeta {
     pub agent_command: Vec<String>,
     /// Additional environment variables to export before exec.
     pub env: Vec<(String, String)>,
+    /// Credential files staged in `<meta_dir>/credentials/`.
+    #[serde(default)]
+    pub credential_files: Vec<StagedCredential>,
 }
 
 impl BootMeta {
@@ -50,6 +65,22 @@ impl BootMeta {
             s.push_str("='");
             s.push_str(&sh_escape(v));
             s.push_str("'\n");
+        }
+        for cred in &self.credential_files {
+            let parent = std::path::Path::new(&cred.guest_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("/"))
+                .display()
+                .to_string();
+            let _ = writeln!(s, "mkdir -p '{}'", sh_escape(&parent));
+            let _ = writeln!(
+                s,
+                "cp '/abox-meta/credentials/{}' '{}'",
+                cred.index,
+                sh_escape(&cred.guest_path)
+            );
+            let _ =
+                writeln!(s, "chmod {} '{}'", sh_escape(&cred.mode), sh_escape(&cred.guest_path));
         }
         s.push_str("exec");
         for arg in &self.agent_command {
@@ -95,6 +126,7 @@ mod tests {
             sandbox_id: "fix-auth".into(),
             agent_command: vec!["claude".into(), "--model".into(), "opus".into()],
             env: vec![("FOO".into(), "bar".into())],
+            credential_files: vec![],
         };
         let json = meta.to_json().unwrap();
         let parsed = BootMeta::from_json(&json).unwrap();
@@ -110,6 +142,7 @@ mod tests {
             sandbox_id: "task-a".into(),
             agent_command: vec!["/bin/echo".into(), "hello".into()],
             env: vec![],
+            credential_files: vec![],
         };
         let script = meta.runner_script();
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -124,6 +157,7 @@ mod tests {
             sandbox_id: "x".into(),
             agent_command: vec!["echo".into(), "hello world".into(), "$HOME".into(), "it's".into()],
             env: vec![("MSG".into(), "a 'quote' here".into())],
+            credential_files: vec![],
         };
         let script = meta.runner_script();
         // Argument wrapping
@@ -143,6 +177,7 @@ mod tests {
             sandbox_id: "stage-test".into(),
             agent_command: vec!["true".into()],
             env: vec![],
+            credential_files: vec![],
         };
         meta.stage(tmp.path()).unwrap();
 
@@ -160,5 +195,73 @@ mod tests {
                 std::fs::metadata(tmp.path().join("runner.sh")).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o755);
         }
+    }
+
+    #[test]
+    fn test_runner_script_with_credentials() {
+        let meta = BootMeta {
+            sandbox_id: "cred-test".into(),
+            agent_command: vec!["claude".into(), "--print".into(), "hello".into()],
+            env: vec![],
+            credential_files: vec![StagedCredential {
+                index: 0,
+                guest_path: "/.claude/.credentials.json".into(),
+                mode: "0600".into(),
+            }],
+        };
+        let script = meta.runner_script();
+        assert!(script.contains("mkdir -p '/.claude'"));
+        assert!(script.contains("cp '/abox-meta/credentials/0' '/.claude/.credentials.json'"));
+        assert!(script.contains("chmod 0600 '/.claude/.credentials.json'"));
+        // Credential placement must come before exec
+        let cred_pos = script.find("cp '/abox-meta/credentials/0'").unwrap();
+        let exec_pos = script.find("\nexec ").unwrap();
+        assert!(cred_pos < exec_pos, "credentials must be placed before exec");
+    }
+
+    #[test]
+    fn test_runner_script_no_credentials() {
+        let meta = BootMeta {
+            sandbox_id: "no-cred".into(),
+            agent_command: vec!["echo".into(), "hi".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(!script.contains("/abox-meta/credentials"));
+    }
+
+    #[test]
+    fn test_runner_script_credential_path_escaping() {
+        let meta = BootMeta {
+            sandbox_id: "escape-test".into(),
+            agent_command: vec!["true".into()],
+            env: vec![],
+            credential_files: vec![StagedCredential {
+                index: 0,
+                guest_path: "/root/.config/it's a test/creds.json".into(),
+                mode: "0600".into(),
+            }],
+        };
+        let script = meta.runner_script();
+        assert!(script.contains(r"'/root/.config/it'\''s a test/creds.json'"));
+    }
+
+    #[test]
+    fn test_stage_with_credentials() {
+        let tmp = TempDir::new().unwrap();
+        let meta = BootMeta {
+            sandbox_id: "stage-cred".into(),
+            agent_command: vec!["true".into()],
+            env: vec![],
+            credential_files: vec![StagedCredential {
+                index: 0,
+                guest_path: "/.claude/.credentials.json".into(),
+                mode: "0600".into(),
+            }],
+        };
+        meta.stage(tmp.path()).unwrap();
+        let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
+        assert!(runner.contains("cp '/abox-meta/credentials/0'"));
     }
 }

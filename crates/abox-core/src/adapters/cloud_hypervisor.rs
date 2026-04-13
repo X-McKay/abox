@@ -153,6 +153,7 @@ impl VmPort for CloudHypervisorAdapter {
             sandbox_id: config.id.clone(),
             agent_command: config.agent_command.clone(),
             env: config.env_vars.clone(),
+            credential_files: vec![],
         };
         meta.stage(&meta_dir)
             .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
