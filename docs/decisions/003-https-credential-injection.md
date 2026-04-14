@@ -146,3 +146,8 @@ Node.js does not use the system trust store by default. The orchestrator injects
 `NODE_EXTRA_CA_CERTS=<path-to-abox-root.crt>` into the guest boot metadata so
 that Node.js-based tools (Claude Code, Codex CLI) trust the MITM certificate
 without any rootfs change.
+
+### See also
+
+- [`docs/superpowers/specs/2026-04-12-credential-forwarding-design.md`](../superpowers/specs/2026-04-12-credential-forwarding-design.md) — full design spec
+- [`docs/superpowers/plans/2026-04-12-credential-forwarding.md`](../superpowers/plans/2026-04-12-credential-forwarding.md) — implementation plan with TDD tasks
