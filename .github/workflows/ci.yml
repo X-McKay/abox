@@ -74,3 +74,47 @@ jobs:
         # existing, which they don't on a stock GitHub runner. The script
         # prints "skipped: VM artifacts not found" and continues.
         run: ./scripts/e2e_test.sh
+
+  vm-attestation:
+    name: VM attestation (label required when VM paths touched)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect VM-touching paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            vm:
+              - 'guest/**'
+              - 'scripts/build_rootfs.sh'
+              - 'scripts/bootstrap_vm.sh'
+              - 'crates/abox-runtime/**'
+              - 'crates/abox-proxy/**'
+              - 'crates/abox-shim/**'
+              - 'templates/config.example.toml'
+
+      - name: Enforce vm-attested label when VM paths touched
+        if: steps.filter.outputs.vm == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            if (!labels.includes('vm-attested')) {
+              core.setFailed(
+                'This PR touches VM/guest/proxy code. Run `just e2e-vm` locally, ' +
+                'then add the `vm-attested` label and comment with the timestamp. ' +
+                'See docs/contributing/pre-pr-checklist.md.'
+              );
+            } else {
+              core.info('vm-attested label present. Trust-but-post-a-timestamp-comment.');
+            }
+
+      - name: No-op when VM paths untouched
+        if: steps.filter.outputs.vm != 'true'
+        run: echo "No VM-touching paths in this PR; attestation not required."
