@@ -43,3 +43,30 @@ egress_port = 18443
 
 # Directory containing policy TOML files.
 # policy_dir = "~/.abox/policies"
+
+# ─── Guest credential forwarding ────────────────────────────────────────────
+#
+# Credential files to stage inside the guest VM at boot.
+#
+# For each entry you can either COPY the host file into the guest (`stub`
+# omitted) or PLACE A STUB (`stub` set) — the stub is a placeholder file that
+# passes the tool's local auth check, while the real credential is injected
+# by the egress proxy at the network layer (see `policies/default.toml`).
+# Stubs are the preferred mode: the VM never sees the real credential.
+#
+# The example below forwards Claude Code OAuth credentials. Uncomment and
+# adjust for your setup. See docs/explainer.md Section 8 for details.
+#
+# [guest]
+# [[guest.credential_files]]
+# host = "~/.claude/.credentials.json"
+# guest = "/.claude/.credentials.json"
+# mode = "0600"
+#
+# [guest.credential_files.stub]
+# [guest.credential_files.stub.claudeAiOauth]
+# accessToken = "abox-proxy-managed"
+# refreshToken = "abox-proxy-managed"
+# expiresAt = 9999999999999
+# scopes = ["user:inference"]
+# subscriptionType = "pro"
