@@ -47,6 +47,9 @@ echo
 # Use the absolute path since PID 1 may have a minimal PATH.
 SOCAT_BIN=/usr/bin/socat
 if [ -x "$SOCAT_BIN" ]; then
+    # Remove stale sockets from template-restored VMs (the rootfs may
+    # already contain an abox-proxy.sock from when the snapshot was taken).
+    rm -f /run/abox-proxy.sock
     "$SOCAT_BIN" UNIX-LISTEN:/run/abox-proxy.sock,fork,reuseaddr \
                  VSOCK-CONNECT:2:5000 &
     SOCAT_PID=$!
@@ -55,8 +58,14 @@ if [ -x "$SOCAT_BIN" ]; then
     # The host binds a per-sandbox egress proxy on vsock-<id>.sock_5001;
     # this socat exposes it as a TCP listener inside the guest so that
     # HTTPS_PROXY=http://127.0.0.1:18443 works.
+    #
+    # stderr is discarded because HTTP/1.1 clients close their end after
+    # reading the response, which makes socat's remaining half-open write
+    # return EPIPE ("Broken pipe"). That's normal close behavior, not a
+    # failure — real egress errors are visible on the host via the
+    # per-sandbox egress proxy's tracing output.
     "$SOCAT_BIN" TCP-LISTEN:18443,fork,reuseaddr \
-                 VSOCK-CONNECT:2:5001 &
+                 VSOCK-CONNECT:2:5001 2>/dev/null &
     EGRESS_SOCAT_PID=$!
 
     # Give socat a moment to bind the sockets before exec'ing the agent.
