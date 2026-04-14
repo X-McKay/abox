@@ -56,8 +56,6 @@ pub struct VmConfig {
     pub env_vars: Vec<(String, String)>,
     /// Command (argv-style) to exec inside the guest after boot.
     pub agent_command: Vec<String>,
-    /// Port of the HTTP egress proxy on the host.
-    pub proxy_port: u16,
     /// How to start the VM: fresh boot or restore from snapshot.
     #[allow(dead_code)]
     pub start_mode: StartMode,

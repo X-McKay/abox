@@ -44,9 +44,6 @@ pub struct SandboxStatus {
     pub vm_state: String,
     pub vm_pid: u32,
     pub commits_ahead: usize,
-    /// Port allocated for this sandbox's egress proxy listener.
-    #[serde(default)]
-    pub egress_port: u16,
 }
 
 /// Convert a TOML value to a JSON value (for stub credential generation).
@@ -189,10 +186,8 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         env_vars.push(("https_proxy".to_string(), proxy_url));
         // Node.js uses its own embedded CA bundle; tell it to also trust the
         // abox root CA so the TLS-terminating MITM proxy is accepted.
-        env_vars.push((
-            "NODE_EXTRA_CA_CERTS".to_string(),
-            "/etc/ssl/certs/abox-ca.pem".to_string(),
-        ));
+        env_vars
+            .push(("NODE_EXTRA_CA_CERTS".to_string(), "/etc/ssl/certs/abox-ca.pem".to_string()));
 
         // Step 3: Build VM config.
         // Resolve image and kernel paths: prefer explicit config values, then
@@ -245,7 +240,6 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             user: params.user,
             env_vars,
             agent_command: params.command.clone(),
-            proxy_port: 0, // unused; egress proxy now routes through vsock
             start_mode,
             credential_files,
         };
@@ -280,7 +274,6 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             vm_state: vm_info.state.to_string(),
             vm_pid: vm_info.pid,
             commits_ahead: 0,
-            egress_port: 0, // unused; egress proxy now routes through vsock
         })
     }
 
@@ -332,7 +325,6 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 vm_state,
                 vm_pid,
                 commits_ahead: wt.commits_ahead,
-                egress_port: 0, // not tracked for listed sandboxes
             });
         }
 
@@ -416,7 +408,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let bridge = crate::proxy_bridge::ProxyBridge::new(
             bridge_socket,
             std::sync::Arc::clone(&policy),
-            audit_sink,
+            std::sync::Arc::clone(&audit_sink),
             crate::proxy_bridge::SandboxAttribution::Fixed(task_id.clone()),
         )
         .with_cwd_map("/workspace", worktree_path);
@@ -435,7 +427,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let egress_ca = std::sync::Arc::clone(&root_ca);
         let bypass_tls = policy.bypass_tls_patterns().to_vec();
         let egress_task_id = task_id.clone();
-        let egress_audit_path = self.config.logs_dir().join("audit.jsonl");
+        let egress_audit = std::sync::Arc::clone(&audit_sink);
         let egress_handle = tokio::spawn(async move {
             // Remove any stale socket from a previous run.
             let _ = std::fs::remove_file(&egress_socket);
@@ -468,7 +460,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 let root_ca = std::sync::Arc::clone(&egress_ca);
                 let bypass_tls = bypass_tls.clone();
                 let sandbox_id = egress_task_id.clone();
-                let audit_path = egress_audit_path.clone();
+                let audit = std::sync::Arc::clone(&egress_audit);
 
                 tokio::spawn(async move {
                     let io = hyper_util::rt::TokioIo::new(stream);
@@ -476,14 +468,14 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                     let root_ca = root_ca.clone();
                     let bypass_tls = bypass_tls.clone();
                     let sandbox_id = sandbox_id.clone();
-                    let audit_path = audit_path.clone();
+                    let audit = std::sync::Arc::clone(&audit);
 
                     let service = hyper::service::service_fn(move |req| {
                         let policy = policy.clone();
                         let root_ca = std::sync::Arc::clone(&root_ca);
                         let bypass_tls = bypass_tls.clone();
                         let sandbox_id = sandbox_id.clone();
-                        let audit_path = audit_path.clone();
+                        let audit = std::sync::Arc::clone(&audit);
                         async move {
                             crate::egress::handle_request(
                                 req,
@@ -491,28 +483,10 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                                 root_ca,
                                 &bypass_tls,
                                 move |domain: &str, decision: &str, status_code: i32| {
-                                    // Best-effort audit logging via a per-entry
-                                    // file append — avoids pulling in the full
-                                    // AuditLog type from abox-proxyd.
-                                    let entry = serde_json::json!({
-                                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                                        "sandbox_id": sandbox_id,
-                                        "request_type": "egress",
-                                        "target": domain,
-                                        "detail": "",
-                                        "decision": decision,
-                                        "result_code": status_code,
-                                    });
-                                    if let Ok(line) = serde_json::to_string(&entry) {
-                                        use std::io::Write;
-                                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                                            .create(true)
-                                            .append(true)
-                                            .open(&audit_path)
-                                        {
-                                            let _ = writeln!(f, "{line}");
-                                        }
-                                    }
+                                    // Reuse the shared AuditSink used by the
+                                    // CLI proxy bridge so egress entries land
+                                    // in the same buffered audit.jsonl file.
+                                    audit.log_egress(&sandbox_id, domain, decision, status_code);
                                 },
                             )
                             .await
