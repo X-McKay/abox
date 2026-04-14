@@ -47,9 +47,9 @@ A new job using [`dorny/paths-filter`](https://github.com/dorny/paths-filter) ov
 
 If any path matches, the job requires a PR label `vm-attested` to pass. Without the label the check stays red and merge is blocked. The PR author adds the label after running `just e2e-vm` locally and pasting a confirmation comment with the run timestamp.
 
-### 2.3 Replace ad-hoc steps with `just ci`
+### 2.3 Replace ad-hoc steps with `just check`
 
-The existing `check` job becomes `just ci` (already defined as `fmt-check + lint + test + deny`) so the local command and CI command are the same string. Avoids drift between developer-local and CI behavior.
+The existing `check` job becomes `just check` (= `fmt-check + lint + test`) so the local command and CI command are the same string. `cargo-deny` is intentionally *not* folded into this job — it runs as the parallel `cargo-deny` job from §2.1 so failures are attributable and both stages surface in parallel on a PR. This is a conscious deviation from naively using `just ci` (which bundles all four).
 
 ### 2.4 Add doc-staleness reminder job (advisory)
 
