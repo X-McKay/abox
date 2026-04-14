@@ -192,6 +192,28 @@ vcpus = 1
 [proxy]
 egress_port = 28443
 policy_dir = "$SCRATCH/state/policies"
+
+[guest]
+
+[[guest.credential_files]]
+host = "$SCRATCH/fake-creds.json"
+guest = "/.claude/.credentials.json"
+mode = "0600"
+
+[guest.credential_files.stub]
+[guest.credential_files.stub.claudeAiOauth]
+accessToken = "abox-proxy-managed"
+refreshToken = "abox-proxy-managed"
+expiresAt = 9999999999999
+scopes = ["user:inference"]
+subscriptionType = "pro"
+EOF
+
+# Create a fake host credential file so the stub-staging code path runs.
+# The content does not matter — only its existence, since `stub` mode
+# generates a synthetic credential file rather than copying this one.
+cat > "$SCRATCH/fake-creds.json" <<'EOF'
+{"claudeAiOauth": {"accessToken": "fake-host-token", "refreshToken": "fake-refresh"}}
 EOF
 mkdir -p "$SCRATCH/state/policies" "$SCRATCH/r"
 cp "$REPO_ROOT/policies/default.toml" "$SCRATCH/state/policies/default.toml"
@@ -573,6 +595,23 @@ else
         $ABOX stop cred-test --clean 2>/dev/null || true
     else
         step "Credential injection: SKIPPED (ANTHROPIC_API_KEY not set)"
+    fi
+
+    # ─── Stub credential file staging ───────────────────────────────────
+    # Verifies the end-to-end config → boot metadata → runner.sh → guest
+    # placement flow works for stub credential files. Does NOT require a
+    # live API call — just checks the file landed with the expected
+    # placeholder content.
+    step "Stub credential file is placed inside the guest"
+    how 'abox run --task stub-test --ephemeral -- cat /.claude/.credentials.json'
+    expect "stub file exists with accessToken=abox-proxy-managed"
+    STUB_OUT=$(timeout 60 $ABOX run --task stub-test --ephemeral -- \
+        cat /.claude/.credentials.json 2>&1)
+    if echo "$STUB_OUT" | grep -q '"accessToken": "abox-proxy-managed"'; then
+        pass "stub credential file placed with placeholder token"
+    else
+        fail "stub credential file placement" "placeholder token not found"
+        echo "$STUB_OUT" | tail -10 | sed "s/^/    /"
     fi
 
     step "abox stop --clean removes the sandbox completely"
