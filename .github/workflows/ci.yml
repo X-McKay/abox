@@ -32,6 +32,25 @@ jobs:
       - name: just check (fmt + clippy + test)
         run: just check
 
+  cargo-deny:
+    name: supply-chain audit (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check
+
   e2e-phases-1-5:
     name: e2e (phases 1-5; phase 6 skipped — no /dev/kvm on CI)
     runs-on: ubuntu-latest
