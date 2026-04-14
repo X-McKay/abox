@@ -55,8 +55,7 @@ pub fn execute(cmd: &CaCommand) -> Result<()> {
                 std::fs::remove_file(&key_path)?;
             }
 
-            let _ca =
-                RootCa::generate_and_persist(&ca_dir).context("Failed to generate new CA")?;
+            let _ca = RootCa::generate_and_persist(&ca_dir).context("Failed to generate new CA")?;
             println!("New CA generated.");
             println!();
             println!("IMPORTANT: You must rebuild the guest rootfs for the new CA to take effect:");

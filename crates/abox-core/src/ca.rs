@@ -102,20 +102,13 @@ impl RootCa {
         let key_pem = std::fs::read_to_string(&key_path)
             .with_context(|| format!("reading {}", key_path.display()))?;
 
-        let key_pair =
-            KeyPair::from_pem(&key_pem).context("parsing CA key PEM")?;
+        let key_pair = KeyPair::from_pem(&key_pem).context("parsing CA key PEM")?;
         let cert_params =
             CertificateParams::from_ca_cert_pem(&cert_pem).context("parsing CA cert PEM")?;
         let cert =
             cert_params.self_signed(&key_pair).context("re-creating signing cert from PEM")?;
 
-        Ok(Self {
-            cert_pem,
-            key_pem,
-            cert,
-            key_pair,
-            leaf_cache: RwLock::new(HashMap::new()),
-        })
+        Ok(Self { cert_pem, key_pem, cert, key_pair, leaf_cache: RwLock::new(HashMap::new()) })
     }
 
     /// Load an existing CA or generate a new one. Idempotent entry point.
@@ -171,10 +164,8 @@ impl RootCa {
             .signed_by(&leaf_key, &self.cert, &self.key_pair)
             .with_context(|| format!("signing leaf cert for {sni}"))?;
 
-        let ck = Arc::new(CertifiedKey {
-            cert_pem: leaf_cert.pem(),
-            key_pem: leaf_key.serialize_pem(),
-        });
+        let ck =
+            Arc::new(CertifiedKey { cert_pem: leaf_cert.pem(), key_pem: leaf_key.serialize_pem() });
 
         cache.insert(sni.to_string(), Arc::clone(&ck));
         Ok(ck)

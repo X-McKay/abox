@@ -38,7 +38,12 @@ pub struct EgressProxyServer {
 }
 
 impl EgressProxyServer {
-    pub fn new(port: u16, policy: Arc<PolicyEngine>, audit: Arc<AuditLog>, root_ca: Arc<RootCa>) -> Self {
+    pub fn new(
+        port: u16,
+        policy: Arc<PolicyEngine>,
+        audit: Arc<AuditLog>,
+        root_ca: Arc<RootCa>,
+    ) -> Self {
         Self {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], port)),
             policy,
@@ -93,7 +98,16 @@ impl EgressProxyServer {
                     let bypass_tls = bypass_tls.clone();
                     let sandbox_id = sandbox_id.clone();
                     async move {
-                        handle_request(req, &policy, &audit, root_ca, &bypass_tls, &sandbox_id, peer_addr).await
+                        handle_request(
+                            req,
+                            &policy,
+                            &audit,
+                            root_ca,
+                            &bypass_tls,
+                            &sandbox_id,
+                            peer_addr,
+                        )
+                        .await
                     }
                 });
 
@@ -160,7 +174,15 @@ async fn handle_request(
                                 handle_passthrough(upgraded, &domain, port).await;
                             } else {
                                 // MITM mode — terminate TLS, inspect/modify, re-encrypt
-                                if let Err(e) = handle_mitm(upgraded, &domain, port, &root_ca, rule_opt.as_ref()).await {
+                                if let Err(e) = handle_mitm(
+                                    upgraded,
+                                    &domain,
+                                    port,
+                                    &root_ca,
+                                    rule_opt.as_ref(),
+                                )
+                                .await
+                                {
                                     tracing::error!(
                                         domain = %domain,
                                         error = %e,
@@ -197,11 +219,7 @@ async fn handle_request(
 }
 
 /// Passthrough mode: plain TCP tunnel without TLS termination.
-async fn handle_passthrough(
-    upgraded: hyper::upgrade::Upgraded,
-    domain: &str,
-    port: u16,
-) {
+async fn handle_passthrough(upgraded: hyper::upgrade::Upgraded, domain: &str, port: u16) {
     let addr = format!("{domain}:{port}");
     match TcpStream::connect(&addr).await {
         Ok(mut target_stream) => {
@@ -224,9 +242,8 @@ async fn handle_mitm(
     rule: Option<&abox_core::policy::EgressRule>,
 ) -> Result<()> {
     // Step 1: Generate leaf cert for this domain
-    let leaf = root_ca
-        .sign_leaf(domain)
-        .with_context(|| format!("signing leaf cert for {domain}"))?;
+    let leaf =
+        root_ca.sign_leaf(domain).with_context(|| format!("signing leaf cert for {domain}"))?;
 
     // Step 2: Build server TLS config with leaf cert
     let server_config = build_server_config(&leaf.cert_pem, &leaf.key_pem, &root_ca.cert_pem)?;
@@ -234,10 +251,8 @@ async fn handle_mitm(
 
     // Step 3: Accept TLS from the client (VM)
     let client_stream = TokioIo::new(upgraded);
-    let client_tls = acceptor
-        .accept(client_stream)
-        .await
-        .context("TLS accept from client failed")?;
+    let client_tls =
+        acceptor.accept(client_stream).await.context("TLS accept from client failed")?;
 
     // Step 4: Connect to real upstream over TLS
     let upstream_addr = format!("{domain}:{port}");
@@ -247,11 +262,11 @@ async fn handle_mitm(
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let client_config =
+        rustls::ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
-    let server_name: ServerName<'static> = domain.to_string().try_into().context("invalid server name")?;
+    let server_name: ServerName<'static> =
+        domain.to_string().try_into().context("invalid server name")?;
     let upstream_tls = connector
         .connect(server_name, upstream_tcp)
         .await
@@ -312,9 +327,7 @@ async fn handle_mitm_with_injection(
         head_buf.push(temp[0]);
 
         // Check for \r\n\r\n
-        if head_buf.len() >= 4
-            && head_buf[head_buf.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
+        if head_buf.len() >= 4 && head_buf[head_buf.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
             found_end = true;
             break;
         }
@@ -388,18 +401,16 @@ fn build_server_config(
     ca_cert_pem: &str,
 ) -> Result<rustls::ServerConfig> {
     // Parse leaf cert
-    let leaf_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(
-        &mut BufReader::new(leaf_cert_pem.as_bytes()),
-    )
-    .collect::<std::result::Result<Vec<_>, _>>()
-    .context("parsing leaf cert PEM")?;
+    let leaf_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut BufReader::new(leaf_cert_pem.as_bytes()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("parsing leaf cert PEM")?;
 
     // Parse CA cert (for the chain)
-    let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(
-        &mut BufReader::new(ca_cert_pem.as_bytes()),
-    )
-    .collect::<std::result::Result<Vec<_>, _>>()
-    .context("parsing CA cert PEM")?;
+    let ca_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut BufReader::new(ca_cert_pem.as_bytes()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("parsing CA cert PEM")?;
 
     // Parse leaf private key
     let key = rustls_pemfile::private_key(&mut BufReader::new(leaf_key_pem.as_bytes()))

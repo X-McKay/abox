@@ -15,8 +15,8 @@
 //! - **Orchestration** happens in [`sandbox::SandboxOrchestrator`]
 
 pub mod adapters;
-pub mod ca;
 pub mod boot_meta;
+pub mod ca;
 pub mod config;
 pub mod console;
 pub mod error;

@@ -367,10 +367,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                             }
                         }
                     };
-                    if tokio::time::timeout(tuning.vm_timeout_grace_period, grace)
-                        .await
-                        .is_err()
-                    {
+                    if tokio::time::timeout(tuning.vm_timeout_grace_period, grace).await.is_err() {
                         tracing::warn!(
                             task_id = %task_id,
                             "VM did not exit within grace period; force-killing"

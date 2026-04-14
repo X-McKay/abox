@@ -259,7 +259,8 @@ mod tests {
     fn snapshot_manager_list_empty() {
         let tdir = tempfile::tempdir().unwrap();
         let rdir = tempfile::tempdir().unwrap();
-        let mgr = SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
+        let mgr =
+            SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
         let list = mgr.list_templates().unwrap();
         assert!(list.is_empty());
     }
@@ -268,7 +269,8 @@ mod tests {
     fn snapshot_manager_delete_missing_errors() {
         let tdir = tempfile::tempdir().unwrap();
         let rdir = tempfile::tempdir().unwrap();
-        let mgr = SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
+        let mgr =
+            SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
         assert!(mgr.delete_template("nonexistent").is_err());
     }
 }

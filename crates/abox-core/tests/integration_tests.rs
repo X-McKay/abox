@@ -1110,8 +1110,7 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
     let status_dir = tmp.path().join("status-silent-fail");
     std::fs::create_dir_all(&status_dir).unwrap();
 
-    let vm =
-        ExitingMockVmNoStatus { info_calls: AtomicUsize::new(0), status_dir };
+    let vm = ExitingMockVmNoStatus { info_calls: AtomicUsize::new(0), status_dir };
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {
@@ -1469,10 +1468,7 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
     assert_eq!(exit, 0);
 
     // Worktree should be cleaned up in ephemeral mode.
-    assert!(
-        !wt_base.join("ephemeral-test").exists(),
-        "ephemeral mode should remove the worktree"
-    );
+    assert!(!wt_base.join("ephemeral-test").exists(), "ephemeral mode should remove the worktree");
 }
 
 #[tokio::test]
