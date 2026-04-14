@@ -43,6 +43,28 @@ build-release:
 build-shim:
     cargo build --release --target x86_64-unknown-linux-musl -p abox-shim
 
+# Check whether the installed guest rootfs image is stale — i.e. whether
+# guest/init.sh has changed on disk since the rootfs was last built. Does
+# NOT rebuild; just reports and exits 1 if stale.
+check-rootfs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    STAMP="$HOME/.abox/vm/rootfs.raw.inputs"
+    if [ ! -f "$STAMP" ]; then
+        echo "no rootfs input stamp found at $STAMP — rebuild the rootfs to create one"
+        exit 0
+    fi
+    RECORDED_INIT=$(grep '^init_sh=' "$STAMP" | cut -d= -f2)
+    CURRENT_INIT=$(sha256sum guest/init.sh | cut -d' ' -f1)
+    if [ "$RECORDED_INIT" != "$CURRENT_INIT" ]; then
+        echo "⚠  rootfs is STALE: guest/init.sh has changed since last rebuild"
+        echo "   recorded: $RECORDED_INIT"
+        echo "   current:  $CURRENT_INIT"
+        echo "   rebuild the rootfs to update"
+        exit 1
+    fi
+    echo "✓ rootfs matches current guest/init.sh"
+
 # ─── Quality ─────────────────────────────────────────────────────────────────
 
 # Run cargo-deny for supply chain auditing (install: cargo install cargo-deny)
