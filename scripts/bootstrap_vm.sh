@@ -3,8 +3,8 @@
 #
 # Downloads cloud-hypervisor, virtiofsd, a kernel, and an Alpine miniroot.
 # Builds the abox-shim for static musl. Assembles a guest rootfs image.
-# Writes everything to ~/.abox/vm/ and updates ~/.abox/config.toml so
-# `abox run` works out of the box.
+# Writes everything to ~/.abox/vm/. Run 'abox init' afterwards to generate
+# a working config.toml.
 #
 # This script is idempotent and uses checksummed cached downloads under vendor/.
 # It does NOT require sudo, docker, chroot, or root.

@@ -44,11 +44,19 @@ Build takes a couple of minutes the first time and hits the disk for ~700 MB of 
 
 ## 3. Bootstrap the VM stack
 
+First, put the newly built binary on your `PATH` so you can run it:
+
 ```bash
-just bootstrap-vm
+export PATH="$PWD/target/release:$PATH"
 ```
 
-This runs [`scripts/bootstrap_vm.sh`](../scripts/bootstrap_vm.sh) which:
+Now run the guided setup wizard:
+
+```bash
+abox init
+```
+
+This runs [`scripts/bootstrap_vm.sh`](../scripts/bootstrap_vm.sh) under the hood, which:
 
 1. Downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the `vmlinux` kernel, the Alpine 3.19 minirootfs, and the `socat` apk.
 2. Builds `abox-shim` for the static-musl target so it can run inside the minimal Alpine guest.
@@ -65,41 +73,19 @@ Add this to your shell profile (e.g., ~/.bashrc):
   export PATH="$HOME/.local/bin:$PATH"
 ```
 
-If `x86_64-unknown-linux-musl` rust target isn't installed, the script bails with instructions. Re-run with `--yes` to let it install for you:
+If the `x86_64-unknown-linux-musl` rust target isn't installed, `abox init` will install it automatically.
 
-```bash
-./scripts/bootstrap_vm.sh --yes
-```
-
-When it's done you'll see:
-
-```
-Bootstrap complete. Files in /home/you/.abox/vm:
-total 71M
--rwxrwxr-x 1 al al 891K Apr  8 04:40 ch-remote
--rwxrwxr-x 1 al al 4.5M Apr  8 04:40 cloud-hypervisor
--rw-rw-r-- 1 al al  96M Apr  8 04:40 rootfs.raw
--rwxr-xr-x 1 al al 2.7M Apr  8 04:40 virtiofsd
--rw-rw-r-- 1 al al  46M Apr  8 04:40 vmlinux
-...
-
-Installing convenience symlinks in /home/you/.local/bin...
-  /home/you/.local/bin/cloud-hypervisor -> /home/you/.abox/vm/cloud-hypervisor
-  /home/you/.local/bin/ch-remote -> /home/you/.abox/vm/ch-remote
-  /home/you/.local/bin/virtiofsd -> /home/you/.abox/vm/virtiofsd
-```
-
----
-
-## 4. Drop a config + a default policy
-
-```bash
-mkdir -p ~/.abox/policies
-cp templates/config.example.toml ~/.abox/config.toml
-cp policies/default.toml ~/.abox/policies/default.toml
-```
+After downloading the VM artifacts, `abox init` will automatically:
+1. Write `~/.abox/config.toml` with the correct paths pre-filled.
+2. Install `policies/default.toml` to `~/.abox/policies/default.toml`.
 
 The default policy allows `git status / log / diff / push origin / pull / clone / add / commit`, denies `--force` flags, and denies `aws iam` and `aws ec2`. Egress (HTTPS) is currently a passthrough — see [`docs/plans/2026-04-08-credential-injection.md`](plans/2026-04-08-credential-injection.md) for the planned upgrade.
+
+To verify your environment is ready, run:
+
+```bash
+abox doctor
+```
 
 ---
 

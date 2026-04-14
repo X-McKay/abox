@@ -47,6 +47,10 @@ When running multiple autonomous agents on a single codebase, you face three pro
 git clone https://github.com/X-McKay/abox.git
 cd abox
 cargo build --release
+
+# Add the compiled binary to your PATH (or copy it to ~/.local/bin)
+export PATH="$PWD/target/release:$PATH"
+
 abox init             # guided first-run setup: downloads VM stack,
                       # writes config, installs default policy
 ```

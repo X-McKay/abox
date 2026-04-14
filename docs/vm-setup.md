@@ -127,6 +127,12 @@ re-running the bootstrap is fast (seconds) and offline-friendly.
 
 ## Troubleshooting
 
+**Running on aarch64 (ARM64)**
+aarch64 support is in progress. `bootstrap_vm.sh` will exit with a clear
+"not yet available" message if you run it on an aarch64 host. See
+[`docs/future-work.md`](future-work.md) for tracking status. x86_64 is
+the only supported architecture at this time.
+
 **`Permission denied (os error 13)` on `/dev/kvm`**
 Your user isn't in the `kvm` group. Run `sudo usermod -aG kvm $USER`,
 log out, and back in. Verify with `ls -la /dev/kvm` (look for the
