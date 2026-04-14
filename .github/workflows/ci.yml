@@ -118,3 +118,59 @@ jobs:
       - name: No-op when VM paths untouched
         if: steps.filter.outputs.vm != 'true'
         run: echo "No VM-touching paths in this PR; attestation not required."
+
+  doc-staleness-reminder:
+    name: doc staleness reminder (advisory)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect code-vs-docs drift
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'scripts/**'
+              - 'templates/**'
+              - 'guest/**'
+              - 'justfile'
+              - '.github/workflows/**'
+            docs:
+              - 'README.md'
+              - 'docs/**'
+              - 'AGENTS.md'
+              - '.claude/skills/**'
+
+      - name: Post sticky comment if drift detected
+        if: steps.filter.outputs.code == 'true' && steps.filter.outputs.docs != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: doc-staleness-reminder
+          message: |
+            ### Documentation reminder (advisory)
+
+            This PR changes code but does not update any docs. That is often fine, but the pre-PR checklist asks you to confirm it was deliberate.
+
+            Touched code paths may map to:
+            - `README.md` — install, CLI surface, platforms, benchmark table
+            - `docs/explainer.md` — conceptual model
+            - `docs/decisions/` — ADRs
+            - `docs/future-work.md` — closed roadmap items
+            - `AGENTS.md` + `.claude/skills/**` — **required** if you changed `justfile`, `.github/workflows/**`, or `scripts/release.sh`
+
+            See [`docs/contributing/pre-pr-checklist.md`](../blob/main/docs/contributing/pre-pr-checklist.md#documentation-updates). This reminder is advisory and does not block merge.
+
+      - name: Clear sticky comment if drift resolved
+        if: steps.filter.outputs.code != 'true' || steps.filter.outputs.docs == 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: doc-staleness-reminder
+          delete: true
