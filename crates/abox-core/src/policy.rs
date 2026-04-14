@@ -714,6 +714,64 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_credential_from_json_file() {
+        // Write a fake credential file and verify resolve_credential reads
+        // the right field out of it.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"claudeAiOauth":{"accessToken":"real-token-xyz","refreshToken":"rt"}}"#,
+        )
+        .unwrap();
+        let rule = EgressRule {
+            domain: "api.anthropic.com".into(),
+            inject_header: "Authorization".into(),
+            env_var: None,
+            credential_file: Some(tmp.path().display().to_string()),
+            json_path: Some("claudeAiOauth.accessToken".into()),
+            header_template: "Bearer {value}".into(),
+        };
+        assert_eq!(rule.resolve_credential(), Some("real-token-xyz".to_string()));
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn test_resolve_credential_env_var_takes_precedence() {
+        // If both env_var and credential_file are set, env_var wins.
+        // This documents current behavior and guards against accidental swap.
+        let env_key = "ABOX_TEST_CRED_PRIORITY";
+        // SAFETY: test-only; runs in a single-threaded #[test] context.
+        unsafe {
+            std::env::set_var(env_key, "env-value");
+        }
+        let rule = EgressRule {
+            domain: "x".into(),
+            inject_header: "Authorization".into(),
+            env_var: Some(env_key.into()),
+            credential_file: Some("/nonexistent".into()),
+            json_path: Some("a.b".into()),
+            header_template: "{value}".into(),
+        };
+        assert_eq!(rule.resolve_credential(), Some("env-value".to_string()));
+        unsafe {
+            std::env::remove_var(env_key);
+        }
+    }
+
+    #[test]
+    fn test_resolve_credential_missing_file_returns_none() {
+        let rule = EgressRule {
+            domain: "x".into(),
+            inject_header: "Authorization".into(),
+            env_var: None,
+            credential_file: Some("/definitely/does/not/exist.json".into()),
+            json_path: Some("a".into()),
+            header_template: "{value}".into(),
+        };
+        assert_eq!(rule.resolve_credential(), None);
+    }
+
+    #[test]
     fn test_extract_json_path_nested() {
         let json: serde_json::Value = serde_json::json!({
             "claudeAiOauth": {
