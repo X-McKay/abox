@@ -111,22 +111,42 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         env_vars.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
         env_vars.push(("https_proxy".to_string(), proxy_url));
 
-        // Step 3: Build VM config
+        // Step 3: Build VM config.
+        // Resolve image and kernel paths: prefer explicit config values, then
+        // fall back to the standard bootstrap location (~/.abox/vm/). Fail fast
+        // with an actionable message rather than attempting to start with a
+        // non-existent path and producing a cryptic OS error.
+        let default_vm_dir = self.config.state_dir.join("vm");
+        let image_path = self.config.vm_defaults.image_path.clone().unwrap_or_else(|| {
+            default_vm_dir.join("rootfs.raw")
+        });
+        let kernel_path = self.config.vm_defaults.kernel_path.clone().unwrap_or_else(|| {
+            default_vm_dir.join("vmlinux")
+        });
+        if !image_path.exists() {
+            // Roll back the worktree we just created before returning the error.
+            let _ = self.workspace.remove_worktree(&params.task_id, true);
+            anyhow::bail!(
+                "VM rootfs image not found at {}\n\n\
+                 Run 'abox init' or 'just bootstrap-vm' to download and assemble\n\
+                 the VM stack, then try again.",
+                image_path.display()
+            );
+        }
+        if !kernel_path.exists() {
+            let _ = self.workspace.remove_worktree(&params.task_id, true);
+            anyhow::bail!(
+                "VM kernel not found at {}\n\n\
+                 Run 'abox init' or 'just bootstrap-vm' to download and assemble\n\
+                 the VM stack, then try again.",
+                kernel_path.display()
+            );
+        }
         let vm_config = VmConfig {
             id: params.task_id.clone(),
             worktree_path: worktree_path.clone(),
-            image_path: self
-                .config
-                .vm_defaults
-                .image_path
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("/var/lib/abox/images/base.raw")),
-            kernel_path: self
-                .config
-                .vm_defaults
-                .kernel_path
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("/var/lib/abox/kernel/vmlinux")),
+            image_path,
+            kernel_path,
             memory_mib: params.memory_mib.unwrap_or(self.config.vm_defaults.memory_mib),
             vcpus: params.vcpus.unwrap_or(self.config.vm_defaults.vcpus),
             user: params.user,

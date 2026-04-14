@@ -33,6 +33,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// First-run setup wizard: checks prerequisites and configures abox.
+    Init(commands::init::InitArgs),
+
+    /// Check the environment for common setup problems.
+    Doctor,
+
     /// Create and start a new sandbox.
     Run(commands::run::RunArgs),
 
@@ -79,6 +85,16 @@ async fn main() -> Result<()> {
     let config = AboxConfig::load(&config_path)?;
     config.ensure_dirs()?;
 
+    // Init and Doctor do not need the orchestrator and must run before the
+    // policy check so they work even when setup is incomplete.
+    if let Commands::Init(ref args) = cli.command {
+        return commands::init::execute(args);
+    }
+    if let Commands::Doctor = cli.command {
+        let ok = commands::doctor::execute(&config)?;
+        return if ok { Ok(()) } else { std::process::exit(1) };
+    }
+
     // Template List and Delete do not need the orchestrator.
     // Template Create does — it falls through to the orchestrator block below.
     if let Commands::Template(ref args) = cli.command {
@@ -98,24 +114,23 @@ async fn main() -> Result<()> {
         return tui::dashboard::run_dashboard(&mut state);
     }
 
-    // Load the policy engine. If no policy file exists, fall back to a
-    // hard deny-all policy with a warning.
+    // Load the policy engine. Fail fast with an actionable message if the
+    // policy file is missing — silently falling back to deny-all would make
+    // every agent command fail with no visible explanation.
     let policy_path = config.proxy.policy_dir.join("default.toml");
     let policy = if policy_path.exists() {
         abox_core::policy::PolicyEngine::from_file(&policy_path)
             .with_context(|| format!("Failed to load policy from {}", policy_path.display()))?
     } else {
-        tracing::warn!(
-            path = %policy_path.display(),
-            "No policy file found, using deny-all defaults"
+        anyhow::bail!(
+            "No policy file found at {}\n\n\
+             abox requires a policy file before it can run sandboxes.\n\
+             Copy the default policy to get started:\n\n\
+             \x20 cp <abox-repo>/policies/default.toml {}\n\n\
+             Or run 'abox init' to set everything up automatically.",
+            policy_path.display(),
+            policy_path.display(),
         );
-        abox_core::policy::PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
-            cli: vec![],
-            egress: vec![],
-            default_cli_action: "deny".to_string(),
-            default_egress_action: "deny".to_string(),
-            bypass_tls: vec![],
-        })?
     };
     let policy = std::sync::Arc::new(policy);
 
@@ -140,6 +155,6 @@ async fn main() -> Result<()> {
             }
             _ => unreachable!(),
         },
-        Commands::Ca(_) | Commands::Tui => unreachable!(),
+        Commands::Ca(_) | Commands::Tui | Commands::Init(_) | Commands::Doctor => unreachable!(),
     }
 }

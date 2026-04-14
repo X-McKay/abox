@@ -54,23 +54,23 @@ async fn main() -> Result<()> {
     let config = AboxConfig::load(&config_path)?;
     config.ensure_dirs()?;
 
-    // Load policy engine
+    // Load policy engine. Fail fast with an actionable message if the policy
+    // file is missing — silently falling back to deny-all would cause every
+    // proxied command to be denied with no visible explanation to the user.
     let policy_path = config.proxy.policy_dir.join("default.toml");
     let policy = if policy_path.exists() {
         PolicyEngine::from_file(&policy_path)
             .with_context(|| format!("Failed to load policy from {}", policy_path.display()))?
     } else {
-        tracing::warn!(
-            path = %policy_path.display(),
-            "No policy file found, using deny-all defaults"
+        anyhow::bail!(
+            "No policy file found at {}\n\n\
+             abox-proxyd requires a policy file to evaluate sandbox requests.\n\
+             Copy the default policy to get started:\n\n\
+             \x20 cp <abox-repo>/policies/default.toml {}\n\n\
+             Or run 'abox init' to set everything up automatically.",
+            policy_path.display(),
+            policy_path.display(),
         );
-        PolicyEngine::from_policy_file(abox_core::policy::PolicyFile {
-            cli: vec![],
-            egress: vec![],
-            default_cli_action: "deny".to_string(),
-            default_egress_action: "deny".to_string(),
-            bypass_tls: vec![],
-        })?
     };
     let policy = Arc::new(policy);
 

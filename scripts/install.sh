@@ -40,11 +40,27 @@ if [[ -n "${ABOX_VERSION:-}" ]]; then
     echo "Installing abox $VERSION (pinned)..."
 else
     echo "Fetching latest release version..."
-    VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-        | grep '"tag_name"' | cut -d'"' -f4)
+    API_RESPONSE=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || true)
+    VERSION=$(echo "$API_RESPONSE" | grep '"tag_name"' | cut -d'"' -f4)
     if [[ -z "$VERSION" ]]; then
-        echo "ERROR: could not determine latest release version." >&2
-        echo "Check https://github.com/$REPO/releases" >&2
+        cat >&2 <<'EOF'
+
+No published release of abox was found.
+
+abox is currently pre-release. To install from source:
+
+  # Prerequisites: Rust (https://rustup.rs), just (cargo install just)
+  git clone https://github.com/X-McKay/abox.git
+  cd abox
+  just build
+  just bootstrap-vm   # downloads VM kernel + rootfs
+  abox init           # guided first-run setup
+
+Once a release is published, re-run this script or pin a version:
+  ABOX_VERSION=v0.1.0 bash install.sh
+
+See https://github.com/X-McKay/abox for more information.
+EOF
         exit 1
     fi
     echo "Installing abox $VERSION (latest)..."

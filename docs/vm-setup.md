@@ -15,11 +15,21 @@ The `bootstrap_vm.sh` script handles items 2 with one command. It does
 
 ## Quick start
 
+The recommended approach is to use `abox init`, which runs the bootstrap
+automatically and writes a ready-to-use config file:
+
 ```bash
 git clone https://github.com/X-McKay/abox.git
 cd abox
 cargo build --release
-just bootstrap-vm
+abox init          # guided setup: bootstraps VM stack + writes config
+abox doctor        # optional: verify everything looks correct
+```
+
+Alternatively, run the steps manually:
+
+```bash
+just bootstrap-vm  # downloads VM artifacts and builds the guest rootfs
 ```
 
 This downloads ~60 MB of pinned, checksummed artifacts to `~/.abox/vm/`,
@@ -51,11 +61,15 @@ pass `--no-symlink` and add `~/.abox/vm` to `PATH` yourself:
 export PATH="$HOME/.abox/vm:$PATH"
 ```
 
-Drop the default policy and config into `~/.abox/`:
+If you used `abox init`, the config and policy are already in place.
+To set them up manually:
 
 ```bash
 mkdir -p ~/.abox/policies
 cp templates/config.example.toml ~/.abox/config.toml
+# Edit ~/.abox/config.toml and set image_path and kernel_path:
+#   image_path  = "~/.abox/vm/rootfs.raw"
+#   kernel_path = "~/.abox/vm/vmlinux"
 cp policies/default.toml ~/.abox/policies/default.toml
 ```
 
