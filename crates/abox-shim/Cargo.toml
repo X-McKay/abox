@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Guest-side static musl binary embedded into the rootfs image. Never
+# consumed as a library and not published to crates.io.
+publish = false
 
 [[bin]]
 name = "abox-shim"

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Internal crate — not published to crates.io. Distribution happens via
+# GitHub releases of the abox binary; this library is consumed only by
+# siblings in this workspace.
+publish = false
 
 [dependencies]
 abox-protocol = { path = "../abox-protocol" }

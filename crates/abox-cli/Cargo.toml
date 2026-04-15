@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Distributed as the `abox` binary via GitHub releases (scripts/install.sh),
+# not published to crates.io.
+publish = false
 
 [[bin]]
 name = "abox"
