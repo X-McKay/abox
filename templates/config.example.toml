@@ -1,14 +1,24 @@
 # abox configuration
 #
-# Copy this file to ~/.abox/config.toml and customize.
+# Run 'abox init' to generate this file automatically with all paths
+# pre-filled based on your bootstrap output.
+#
+# To configure manually: copy this file to ~/.abox/config.toml and
+# uncomment / edit the values you want to change.
 
 # Base directory for abox state (worktrees, snapshots, logs).
 # state_dir = "~/.abox"
 
 # Directory for runtime files (sockets, PIDs).
-# Defaults to `<state_dir>/run` (writable by the current user, no root needed).
-# Set to `/run/abox` for a system-wide install.
-# runtime_dir = "/run/abox"
+#
+# IMPORTANT — keep this path short. Linux caps Unix domain socket paths at
+# 108 bytes, and abox appends per-sandbox suffixes like
+# "vfs-status-<task-id>.sock". The default (~/.abox/r) is chosen to stay
+# well within the limit. If you customise this, verify the worst-case
+# length with 'abox doctor'.
+#
+# Defaults to ~/.abox/r (no need to set this unless you want a different location).
+# runtime_dir = "~/.abox/r"
 
 [vm_defaults]
 # Memory allocation per sandbox in MiB.
@@ -18,12 +28,14 @@ memory_mib = 2048
 vcpus = 2
 
 # Path to the guest root filesystem image.
-# Build one with: templates/build-guest-image.sh
-# image_path = "/var/lib/abox/images/base.raw"
+# After running 'abox init' or 'just bootstrap-vm', this will be at:
+#   ~/.abox/vm/rootfs.raw
+# image_path = "~/.abox/vm/rootfs.raw"
 
 # Path to the kernel binary (vmlinux, not bzImage).
-# Download from Cloud Hypervisor releases or build your own.
-# kernel_path = "/var/lib/abox/kernel/vmlinux"
+# After running 'abox init' or 'just bootstrap-vm', this will be at:
+#   ~/.abox/vm/vmlinux
+# kernel_path = "~/.abox/vm/vmlinux"
 
 [proxy]
 # Port for the HTTP egress proxy.

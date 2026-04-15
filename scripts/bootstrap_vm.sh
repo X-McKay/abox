@@ -3,8 +3,8 @@
 #
 # Downloads cloud-hypervisor, virtiofsd, a kernel, and an Alpine miniroot.
 # Builds the abox-shim for static musl. Assembles a guest rootfs image.
-# Writes everything to ~/.abox/vm/ and updates ~/.abox/config.toml so
-# `abox run` works out of the box.
+# Writes everything to ~/.abox/vm/. Run 'abox init' afterwards to generate
+# a working config.toml.
 #
 # This script is idempotent and uses checksummed cached downloads under vendor/.
 # It does NOT require sudo, docker, chroot, or root.
@@ -69,9 +69,31 @@ source "$REPO_ROOT/scripts/lib/download.sh"
 # ─── Architecture detection ─────────────────────────────────────────────────
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
-    x86_64)  ARCH=x86_64;  RUST_TARGET=x86_64-unknown-linux-musl;  DEB_ARCH=amd64 ;;
-    aarch64) ARCH=aarch64;  RUST_TARGET=aarch64-unknown-linux-musl; DEB_ARCH=arm64 ;;
-    *)       echo "ERROR: Unsupported architecture: $HOST_ARCH" >&2; exit 1 ;;
+    x86_64)
+        ARCH=x86_64
+        RUST_TARGET=x86_64-unknown-linux-musl
+        DEB_ARCH=amd64
+        ;;
+    aarch64)
+        # aarch64 support is in progress — SHA256 checksums for the VM
+        # artifacts have not yet been verified for this architecture.
+        # See docs/future-work.md for the tracking status.
+        cat >&2 <<'EOF'
+
+ERROR: aarch64 support is not yet available in bootstrap_vm.sh.
+
+The VM artifact checksums for aarch64 have not been verified.
+Tracking issue: see docs/future-work.md for current status.
+
+If you are willing to help verify the checksums, please open an issue at:
+  https://github.com/X-McKay/abox/issues
+EOF
+        exit 1
+        ;;
+    *)
+        echo "ERROR: Unsupported architecture: $HOST_ARCH" >&2
+        exit 1
+        ;;
 esac
 
 mkdir -p "$ABOX_VM_DIR" "$REPO_ROOT/vendor"
@@ -101,62 +123,38 @@ fi
 # cloud-hypervisor v44.0 — static musl builds
 # Source: https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v44.0
 readonly CH_VERSION="v44.0"
-if [[ "$ARCH" == "aarch64" ]]; then
-    readonly CH_BIN_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static-aarch64"
-    readonly CH_BIN_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
-    readonly CH_REMOTE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/ch-remote-static-aarch64"
-    readonly CH_REMOTE_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
-else
-    readonly CH_BIN_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static"
-    readonly CH_BIN_SHA="f58e5d8684a5cbd7c4b8a001a1188ac79b9d4dda8115e1b3d5faa8c29038119c"
-    readonly CH_REMOTE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/ch-remote-static"
-    readonly CH_REMOTE_SHA="6d268b947adf2b9b72c13cc8bda156e27c9a450474001d762e9bd211f90136fa"
-fi
+readonly CH_BIN_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static"
+readonly CH_BIN_SHA="f58e5d8684a5cbd7c4b8a001a1188ac79b9d4dda8115e1b3d5faa8c29038119c"
+readonly CH_REMOTE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/ch-remote-static"
+readonly CH_REMOTE_SHA="6d268b947adf2b9b72c13cc8bda156e27c9a450474001d762e9bd211f90136fa"
 
 # virtiofsd 1.10.0 — from Ubuntu noble universe (dynamically linked, requires host libc/libcap-ng/libseccomp)
 # Sourced as a .deb from the Ubuntu archive; binary extracted without root.
 # Source: https://packages.ubuntu.com/noble/virtiofsd
 readonly VIRTIOFSD_VERSION="1.10.0-1"
 readonly VIRTIOFSD_DEB_URL="http://archive.ubuntu.com/ubuntu/pool/universe/r/rust-virtiofsd/virtiofsd_${VIRTIOFSD_VERSION}_${DEB_ARCH}.deb"
-if [[ "$ARCH" == "aarch64" ]]; then
-    readonly VIRTIOFSD_DEB_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
-    readonly VIRTIOFSD_BIN_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
-else
-    readonly VIRTIOFSD_DEB_SHA="1e4e817925b92f8c4ec59eff65b9825d044ecbd06c7bfcdca624e8562e90188a"
-    # SHA256 of the extracted binary itself (for post-extraction verification)
-    readonly VIRTIOFSD_BIN_SHA="597ae1edfda17185def026974a0ec0c3d3c6f536b018bb517aa566a4495dbf0d"
-fi
+readonly VIRTIOFSD_DEB_SHA="1e4e817925b92f8c4ec59eff65b9825d044ecbd06c7bfcdca624e8562e90188a"
+# SHA256 of the extracted binary itself (for post-extraction verification)
+readonly VIRTIOFSD_BIN_SHA="597ae1edfda17185def026974a0ec0c3d3c6f536b018bb517aa566a4495dbf0d"
 
 # Linux kernel — built by the cloud-hypervisor team against CH's kernel tree
 # Source: https://github.com/cloud-hypervisor/linux/releases/tag/ch-release-v6.16.9-20260324
 readonly VMLINUX_VERSION="ch-release-v6.16.9-20260324"
 readonly VMLINUX_URL="https://github.com/cloud-hypervisor/linux/releases/download/${VMLINUX_VERSION}/vmlinux-${ARCH}"
-if [[ "$ARCH" == "aarch64" ]]; then
-    readonly VMLINUX_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
-else
-    readonly VMLINUX_SHA="22c640f02b750dea5d0c4419436aac8f2a6ea60fe02732435e25138d04eaaa86"
-fi
+readonly VMLINUX_SHA="22c640f02b750dea5d0c4419436aac8f2a6ea60fe02732435e25138d04eaaa86"
 
 # Alpine Linux 3.19.9 miniroot filesystem tarball
 # Source: https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/$ARCH/
 readonly ALPINE_VERSION="3.19.9"
 readonly ALPINE_MINOR="v3.19"
 readonly ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_MINOR}/releases/${ARCH}/alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
-if [[ "$ARCH" == "aarch64" ]]; then
-    readonly ALPINE_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
-else
-    readonly ALPINE_SHA="6b4444630d3c349edb99847da31591a91d529b4bf8235a4990d4cb2cab45b8e5"
-fi
+readonly ALPINE_SHA="6b4444630d3c349edb99847da31591a91d529b4bf8235a4990d4cb2cab45b8e5"
 
 # socat Alpine package (not yet extracted — used in rootfs assembly phase)
 # Source: https://dl-cdn.alpinelinux.org/alpine/v3.19/main/$ARCH/
 readonly SOCAT_VERSION="1.8.0.0-r0"
 readonly SOCAT_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/main/${ARCH}/socat-${SOCAT_VERSION}.apk"
-if [[ "$ARCH" == "aarch64" ]]; then
-    readonly SOCAT_SHA="0000000000000000000000000000000000000000000000000000000000000000"  # TODO: fill with real aarch64 SHA
-else
-    readonly SOCAT_SHA="ddf3be46f3a319737817246b238089dc58f39f32b0f515358c40e9e6e363eee6"
-fi
+readonly SOCAT_SHA="ddf3be46f3a319737817246b238089dc58f39f32b0f515358c40e9e6e363eee6"
 
 # ---------------------------------------------------------------------------
 

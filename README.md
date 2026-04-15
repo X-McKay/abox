@@ -36,26 +36,43 @@ When running multiple autonomous agents on a single codebase, you face three pro
 
 ### Installation
 
-**One-command install** (downloads pre-built binary + VM assets from GitHub Releases):
+> **Note:** abox is currently pre-release. The recommended install path is
+> from source (below). A one-command installer will be available once the
+> first release is published.
+
+**From source** (recommended):
+
+```bash
+# Prerequisites: Rust (https://rustup.rs), just (cargo install just)
+git clone https://github.com/X-McKay/abox.git
+cd abox
+cargo build --release
+
+# Add the compiled binary to your PATH (or copy it to ~/.local/bin)
+export PATH="$PWD/target/release:$PATH"
+
+abox init             # guided first-run setup: downloads VM stack,
+                      # writes config, installs default policy
+```
+
+Or run the steps individually:
+
+```bash
+just bootstrap-vm     # downloads the VMM, kernel, builds the rootfs,
+                      # and symlinks the binaries into ~/.local/bin
+abox doctor           # verify the environment before first use
+```
+
+`bootstrap-vm` is idempotent and uses checksummed cached downloads, so
+re-running it is fast (seconds, not minutes). Currently supports **x86_64**
+hosts only — aarch64 support is in progress. See
+[`docs/vm-setup.md`](docs/vm-setup.md) for the full setup walkthrough.
+
+**One-command install** (once a release is published):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/X-McKay/abox/main/scripts/install.sh | bash
 ```
-
-**From source:**
-
-```bash
-git clone https://github.com/X-McKay/abox.git
-cd abox
-cargo build --release
-just bootstrap-vm     # downloads the VMM, kernel, builds the rootfs,
-                      # and symlinks the binaries into ~/.local/bin
-```
-
-`bootstrap-vm` is idempotent and uses checksummed cached downloads, so
-re-running it is fast (seconds, not minutes). Supports both x86_64 and
-aarch64 hosts. See [`docs/vm-setup.md`](docs/vm-setup.md) for the full
-setup walkthrough.
 
 ### Documentation
 
@@ -71,16 +88,26 @@ setup walkthrough.
 
 ### Configuration
 
-Copy the example configuration to your home directory:
+The easiest way to configure abox is to run `abox init`, which writes
+`~/.abox/config.toml` with all paths pre-filled and installs the default
+policy automatically.
+
+To configure manually:
 
 ```bash
 mkdir -p ~/.abox/policies
 cp templates/config.example.toml ~/.abox/config.toml
 cp policies/default.toml ~/.abox/policies/default.toml
+# Then edit ~/.abox/config.toml to set image_path and kernel_path
+# to the output of 'just bootstrap-vm' (~/.abox/vm/rootfs.raw and
+# ~/.abox/vm/vmlinux).
 ```
 
 By default, abox stores all state under `~/.abox/` (worktrees, templates,
 logs, and the runtime socket directory). No root access required.
+
+Run `abox doctor` at any time to check your environment for common setup
+problems.
 
 ### Usage
 

@@ -73,8 +73,9 @@ fn test_config_directory_helpers() {
     assert_eq!(config.worktrees_dir(), PathBuf::from("/test/state/worktrees"));
     assert_eq!(config.templates_dir(), PathBuf::from("/test/state/templates"));
     assert_eq!(config.logs_dir(), PathBuf::from("/test/state/logs"));
-    // runtime_dir defaults to <state_dir>/run when not configured.
-    assert_eq!(config.runtime_dir(), PathBuf::from("/test/state/run"));
+    // runtime_dir defaults to <state_dir>/r when not configured (short path to avoid
+    // Unix domain socket 108-byte limit with per-sandbox suffixes).
+    assert_eq!(config.runtime_dir(), PathBuf::from("/test/state/r"));
 }
 
 #[test]
@@ -652,6 +653,15 @@ fn test_snapshot_manager_delete_nonexistent_fails() {
 
 // ─── Sandbox Orchestrator Tests (with Mock VM) ─────────────────────────────
 
+/// Create a TempDir with a minimal vm/ directory containing dummy artifact
+/// files so that the orchestrator's existence checks pass in unit tests.
+fn setup_vm_artifacts(tmp: &TempDir) {
+    let vm_dir = tmp.path().join("vm");
+    std::fs::create_dir_all(&vm_dir).unwrap();
+    std::fs::write(vm_dir.join("rootfs.raw"), b"fake rootfs").unwrap();
+    std::fs::write(vm_dir.join("vmlinux"), b"fake kernel").unwrap();
+}
+
 /// A mock VM port that doesn't actually start any VMs.
 /// Used to test the orchestrator's coordination logic.
 struct MockVmPort {
@@ -737,6 +747,7 @@ async fn test_orchestrator_create_sandbox() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
 
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
     let vm = MockVmPort::new();
@@ -770,6 +781,7 @@ async fn test_orchestrator_create_multiple_sandboxes() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
 
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
     let vm = MockVmPort::new();
@@ -807,6 +819,7 @@ async fn test_orchestrator_stop_sandbox() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
 
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
     let vm = MockVmPort::new();
@@ -840,6 +853,7 @@ async fn test_orchestrator_stop_with_clean() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
 
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
     let vm = MockVmPort::new();
@@ -873,6 +887,7 @@ async fn test_orchestrator_divergence() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
 
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
     let vm = MockVmPort::new();
@@ -918,6 +933,7 @@ async fn test_orchestrator_vm_config_overrides() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
 
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
     let vm = MockVmPort::new();
@@ -1015,6 +1031,7 @@ async fn test_run_sandbox_polls_until_vm_exits() {
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
     // Pre-stage a clean exit code (0) like a real guest poweroff would.
@@ -1119,6 +1136,7 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
     // Create a status dir with NO exit-code file (simulates crash).
@@ -1250,6 +1268,7 @@ async fn test_run_sandbox_timeout_returns_124() {
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
     let vm = NeverExitVm { stop_calls: AtomicUsize::new(0) };
@@ -1345,6 +1364,7 @@ async fn test_run_sandbox_exits_before_timeout() {
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
     // Pre-stage exit code 42.
@@ -1446,6 +1466,7 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
     let status_dir = tmp.path().join("status-ephemeral");
@@ -1547,6 +1568,7 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
     let status_dir = tmp.path().join("status-non-ephemeral");

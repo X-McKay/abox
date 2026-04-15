@@ -15,11 +15,21 @@ The `bootstrap_vm.sh` script handles items 2 with one command. It does
 
 ## Quick start
 
+The recommended approach is to use `abox init`, which runs the bootstrap
+automatically and writes a ready-to-use config file:
+
 ```bash
 git clone https://github.com/X-McKay/abox.git
 cd abox
 cargo build --release
-just bootstrap-vm
+abox init          # guided setup: bootstraps VM stack + writes config
+abox doctor        # optional: verify everything looks correct
+```
+
+Alternatively, run the steps manually:
+
+```bash
+just bootstrap-vm  # downloads VM artifacts and builds the guest rootfs
 ```
 
 This downloads ~60 MB of pinned, checksummed artifacts to `~/.abox/vm/`,
@@ -51,11 +61,15 @@ pass `--no-symlink` and add `~/.abox/vm` to `PATH` yourself:
 export PATH="$HOME/.abox/vm:$PATH"
 ```
 
-Drop the default policy and config into `~/.abox/`:
+If you used `abox init`, the config and policy are already in place.
+To set them up manually:
 
 ```bash
 mkdir -p ~/.abox/policies
 cp templates/config.example.toml ~/.abox/config.toml
+# Edit ~/.abox/config.toml and set image_path and kernel_path:
+#   image_path  = "~/.abox/vm/rootfs.raw"
+#   kernel_path = "~/.abox/vm/vmlinux"
 cp policies/default.toml ~/.abox/policies/default.toml
 ```
 
@@ -112,6 +126,12 @@ All downloads are pinned by exact version and SHA-256 in
 re-running the bootstrap is fast (seconds) and offline-friendly.
 
 ## Troubleshooting
+
+**Running on aarch64 (ARM64)**
+aarch64 support is in progress. `bootstrap_vm.sh` will exit with a clear
+"not yet available" message if you run it on an aarch64 host. See
+[`docs/future-work.md`](future-work.md) for tracking status. x86_64 is
+the only supported architecture at this time.
 
 **`Permission denied (os error 13)` on `/dev/kvm`**
 Your user isn't in the `kvm` group. Run `sudo usermod -aG kvm $USER`,
