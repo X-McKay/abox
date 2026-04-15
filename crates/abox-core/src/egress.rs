@@ -172,24 +172,39 @@ async fn handle_mitm_with_injection(
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut head_buf = Vec::with_capacity(8192);
-    let mut temp = [0u8; 1];
-    let mut found_end = false;
+    // Read the request head (up to and including the `\r\n\r\n` terminator)
+    // into `head_buf` using chunked reads. Anything we read past the terminator
+    // is the start of the body — captured in `body_overshoot` and forwarded
+    // upstream verbatim after the (possibly modified) head.
+    //
+    // Using a chunk buffer instead of byte-at-a-time reads cuts syscall count
+    // by ~4KB× for typical request heads, which matters for chatty clients.
+    let mut head_buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 4096];
+    let mut found_end_at: Option<usize> = None;
+    let mut body_overshoot: Vec<u8> = Vec::new();
 
-    while head_buf.len() < 65536 {
-        let n = client_tls.read(&mut temp).await?;
+    while head_buf.len() < 65536 && found_end_at.is_none() {
+        // Search starts 3 bytes back from the previous tail so we don't miss
+        // a terminator that straddles the chunk boundary.
+        let search_start = head_buf.len().saturating_sub(3);
+        let n = client_tls.read(&mut chunk).await?;
         if n == 0 {
             break;
         }
-        head_buf.push(temp[0]);
+        head_buf.extend_from_slice(&chunk[..n]);
 
-        if head_buf.len() >= 4 && head_buf[head_buf.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
-            found_end = true;
-            break;
+        if let Some(rel) = head_buf[search_start..].windows(4).position(|w| w == b"\r\n\r\n") {
+            let absolute_end = search_start + rel + 4;
+            found_end_at = Some(absolute_end);
+            // Anything past the terminator is the body — preserve it.
+            if head_buf.len() > absolute_end {
+                body_overshoot = head_buf.split_off(absolute_end);
+            }
         }
     }
 
-    if !found_end {
+    if found_end_at.is_none() {
         upstream_tls.write_all(&head_buf).await?;
         let _ = tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls).await;
         return Ok(());
@@ -236,6 +251,13 @@ async fn handle_mitm_with_injection(
     let mut reconstructed = lines.join("\r\n");
     reconstructed.push_str("\r\n");
     upstream_tls.write_all(reconstructed.as_bytes()).await?;
+
+    // If the chunked read pulled bytes past the head terminator (the start of
+    // the request body), forward them now before pumping the rest of the
+    // bidirectional stream. Otherwise the body's prefix would be lost.
+    if !body_overshoot.is_empty() {
+        upstream_tls.write_all(&body_overshoot).await?;
+    }
 
     let _ = tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls).await;
     Ok(())
