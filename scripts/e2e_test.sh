@@ -146,6 +146,10 @@ expect "every test result line shows 0 failed"
 TEST_OUTPUT=$(cargo test --workspace 2>&1 || true)
 echo "$TEST_OUTPUT" | grep "test result:" | sed "s/^/  ${DIM}│${RESET} /"
 if echo "$TEST_OUTPUT" | grep -q "test result: FAILED"; then
+    # Surface failure details so CI logs are actionable instead of mysterious.
+    echo "  ${DIM}│${RESET} ${RED}--- failing test details ---${RESET}"
+    echo "$TEST_OUTPUT" | grep -E "test .*\.\.\. FAILED$|^failures:$|^    [a-zA-Z0-9_:]+$|^---- .* ----$|thread '.*' panicked" \
+        | sed "s/^/  ${DIM}│${RESET} /"
     fail "cargo test --workspace"
 else
     pass "cargo test --workspace (no failures)"
@@ -331,14 +335,18 @@ STDERR=$(echo "$RESP" | python3 -c "import sys,json;print(json.loads(sys.stdin.r
 assert_eq "force-push exit_code" "126" "$EXIT_CODE"
 assert_contains "force-push stderr" "denied" "$STDERR"
 
-step "Denied: unknown command (rm -rf /)"
-how 'send {"command":"rm","args":["-rf","/"],"cwd":"/tmp","sandbox_id":"fix-auth"}'
+# NOTE: We deliberately use a harmless fake command (not `rm -rf /` or similar)
+# to exercise the default-deny code path. If a future regression caused the
+# policy engine to fail open, the proxy would execute the command on the host.
+# A nonexistent command name fails safe under every plausible regression.
+step "Denied: unknown command (default-deny)"
+how 'send {"command":"abox-canary-nonexistent","args":["--safe-test"],"cwd":"/tmp","sandbox_id":"fix-auth"}'
 expect "exit_code=126; default-deny applies"
-REQ='{"command":"rm","args":["-rf","/"],"cwd":"/tmp","sandbox_id":"fix-auth"}'
+REQ='{"command":"abox-canary-nonexistent","args":["--safe-test"],"cwd":"/tmp","sandbox_id":"fix-auth"}'
 RESP=$(proxy_send "$REQ")
 echo "  $DIM→$RESET $RESP"
 EXIT_CODE=$(echo "$RESP" | python3 -c "import sys,json;print(json.loads(sys.stdin.read())['exit_code'])")
-assert_eq "rm exit_code" "126" "$EXIT_CODE"
+assert_eq "unknown-command exit_code" "126" "$EXIT_CODE"
 
 step "Audit log attributes requests to sandbox_id (not 'unknown')"
 how "tail $SCRATCH/state/logs/audit.jsonl"
