@@ -5,6 +5,10 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+    # Include label events so adding/removing `vm-attested` re-runs the
+    # attestation check. Without this, the check uses the original event's
+    # label list and misses later label operations.
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,14 +30,30 @@ jobs:
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+      - name: Install just
+        uses: extractions/setup-just@v2
 
-      - name: cargo clippy (workspace, all targets, deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: just check (fmt + clippy + test)
+        run: just check
 
-      - name: cargo test (workspace)
-        run: cargo test --workspace
+  cargo-deny:
+    name: supply-chain audit (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check
 
   e2e-phases-1-5:
     name: e2e (phases 1-5; phase 6 skipped — no /dev/kvm on CI)
@@ -58,3 +78,104 @@ jobs:
         # existing, which they don't on a stock GitHub runner. The script
         # prints "skipped: VM artifacts not found" and continues.
         run: ./scripts/e2e_test.sh
+
+  vm-attestation:
+    name: VM attestation (label required when VM paths touched)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect VM-touching paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            vm:
+              - 'guest/**'
+              - 'scripts/build_rootfs.sh'
+              - 'scripts/bootstrap_vm.sh'
+              - 'crates/abox-core/**'
+              - 'crates/abox-proxyd/**'
+              - 'crates/abox-protocol/**'
+              - 'crates/abox-shim/**'
+              - 'templates/config.example.toml'
+
+      - name: Enforce vm-attested label when VM paths touched
+        if: steps.filter.outputs.vm == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            if (!labels.includes('vm-attested')) {
+              core.setFailed(
+                'This PR touches VM/guest/proxy code. Run `just e2e-vm` locally, ' +
+                'then add the `vm-attested` label and comment with the timestamp. ' +
+                'See docs/contributing/pre-pr-checklist.md.'
+              );
+            } else {
+              core.info('vm-attested label present. Trust-but-post-a-timestamp-comment.');
+            }
+
+      - name: No-op when VM paths untouched
+        if: steps.filter.outputs.vm != 'true'
+        run: echo "No VM-touching paths in this PR; attestation not required."
+
+  doc-staleness-reminder:
+    name: doc staleness reminder (advisory)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect code-vs-docs drift
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'scripts/**'
+              - 'templates/**'
+              - 'guest/**'
+              - 'justfile'
+              - '.github/workflows/**'
+            docs:
+              - 'README.md'
+              - 'docs/**'
+              - 'AGENTS.md'
+              - '.claude/skills/**'
+
+      - name: Post sticky comment if drift detected
+        if: steps.filter.outputs.code == 'true' && steps.filter.outputs.docs != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: doc-staleness-reminder
+          message: |
+            ### Documentation reminder (advisory)
+
+            This PR changes code but does not update any docs. That is often fine, but the pre-PR checklist asks you to confirm it was deliberate.
+
+            Touched code paths may map to:
+            - `README.md` — install, CLI surface, platforms, benchmark table
+            - `docs/explainer.md` — conceptual model
+            - `docs/decisions/` — ADRs
+            - `docs/future-work.md` — closed roadmap items
+            - `AGENTS.md` + `.claude/skills/**` — **required** if you changed `justfile`, `.github/workflows/**`, or `scripts/release.sh`
+
+            See [`docs/contributing/pre-pr-checklist.md`](../blob/main/docs/contributing/pre-pr-checklist.md#documentation-updates). This reminder is advisory and does not block merge.
+
+      - name: Clear sticky comment if drift resolved
+        if: steps.filter.outputs.code != 'true' || steps.filter.outputs.docs == 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: doc-staleness-reminder
+          delete: true

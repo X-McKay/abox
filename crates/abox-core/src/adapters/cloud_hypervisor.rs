@@ -144,11 +144,7 @@ impl VmPort for CloudHypervisorAdapter {
                     .virtiofs_sockets
                     .get("status")
                     .context("template metadata missing 'status' socket")?;
-                (
-                    self.runtime_dir.join(ws),
-                    self.runtime_dir.join(mt),
-                    self.runtime_dir.join(st),
-                )
+                (self.runtime_dir.join(ws), self.runtime_dir.join(mt), self.runtime_dir.join(st))
             }
         };
 
@@ -332,11 +328,7 @@ impl VmPort for CloudHypervisorAdapter {
             status_dir: status_dir.clone(),
             api_socket: api_socket.clone(),
             console_socket: console_socket.clone(),
-            virtiofs_sockets: vec![
-                virtiofs_socket,
-                meta_socket,
-                status_socket,
-            ],
+            virtiofs_sockets: vec![virtiofs_socket, meta_socket, status_socket],
             config,
         };
 
@@ -468,10 +460,7 @@ mod tests {
         let result = CloudHypervisorAdapter::new(deep);
         assert!(result.is_err(), "expected Err for deep runtime_dir");
         let msg = format!("{}", result.err().unwrap());
-        assert!(
-            msg.contains("too deep"),
-            "error should mention 'too deep', got: {msg}"
-        );
+        assert!(msg.contains("too deep"), "error should mention 'too deep', got: {msg}");
     }
 
     #[test]

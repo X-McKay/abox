@@ -344,6 +344,21 @@ fn setup_test_repo() -> (TempDir, PathBuf) {
     init_opts.initial_head("main");
     let repo = Repository::init_opts(&repo_path, &init_opts).unwrap();
 
+    // Set repo-local user config so tests that shell out to `git` (e.g., merges,
+    // which need a committer identity) work in environments with no global git
+    // config, like fresh CI runners. git2's in-memory Signature is fine for
+    // direct commits, but merge_branch() in the Git2Workspace adapter shells out.
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
     let sig = git2::Signature::now("Test", "test@test.com").unwrap();
     let tree_id = {
         let mut index = repo.index().unwrap();
@@ -1110,8 +1125,7 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
     let status_dir = tmp.path().join("status-silent-fail");
     std::fs::create_dir_all(&status_dir).unwrap();
 
-    let vm =
-        ExitingMockVmNoStatus { info_calls: AtomicUsize::new(0), status_dir };
+    let vm = ExitingMockVmNoStatus { info_calls: AtomicUsize::new(0), status_dir };
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {
@@ -1469,10 +1483,7 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
     assert_eq!(exit, 0);
 
     // Worktree should be cleaned up in ephemeral mode.
-    assert!(
-        !wt_base.join("ephemeral-test").exists(),
-        "ephemeral mode should remove the worktree"
-    );
+    assert!(!wt_base.join("ephemeral-test").exists(), "ephemeral mode should remove the worktree");
 }
 
 #[tokio::test]
