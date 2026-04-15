@@ -19,6 +19,7 @@ pub mod boot_meta;
 pub mod ca;
 pub mod config;
 pub mod console;
+pub mod egress;
 pub mod error;
 pub mod policy;
 pub mod protocol;

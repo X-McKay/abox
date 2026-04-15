@@ -67,6 +67,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
+    root_ca: std::sync::Arc<abox_core::ca::RootCa>,
 ) -> Result<()> {
     if args.detach {
         return spawn_detached(&args, orchestrator);
@@ -97,7 +98,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     };
 
     println!("Sandbox '{}' starting...", args.task);
-    let exit_code = orchestrator.run_sandbox(params, policy).await?;
+    let exit_code = orchestrator.run_sandbox(params, policy, root_ca).await?;
 
     if exit_code == 0 {
         println!("\nSandbox '{}' exited cleanly.", args.task);

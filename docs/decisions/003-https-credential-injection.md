@@ -66,3 +66,88 @@ Implement a TLS-terminating MITM (man-in-the-middle) proxy that:
 - **SDK-level credential providers** (e.g., IAM roles, OIDC): not universally
   supported across all target APIs and requires per-SDK integration. May be
   added later as a complement, not a replacement.
+
+---
+
+## Amendment: Credential File Support and Stub Injection (2026-04-12)
+
+### Problem
+
+OAuth-based tools such as Claude Code check for a local credential file (e.g.,
+`~/.claude/.credentials.json`) before making any API calls. If that file is
+absent or invalid, the tool refuses to start — it never reaches the network
+layer where the MITM proxy could inject the real token. API key injection alone
+is therefore insufficient for OAuth-gated tools.
+
+### Solution
+
+Two new mechanisms work together:
+
+**1. Stub credential files** (`[guest] credential_files` in `~/.abox/config.toml`)
+
+A credential file entry maps a host credential file to a guest path and
+optionally specifies a `stub` — a JSON object with placeholder token values
+written into the guest filesystem at sandbox boot time. The stub passes the
+tool's local credential check (the file exists, has the right shape) without
+containing any real token. Example:
+
+```toml
+[guest]
+[[guest.credential_files]]
+host = "~/.claude/.credentials.json"
+guest = "/.claude/.credentials.json"
+
+[guest.credential_files.stub.claudeAiOauth]
+accessToken = "abox-proxy-managed"
+expiresAt = 9999999999999
+refreshToken = "abox-proxy-managed"
+```
+
+**2. Credential file source in egress policy**
+
+Policy egress rules now accept either `env_var` (as before) or a
+`credential_file` + `json_path` pair. `json_path` is a dot-separated path into
+the JSON credential file on the host (e.g., `claudeAiOauth.accessToken`). The
+proxy reads the real token from the host file at request time and injects it
+into the outbound request — the stub value in the guest is never used on the
+wire.
+
+```toml
+[[egress]]
+domain = "api.claude.ai"
+inject_header = "Authorization"
+credential_file = "~/.claude/.credentials.json"
+json_path = "claudeAiOauth.accessToken"
+header_template = "Bearer {value}"
+```
+
+### Security property
+
+The real credential never enters the VM. The stub token (`"abox-proxy-managed"`)
+is worthless — it satisfies the tool's local file check but is intercepted and
+replaced by the proxy before any request reaches the upstream API. An agent that
+exfiltrates the credential file gets only the placeholder.
+
+### Per-sandbox egress proxy via vsock
+
+The per-sandbox `EgressProxyServer` is now spawned from `run_sandbox()`, closing
+the gap noted in the original ADR. Because the guest has no direct network access
+(no virtio-net), the proxy is reached via vsock:
+
+- Host: proxy listens on vsock port 5001 (one instance per sandbox).
+- Guest `init.sh`: brings up the loopback interface and runs `socat` to bridge
+  vsock CID 2 port 5001 → TCP `127.0.0.1:18443`.
+- Guest environment: `HTTPS_PROXY=http://127.0.0.1:18443` (injected by the
+  orchestrator; replaces the former `10.0.2.2:<port>` QEMU user-mode address).
+
+### Node.js CA trust
+
+Node.js does not use the system trust store by default. The orchestrator injects
+`NODE_EXTRA_CA_CERTS=<path-to-abox-root.crt>` into the guest boot metadata so
+that Node.js-based tools (Claude Code, Codex CLI) trust the MITM certificate
+without any rootfs change.
+
+### See also
+
+- [`docs/superpowers/specs/2026-04-12-credential-forwarding-design.md`](../superpowers/specs/2026-04-12-credential-forwarding-design.md) — full design spec
+- [`docs/superpowers/plans/2026-04-12-credential-forwarding.md`](../superpowers/plans/2026-04-12-credential-forwarding.md) — implementation plan with TDD tasks

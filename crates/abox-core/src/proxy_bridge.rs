@@ -45,6 +45,19 @@ pub trait AuditSink: Send + Sync {
         decision: &str,
         exit_code: i32,
     );
+
+    /// Record an HTTPS egress request. Default impl emits a tracing event
+    /// so callers that only care about CLI auditing don't need to
+    /// implement this.
+    fn log_egress(&self, sandbox_id: &str, domain: &str, decision: &str, status_code: i32) {
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            domain = %domain,
+            decision = %decision,
+            status_code,
+            "egress"
+        );
+    }
 }
 
 /// A configured but not-yet-running proxy bridge.
@@ -287,6 +300,31 @@ impl AuditSink for FileAuditSink {
             decision = %decision,
             exit_code,
             "cli"
+        );
+    }
+
+    fn log_egress(&self, sandbox_id: &str, domain: &str, decision: &str, status_code: i32) {
+        use chrono::Utc;
+        use std::io::Write;
+        let entry = serde_json::json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "sandbox_id": sandbox_id,
+            "request_type": "egress",
+            "target": domain,
+            "detail": "",
+            "decision": decision,
+            "result_code": status_code,
+        });
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = writeln!(w, "{entry}");
+            let _ = w.flush();
+        }
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            domain = %domain,
+            decision = %decision,
+            status_code,
+            "egress"
         );
     }
 }

@@ -27,20 +27,28 @@ version = "0.1.0"
 dependencies = [
  "abox-protocol",
  "anyhow",
+ "bytes",
  "chrono",
  "criterion",
  "dirs",
  "git2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rcgen",
  "regex",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tokio-rustls",
  "toml",
  "tracing",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

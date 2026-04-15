@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::path::Path;
 
 /// A policy decision.
@@ -48,12 +49,70 @@ pub struct EgressRule {
     pub inject_header: String,
 
     /// Environment variable on the host that contains the secret value.
-    pub env_var: String,
+    #[serde(default)]
+    pub env_var: Option<String>,
 
-    /// Optional header value template. `{value}` is replaced with the env var.
+    /// Path to a JSON file containing credentials (tilde-expanded).
+    #[serde(default)]
+    pub credential_file: Option<String>,
+
+    /// JSON path (dot-separated) to the value within `credential_file`.
+    #[serde(default)]
+    pub json_path: Option<String>,
+
+    /// Optional header value template. `{value}` is replaced with the credential value.
     /// Default: just the raw value.
     #[serde(default = "default_header_template")]
     pub header_template: String,
+}
+
+impl EgressRule {
+    /// Resolve the credential value for this rule.
+    ///
+    /// - If `env_var` is Some, reads from the environment.
+    /// - Else if `credential_file` + `json_path` are Some, reads the JSON file
+    ///   and extracts the value at the given dot-separated path.
+    /// - Returns `None` if neither is configured or the value cannot be read.
+    pub fn resolve_credential(&self) -> Option<String> {
+        if let Some(ref var) = self.env_var {
+            return std::env::var(var).ok();
+        }
+        if let Some(ref file_path) = self.credential_file {
+            let expanded = expand_tilde(file_path);
+            let content = std::fs::read_to_string(&expanded).ok()?;
+            let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+            if let Some(ref path) = self.json_path {
+                return extract_json_path(&json, path);
+            }
+        }
+        None
+    }
+}
+
+/// Expand a leading `~` in a path to the current user's home directory.
+pub fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}/{rest}", home.display());
+        }
+    } else if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.display().to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Extract a value from a `serde_json::Value` at a dot-separated path.
+fn extract_json_path(json: &serde_json::Value, path: &str) -> Option<String> {
+    let mut current = json;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    match current {
+        serde_json::Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
 }
 
 /// Top-level policy configuration file.
@@ -371,7 +430,9 @@ mod tests {
             egress: vec![EgressRule {
                 domain: "api.anthropic.com".to_string(),
                 inject_header: "x-api-key".to_string(),
-                env_var: "ANTHROPIC_API_KEY".to_string(),
+                env_var: Some("ANTHROPIC_API_KEY".to_string()),
+                credential_file: None,
+                json_path: None,
                 header_template: "{value}".to_string(),
             }],
             default_cli_action: "deny".to_string(),
@@ -609,5 +670,135 @@ mod tests {
     fn test_tls_bypass_empty_list() {
         let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
         assert!(!engine.is_tls_bypassed("anything.com"));
+    }
+
+    #[test]
+    fn test_egress_rule_with_credential_file() {
+        let toml_str = r#"
+            default_cli_action = "deny"
+            default_egress_action = "deny"
+
+            [[egress]]
+            domain = "api.anthropic.com"
+            inject_header = "Authorization"
+            credential_file = "~/.claude/.credentials.json"
+            json_path = "claudeAiOauth.accessToken"
+            header_template = "Bearer {value}"
+        "#;
+        let policy: PolicyFile = toml::from_str(toml_str).unwrap();
+        let rule = &policy.egress[0];
+        assert_eq!(rule.domain, "api.anthropic.com");
+        assert_eq!(rule.inject_header, "Authorization");
+        assert!(rule.env_var.is_none());
+        assert_eq!(rule.credential_file.as_deref(), Some("~/.claude/.credentials.json"));
+        assert_eq!(rule.json_path.as_deref(), Some("claudeAiOauth.accessToken"));
+        assert_eq!(rule.header_template, "Bearer {value}");
+    }
+
+    #[test]
+    fn test_egress_rule_with_env_var_still_works() {
+        let toml_str = r#"
+            default_cli_action = "deny"
+            default_egress_action = "deny"
+
+            [[egress]]
+            domain = "api.openai.com"
+            inject_header = "Authorization"
+            env_var = "OPENAI_API_KEY"
+            header_template = "Bearer {value}"
+        "#;
+        let policy: PolicyFile = toml::from_str(toml_str).unwrap();
+        let rule = &policy.egress[0];
+        assert_eq!(rule.env_var.as_deref(), Some("OPENAI_API_KEY"));
+        assert!(rule.credential_file.is_none());
+    }
+
+    #[test]
+    fn test_resolve_credential_from_json_file() {
+        // Write a fake credential file and verify resolve_credential reads
+        // the right field out of it.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"claudeAiOauth":{"accessToken":"real-token-xyz","refreshToken":"rt"}}"#,
+        )
+        .unwrap();
+        let rule = EgressRule {
+            domain: "api.anthropic.com".into(),
+            inject_header: "Authorization".into(),
+            env_var: None,
+            credential_file: Some(tmp.path().display().to_string()),
+            json_path: Some("claudeAiOauth.accessToken".into()),
+            header_template: "Bearer {value}".into(),
+        };
+        assert_eq!(rule.resolve_credential(), Some("real-token-xyz".to_string()));
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn test_resolve_credential_env_var_takes_precedence() {
+        // If both env_var and credential_file are set, env_var wins.
+        // This documents current behavior and guards against accidental swap.
+        let env_key = "ABOX_TEST_CRED_PRIORITY";
+        // SAFETY: test-only; runs in a single-threaded #[test] context.
+        unsafe {
+            std::env::set_var(env_key, "env-value");
+        }
+        let rule = EgressRule {
+            domain: "x".into(),
+            inject_header: "Authorization".into(),
+            env_var: Some(env_key.into()),
+            credential_file: Some("/nonexistent".into()),
+            json_path: Some("a.b".into()),
+            header_template: "{value}".into(),
+        };
+        assert_eq!(rule.resolve_credential(), Some("env-value".to_string()));
+        unsafe {
+            std::env::remove_var(env_key);
+        }
+    }
+
+    #[test]
+    fn test_resolve_credential_missing_file_returns_none() {
+        let rule = EgressRule {
+            domain: "x".into(),
+            inject_header: "Authorization".into(),
+            env_var: None,
+            credential_file: Some("/definitely/does/not/exist.json".into()),
+            json_path: Some("a".into()),
+            header_template: "{value}".into(),
+        };
+        assert_eq!(rule.resolve_credential(), None);
+    }
+
+    #[test]
+    fn test_extract_json_path_nested() {
+        let json: serde_json::Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "test-token-123"
+            }
+        });
+        assert_eq!(
+            extract_json_path(&json, "claudeAiOauth.accessToken"),
+            Some("test-token-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_path_missing() {
+        let json: serde_json::Value = serde_json::json!({"foo": "bar"});
+        assert_eq!(extract_json_path(&json, "missing.path"), None);
+    }
+
+    #[test]
+    fn test_expand_tilde() {
+        let expanded = expand_tilde("~/.claude/creds.json");
+        assert!(!expanded.starts_with('~'));
+        assert!(expanded.ends_with("/.claude/creds.json"));
+    }
+
+    #[test]
+    fn test_expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
     }
 }

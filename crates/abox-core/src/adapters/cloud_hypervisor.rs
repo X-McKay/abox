@@ -149,13 +149,37 @@ impl VmPort for CloudHypervisorAdapter {
         };
 
         // Stage boot metadata into meta_dir.
+        let staged_creds: Vec<crate::boot_meta::StagedCredential> = config
+            .credential_files
+            .iter()
+            .map(|c| crate::boot_meta::StagedCredential {
+                index: c.index,
+                guest_path: c.guest_path.clone(),
+                mode: c.mode.clone(),
+            })
+            .collect();
         let meta = crate::boot_meta::BootMeta {
             sandbox_id: config.id.clone(),
             agent_command: config.agent_command.clone(),
             env: config.env_vars.clone(),
+            credential_files: staged_creds,
         };
         meta.stage(&meta_dir)
             .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
+
+        // Write credential file contents into meta_dir/credentials/.
+        if !config.credential_files.is_empty() {
+            let creds_dir = meta_dir.join("credentials");
+            std::fs::create_dir_all(&creds_dir).with_context(|| {
+                format!("Failed to create credentials dir {}", creds_dir.display())
+            })?;
+            for cred in &config.credential_files {
+                let dest = creds_dir.join(cred.index.to_string());
+                std::fs::write(&dest, &cred.content).with_context(|| {
+                    format!("Failed to write credential file {}", dest.display())
+                })?;
+            }
+        }
 
         // Stage the status dir for the writable aboxstatus virtiofs share.
         std::fs::create_dir_all(&status_dir)

@@ -148,6 +148,7 @@ fn boot_meta(c: &mut Criterion) {
             ("ANTHROPIC_API_KEY".into(), "sk-ant-12345".into()),
             ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
         ],
+        credential_files: vec![],
     };
 
     let mut group = c.benchmark_group("boot_meta");

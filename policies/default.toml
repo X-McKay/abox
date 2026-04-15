@@ -95,9 +95,10 @@ bypass_tls = []
 
 [[egress]]
 domain = "api.anthropic.com"
-inject_header = "x-api-key"
-env_var = "ANTHROPIC_API_KEY"
-header_template = "{value}"
+inject_header = "Authorization"
+credential_file = "~/.claude/.credentials.json"
+json_path = "claudeAiOauth.accessToken"
+header_template = "Bearer {value}"
 
 [[egress]]
 domain = "api.openai.com"

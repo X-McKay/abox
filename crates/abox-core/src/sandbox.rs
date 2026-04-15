@@ -4,8 +4,8 @@
 //! a unified interface for sandbox lifecycle management. This is the main
 //! application-layer service that the CLI and TUI call into.
 
-use crate::config::{AboxConfig, VmRuntimeTuning};
-use crate::vm::{VmConfig, VmInfo, VmPort, VmState};
+use crate::config::{AboxConfig, CredentialFileEntry, VmRuntimeTuning};
+use crate::vm::{CredentialToStage, VmConfig, VmInfo, VmPort, VmState};
 use crate::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -44,9 +44,89 @@ pub struct SandboxStatus {
     pub vm_state: String,
     pub vm_pid: u32,
     pub commits_ahead: usize,
-    /// Port allocated for this sandbox's egress proxy listener.
-    #[serde(default)]
-    pub egress_port: u16,
+}
+
+/// Convert a TOML value to a JSON value (for stub credential generation).
+pub fn toml_to_json(value: &toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Integer(i) => serde_json::json!(*i),
+        toml::Value::Float(f) => serde_json::json!(*f),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
+        toml::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(toml_to_json).collect()),
+        toml::Value::Table(table) => {
+            let map = table.iter().map(|(k, v)| (k.clone(), toml_to_json(v))).collect();
+            serde_json::Value::Object(map)
+        }
+    }
+}
+
+/// Resolve credential file config entries into staged credential payloads.
+///
+/// For each [`CredentialFileEntry`]:
+/// - Expands `~` in the host path.
+/// - If the host file does not exist, logs a debug message and skips.
+/// - If `stub` is set, serializes the TOML stub value to JSON.
+/// - Otherwise, copies the host file content as-is.
+pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<CredentialToStage> {
+    let mut result = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let host_path = crate::policy::expand_tilde(&entry.host);
+
+        if let Some(ref stub) = entry.stub {
+            // Stub mode: serialize TOML value to JSON.
+            let json_value = toml_to_json(stub);
+            let content = match serde_json::to_string_pretty(&json_value) {
+                Ok(s) => s.into_bytes(),
+                Err(e) => {
+                    tracing::warn!(
+                        index,
+                        guest_path = %entry.guest,
+                        error = %e,
+                        "Failed to serialize credential stub to JSON; skipping"
+                    );
+                    continue;
+                }
+            };
+            result.push(CredentialToStage {
+                index,
+                guest_path: entry.guest.clone(),
+                mode: entry.mode.clone(),
+                content,
+            });
+        } else {
+            // Copy mode: read from host file.
+            let path = std::path::Path::new(&host_path);
+            if !path.exists() {
+                tracing::debug!(
+                    host_path = %host_path,
+                    guest_path = %entry.guest,
+                    "Host credential file does not exist; skipping"
+                );
+                continue;
+            }
+            match std::fs::read(path) {
+                Ok(content) => {
+                    result.push(CredentialToStage {
+                        index,
+                        guest_path: entry.guest.clone(),
+                        mode: entry.mode.clone(),
+                        content,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        host_path = %host_path,
+                        guest_path = %entry.guest,
+                        error = %e,
+                        "Failed to read host credential file; skipping"
+                    );
+                }
+            }
+        }
+    }
+    result
 }
 
 /// The sandbox orchestrator. This is the main entry point for all operations.
@@ -97,18 +177,17 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             None => crate::vm::StartMode::Fresh,
         };
 
-        // Allocate an ephemeral port for the per-sandbox egress proxy.
-        let egress_port = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            listener.local_addr()?.port()
-        };
-
         // Inject HTTPS_PROXY env vars so the guest routes HTTPS through the
-        // per-sandbox egress proxy on the host.
+        // per-sandbox egress proxy. The guest's init.sh bridges vsock port
+        // 5001 to a local TCP listener at 127.0.0.1:18443 via socat.
         let mut env_vars = params.env_vars;
-        let proxy_url = format!("http://10.0.2.2:{egress_port}");
+        let proxy_url = "http://127.0.0.1:18443".to_string();
         env_vars.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
         env_vars.push(("https_proxy".to_string(), proxy_url));
+        // Node.js uses its own embedded CA bundle; tell it to also trust the
+        // abox root CA so the TLS-terminating MITM proxy is accepted.
+        env_vars
+            .push(("NODE_EXTRA_CA_CERTS".to_string(), "/etc/ssl/certs/abox-ca.pem".to_string()));
 
         // Step 3: Build VM config.
         // Resolve image and kernel paths: prefer explicit config values, then
@@ -147,6 +226,10 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 kernel_path.display()
             );
         }
+
+        // Resolve credential files from config so they can be staged into the guest.
+        let credential_files = stage_credential_files(&self.config.guest.credential_files);
+
         let vm_config = VmConfig {
             id: params.task_id.clone(),
             worktree_path: worktree_path.clone(),
@@ -157,8 +240,8 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             user: params.user,
             env_vars,
             agent_command: params.command.clone(),
-            proxy_port: egress_port,
             start_mode,
+            credential_files,
         };
 
         // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just
@@ -191,7 +274,6 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             vm_state: vm_info.state.to_string(),
             vm_pid: vm_info.pid,
             commits_ahead: 0,
-            egress_port,
         })
     }
 
@@ -243,7 +325,6 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 vm_state,
                 vm_pid,
                 commits_ahead: wt.commits_ahead,
-                egress_port: 0, // not tracked for listed sandboxes
             });
         }
 
@@ -296,6 +377,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         &self,
         params: CreateSandboxParams,
         policy: std::sync::Arc<crate::policy::PolicyEngine>,
+        root_ca: std::sync::Arc<crate::ca::RootCa>,
     ) -> Result<i32> {
         let timeout_secs = params.timeout_secs;
         let ephemeral = params.ephemeral;
@@ -325,14 +407,102 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         // (which is /workspace inside the VM) resolves to the real path.
         let bridge = crate::proxy_bridge::ProxyBridge::new(
             bridge_socket,
-            policy,
-            audit_sink,
+            std::sync::Arc::clone(&policy),
+            std::sync::Arc::clone(&audit_sink),
             crate::proxy_bridge::SandboxAttribution::Fixed(task_id.clone()),
         )
         .with_cwd_map("/workspace", worktree_path);
         let bridge_handle = tokio::spawn(async move {
             if let Err(e) = bridge.run().await {
                 tracing::error!(error = %e, "proxy bridge crashed");
+            }
+        });
+
+        // Spawn the per-sandbox egress proxy bound to the vsock-bridged Unix
+        // socket. Cloud Hypervisor routes guest vsock port 5001 traffic to
+        // `vsock-<id>.sock_5001` — the same pattern used for the CLI proxy
+        // bridge on port 5000.
+        let egress_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5001"));
+        let egress_policy = std::sync::Arc::clone(&policy);
+        let egress_ca = std::sync::Arc::clone(&root_ca);
+        let bypass_tls = policy.bypass_tls_patterns().to_vec();
+        let egress_task_id = task_id.clone();
+        let egress_audit = std::sync::Arc::clone(&audit_sink);
+        let egress_handle = tokio::spawn(async move {
+            // Remove any stale socket from a previous run.
+            let _ = std::fs::remove_file(&egress_socket);
+            let listener = match tokio::net::UnixListener::bind(&egress_socket) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(
+                        socket = %egress_socket.display(),
+                        error = %e,
+                        "Failed to bind egress proxy listener"
+                    );
+                    return;
+                }
+            };
+            tracing::info!(
+                socket = %egress_socket.display(),
+                task_id = %egress_task_id,
+                "Per-sandbox egress proxy listening (vsock port 5001)"
+            );
+
+            loop {
+                let (stream, _peer_addr) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Egress accept error");
+                        continue;
+                    }
+                };
+                let policy = std::sync::Arc::clone(&egress_policy);
+                let root_ca = std::sync::Arc::clone(&egress_ca);
+                let bypass_tls = bypass_tls.clone();
+                let sandbox_id = egress_task_id.clone();
+                let audit = std::sync::Arc::clone(&egress_audit);
+
+                tokio::spawn(async move {
+                    let io = hyper_util::rt::TokioIo::new(stream);
+                    let policy = policy.clone();
+                    let root_ca = root_ca.clone();
+                    let bypass_tls = bypass_tls.clone();
+                    let sandbox_id = sandbox_id.clone();
+                    let audit = std::sync::Arc::clone(&audit);
+
+                    let service = hyper::service::service_fn(move |req| {
+                        let policy = policy.clone();
+                        let root_ca = std::sync::Arc::clone(&root_ca);
+                        let bypass_tls = bypass_tls.clone();
+                        let sandbox_id = sandbox_id.clone();
+                        let audit = std::sync::Arc::clone(&audit);
+                        async move {
+                            crate::egress::handle_request(
+                                req,
+                                &policy,
+                                root_ca,
+                                &bypass_tls,
+                                move |domain: &str, decision: &str, status_code: i32| {
+                                    // Reuse the shared AuditSink used by the
+                                    // CLI proxy bridge so egress entries land
+                                    // in the same buffered audit.jsonl file.
+                                    audit.log_egress(&sandbox_id, domain, decision, status_code);
+                                },
+                            )
+                            .await
+                        }
+                    });
+
+                    if let Err(e) = hyper::server::conn::http1::Builder::new()
+                        .preserve_header_case(true)
+                        .title_case_headers(true)
+                        .serve_connection(io, service)
+                        .with_upgrades()
+                        .await
+                    {
+                        tracing::debug!(error = %e, "Egress proxy connection error");
+                    }
+                });
             }
         });
 
@@ -411,6 +581,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         };
 
         bridge_handle.abort();
+        egress_handle.abort();
         // Signal the console tailer to drain and exit. Wait briefly for it
         // to finish before we move on; if it stays stuck (shouldn't happen
         // in practice), the JoinHandle is dropped and the task is cancelled.
@@ -472,5 +643,137 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         }
 
         Ok(exit_code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CredentialFileEntry;
+
+    #[test]
+    fn toml_to_json_string() {
+        let v = toml::Value::String("hello".into());
+        assert_eq!(toml_to_json(&v), serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn toml_to_json_integer() {
+        let v = toml::Value::Integer(42);
+        assert_eq!(toml_to_json(&v), serde_json::json!(42));
+    }
+
+    #[test]
+    fn toml_to_json_bool() {
+        let v = toml::Value::Boolean(true);
+        assert_eq!(toml_to_json(&v), serde_json::json!(true));
+    }
+
+    #[test]
+    fn toml_to_json_nested_table() {
+        let toml_str = r#"
+            [claudeAiOauth]
+            accessToken = "abox-proxy-managed"
+            expiresAt = 9999999999999
+            scopes = ["user:inference"]
+        "#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        let json = toml_to_json(&val);
+        assert_eq!(json["claudeAiOauth"]["accessToken"], "abox-proxy-managed");
+        assert_eq!(json["claudeAiOauth"]["expiresAt"], 9_999_999_999_999i64);
+        assert_eq!(json["claudeAiOauth"]["scopes"][0], "user:inference");
+    }
+
+    #[test]
+    fn stage_credential_files_with_stub() {
+        let entries = vec![CredentialFileEntry {
+            host: "/nonexistent/host/file".into(),
+            guest: "/.claude/.credentials.json".into(),
+            mode: "0600".into(),
+            stub: Some(
+                toml::toml! {
+                    [claudeAiOauth]
+                    accessToken = "stub-token"
+                }
+                .into(),
+            ),
+        }];
+
+        let staged = stage_credential_files(&entries);
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].index, 0);
+        assert_eq!(staged[0].guest_path, "/.claude/.credentials.json");
+        assert_eq!(staged[0].mode, "0600");
+
+        // Content should be valid JSON with the stub data.
+        let json: serde_json::Value = serde_json::from_slice(&staged[0].content).unwrap();
+        assert_eq!(json["claudeAiOauth"]["accessToken"], "stub-token");
+    }
+
+    #[test]
+    fn stage_credential_files_missing_host_skipped() {
+        let entries = vec![CredentialFileEntry {
+            host: "/this/path/does/not/exist".into(),
+            guest: "/root/.config/creds".into(),
+            mode: "0600".into(),
+            stub: None,
+        }];
+
+        let staged = stage_credential_files(&entries);
+        assert!(staged.is_empty(), "missing host file should be skipped");
+    }
+
+    #[test]
+    fn stage_credential_files_copy_mode() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"secret-content").unwrap();
+
+        let entries = vec![CredentialFileEntry {
+            host: tmp.path().to_str().unwrap().to_string(),
+            guest: "/root/.secret".into(),
+            mode: "0400".into(),
+            stub: None,
+        }];
+
+        let staged = stage_credential_files(&entries);
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].content, b"secret-content");
+        assert_eq!(staged[0].mode, "0400");
+    }
+
+    #[test]
+    fn stage_credential_files_mixed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"real-cred").unwrap();
+
+        let entries = vec![
+            CredentialFileEntry {
+                host: "/missing".into(),
+                guest: "/a".into(),
+                mode: "0600".into(),
+                stub: None,
+            },
+            CredentialFileEntry {
+                host: tmp.path().to_str().unwrap().to_string(),
+                guest: "/b".into(),
+                mode: "0600".into(),
+                stub: None,
+            },
+            CredentialFileEntry {
+                host: "/also-missing".into(),
+                guest: "/c".into(),
+                mode: "0600".into(),
+                stub: Some(toml::toml! { key = "val" }.into()),
+            },
+        ];
+
+        let staged = stage_credential_files(&entries);
+        // Entry 0 (missing, no stub) skipped; entry 1 (real file) included;
+        // entry 2 (stub) included regardless of missing host file.
+        assert_eq!(staged.len(), 2);
+        assert_eq!(staged[0].index, 1);
+        assert_eq!(staged[0].guest_path, "/b");
+        assert_eq!(staged[1].index, 2);
+        assert_eq!(staged[1].guest_path, "/c");
     }
 }

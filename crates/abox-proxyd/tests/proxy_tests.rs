@@ -350,7 +350,9 @@ fn test_egress_policy_wildcard_matching() {
         egress: vec![EgressRule {
             domain: "*.googleapis.com".to_string(),
             inject_header: "Authorization".to_string(),
-            env_var: "GOOGLE_API_KEY".to_string(),
+            env_var: Some("GOOGLE_API_KEY".to_string()),
+            credential_file: None,
+            json_path: None,
             header_template: "Bearer {value}".to_string(),
         }],
         default_cli_action: "deny".to_string(),
@@ -377,7 +379,9 @@ fn test_egress_policy_exact_domain_matching() {
         egress: vec![EgressRule {
             domain: "api.anthropic.com".to_string(),
             inject_header: "x-api-key".to_string(),
-            env_var: "ANTHROPIC_API_KEY".to_string(),
+            env_var: Some("ANTHROPIC_API_KEY".to_string()),
+            credential_file: None,
+            json_path: None,
             header_template: "{value}".to_string(),
         }],
         default_cli_action: "deny".to_string(),
