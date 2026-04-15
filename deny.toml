@@ -12,16 +12,51 @@
 
 [advisories]
 version = 2
-# Only flag unmaintained crates in our own workspace (not every transitive).
+# Only flag unmaintained crates reachable from our workspace.
 unmaintained = "workspace"
 # Warn (not fail) on yanked crates so a yank upstream doesn't break CI mid-flight.
 yanked = "warn"
-# Advisory IDs to explicitly ignore (none today).
-ignore = []
+# Advisory IDs explicitly accepted as known-and-tracked exceptions. Each entry
+# must include a comment explaining why it is here and the condition for
+# removing it (typically: upstream ships a fix). Do not add to this list
+# without a written rationale.
+ignore = [
+    # rustls-webpki 0.103.10 — URI-name constraints accepted incorrectly.
+    # Practical impact for abox: LOW. The rustls-webpki in our chain is used
+    # by the MITM proxy as a TLS terminator with a self-signed CA that signs
+    # its own leaves. We do not rely on name-constraint-based verification
+    # of externally-presented cert chains (the typical vuln target). Remove
+    # this ignore once rustls-webpki ships a patched 0.103.x or we migrate
+    # to a patched 0.104.x. See https://rustsec.org/advisories/RUSTSEC-2026-0098
+    "RUSTSEC-2026-0098",
+
+    # rustls-webpki 0.103.10 — wildcard-name constraints accepted incorrectly.
+    # Same chain and same impact assessment as RUSTSEC-2026-0098. Remove when
+    # a patched upstream version is released.
+    # See https://rustsec.org/advisories/RUSTSEC-2026-0099
+    "RUSTSEC-2026-0099",
+
+    # rustls-pemfile 2.2.0 — unmaintained (not vulnerable). Used only in
+    # abox-proxyd for parsing CA + leaf PEM material. The replacement path
+    # is rustls-pki-types' PEM module. Migration is tracked as a follow-up
+    # task; not blocking for current release. Remove this ignore once we
+    # migrate the proxy's PEM parsing off rustls-pemfile.
+    # See https://rustsec.org/advisories/RUSTSEC-2025-0134
+    "RUSTSEC-2025-0134",
+]
 
 [licenses]
 version = 2
 # Allow only these license families. Anything else causes the check to fail.
+#
+# MPL-2.0 (added for the `option-ext` transitive of `dirs`): MPL-2.0 is
+# file-level weak copyleft. Linking an MPL-2.0 library into a non-MPL binary
+# is permitted; the obligations apply only to modifications of MPL-2.0 files.
+# This is the common industry position.
+#
+# CDLA-Permissive-2.0 (added for the `webpki-roots` crates used by rustls):
+# the Linux Foundation's permissive data license. Functionally equivalent
+# in effect to MIT/Apache-2.0 for the purposes of a compiled binary.
 allow = [
   "MIT",
   "Apache-2.0",
@@ -32,6 +67,8 @@ allow = [
   "Unicode-DFS-2016",
   "OpenSSL",
   "Zlib",
+  "MPL-2.0",
+  "CDLA-Permissive-2.0",
 ]
 # Require SPDX expressions to be at least 80% confident before accepting.
 confidence-threshold = 0.8
@@ -39,8 +76,12 @@ confidence-threshold = 0.8
 [bans]
 # Warn on multiple versions of the same crate (pressure on dependency bloat).
 multiple-versions = "warn"
-# Never allow wildcard version requirements in our own manifests.
+# Never allow wildcard version requirements in external deps.
 wildcards = "deny"
+# But DO allow wildcards for workspace-internal path deps (e.g., abox-cli
+# depending on `abox-core = { version = "*", path = "..." }`). This is the
+# idiomatic pattern for unpublished intra-workspace crates.
+allow-wildcard-paths = true
 
 [sources]
 # Only allow crates from crates.io, no random git deps.
