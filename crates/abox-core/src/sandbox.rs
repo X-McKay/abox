@@ -67,12 +67,25 @@ pub fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 /// For each [`CredentialFileEntry`]:
 /// - Expands `~` in the host path.
 /// - If the host file does not exist, logs a debug message and skips.
+///   This applies to **both** stub and copy modes — the host file's existence
+///   is the proxy of "user is logged in"; staging a stub for a tool the user
+///   is not logged into would mislead the guest into believing credentials are
+///   available when the host-side proxy has nothing to inject.
 /// - If `stub` is set, serializes the TOML stub value to JSON.
 /// - Otherwise, copies the host file content as-is.
 pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<CredentialToStage> {
     let mut result = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         let host_path = crate::policy::expand_tilde(&entry.host);
+        let path = std::path::Path::new(&host_path);
+        if !path.exists() {
+            tracing::debug!(
+                host_path = %host_path,
+                guest_path = %entry.guest,
+                "Host credential file does not exist; skipping (user is not logged in for this tool)"
+            );
+            continue;
+        }
 
         if let Some(ref stub) = entry.stub {
             // Stub mode: serialize TOML value to JSON.
@@ -97,15 +110,6 @@ pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<Credential
             });
         } else {
             // Copy mode: read from host file.
-            let path = std::path::Path::new(&host_path);
-            if !path.exists() {
-                tracing::debug!(
-                    host_path = %host_path,
-                    guest_path = %entry.guest,
-                    "Host credential file does not exist; skipping"
-                );
-                continue;
-            }
             match std::fs::read(path) {
                 Ok(content) => {
                     result.push(CredentialToStage {
@@ -425,7 +429,10 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let egress_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5001"));
         let egress_policy = std::sync::Arc::clone(&policy);
         let egress_ca = std::sync::Arc::clone(&root_ca);
-        let bypass_tls = policy.bypass_tls_patterns().to_vec();
+        // Wrap bypass_tls in an Arc so each per-connection / per-request task
+        // does a cheap pointer clone instead of cloning the underlying Vec.
+        // The pattern list is set at policy load time and never changes.
+        let bypass_tls: std::sync::Arc<[String]> = policy.bypass_tls_patterns().to_vec().into();
         let egress_task_id = task_id.clone();
         let egress_audit = std::sync::Arc::clone(&audit_sink);
         let egress_handle = tokio::spawn(async move {
@@ -458,7 +465,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 };
                 let policy = std::sync::Arc::clone(&egress_policy);
                 let root_ca = std::sync::Arc::clone(&egress_ca);
-                let bypass_tls = bypass_tls.clone();
+                let bypass_tls = std::sync::Arc::clone(&bypass_tls);
                 let sandbox_id = egress_task_id.clone();
                 let audit = std::sync::Arc::clone(&egress_audit);
 
@@ -466,14 +473,14 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                     let io = hyper_util::rt::TokioIo::new(stream);
                     let policy = policy.clone();
                     let root_ca = root_ca.clone();
-                    let bypass_tls = bypass_tls.clone();
+                    let bypass_tls = std::sync::Arc::clone(&bypass_tls);
                     let sandbox_id = sandbox_id.clone();
                     let audit = std::sync::Arc::clone(&audit);
 
                     let service = hyper::service::service_fn(move |req| {
                         let policy = policy.clone();
                         let root_ca = std::sync::Arc::clone(&root_ca);
-                        let bypass_tls = bypass_tls.clone();
+                        let bypass_tls = std::sync::Arc::clone(&bypass_tls);
                         let sandbox_id = sandbox_id.clone();
                         let audit = std::sync::Arc::clone(&audit);
                         async move {
@@ -686,8 +693,14 @@ mod tests {
 
     #[test]
     fn stage_credential_files_with_stub() {
+        // Stub mode still requires the host file to exist (= "user is logged in").
+        // The stub's content is what gets staged into the guest, but the
+        // host file's existence gates whether anything is staged at all.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"real-creds-on-host").unwrap();
+
         let entries = vec![CredentialFileEntry {
-            host: "/nonexistent/host/file".into(),
+            host: tmp.path().to_str().unwrap().to_string(),
             guest: "/.claude/.credentials.json".into(),
             mode: "0600".into(),
             stub: Some(
@@ -705,9 +718,28 @@ mod tests {
         assert_eq!(staged[0].guest_path, "/.claude/.credentials.json");
         assert_eq!(staged[0].mode, "0600");
 
-        // Content should be valid JSON with the stub data.
+        // Content should be the JSON-serialized stub, NOT the host file content.
+        // (Stubs satisfy local credential checks; the proxy injects the real token.)
         let json: serde_json::Value = serde_json::from_slice(&staged[0].content).unwrap();
         assert_eq!(json["claudeAiOauth"]["accessToken"], "stub-token");
+    }
+
+    #[test]
+    fn stage_credential_files_stub_skipped_when_host_missing() {
+        // Per the design spec, stubs must NOT be staged when the host file is
+        // absent — host-file existence is the proxy of "user is logged in".
+        let entries = vec![CredentialFileEntry {
+            host: "/this/path/definitely/does/not/exist".into(),
+            guest: "/.claude/.credentials.json".into(),
+            mode: "0600".into(),
+            stub: Some(toml::toml! { key = "val" }.into()),
+        }];
+
+        let staged = stage_credential_files(&entries);
+        assert!(
+            staged.is_empty(),
+            "stub should be skipped when host file is missing (user not logged in)"
+        );
     }
 
     #[test]
@@ -743,8 +775,12 @@ mod tests {
 
     #[test]
     fn stage_credential_files_mixed() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), b"real-cred").unwrap();
+        // Two host files exist; one missing-host case for each branch
+        // (copy and stub). Both missing-host entries should be skipped.
+        let real_for_copy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(real_for_copy.path(), b"real-cred").unwrap();
+        let real_for_stub = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(real_for_stub.path(), b"present-but-stub-overrides").unwrap();
 
         let entries = vec![
             CredentialFileEntry {
@@ -754,7 +790,7 @@ mod tests {
                 stub: None,
             },
             CredentialFileEntry {
-                host: tmp.path().to_str().unwrap().to_string(),
+                host: real_for_copy.path().to_str().unwrap().to_string(),
                 guest: "/b".into(),
                 mode: "0600".into(),
                 stub: None,
@@ -765,15 +801,26 @@ mod tests {
                 mode: "0600".into(),
                 stub: Some(toml::toml! { key = "val" }.into()),
             },
+            CredentialFileEntry {
+                host: real_for_stub.path().to_str().unwrap().to_string(),
+                guest: "/d".into(),
+                mode: "0600".into(),
+                stub: Some(toml::toml! { key = "stub-val" }.into()),
+            },
         ];
 
         let staged = stage_credential_files(&entries);
-        // Entry 0 (missing, no stub) skipped; entry 1 (real file) included;
-        // entry 2 (stub) included regardless of missing host file.
+        // Entry 0 (missing, no stub): skipped.
+        // Entry 1 (real, copy): included with host file content.
+        // Entry 2 (missing, stub): skipped (new behavior; was a bug before).
+        // Entry 3 (real, stub): included with stub content.
         assert_eq!(staged.len(), 2);
         assert_eq!(staged[0].index, 1);
         assert_eq!(staged[0].guest_path, "/b");
-        assert_eq!(staged[1].index, 2);
-        assert_eq!(staged[1].guest_path, "/c");
+        assert_eq!(staged[0].content, b"real-cred");
+        assert_eq!(staged[1].index, 3);
+        assert_eq!(staged[1].guest_path, "/d");
+        let json: serde_json::Value = serde_json::from_slice(&staged[1].content).unwrap();
+        assert_eq!(json["key"], "stub-val");
     }
 }

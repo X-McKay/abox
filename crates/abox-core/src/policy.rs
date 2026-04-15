@@ -200,6 +200,22 @@ impl PolicyEngine {
             });
         }
 
+        // Validate egress rules: a rule that names a `credential_file` must
+        // also provide a `json_path`, otherwise resolve_credential() falls
+        // through silently and the proxy passes the request without the auth
+        // header — leading to opaque guest-side 401s with no policy error.
+        // Catching this misconfiguration at policy-load is much louder.
+        for (idx, rule) in policy.egress.iter().enumerate() {
+            if rule.credential_file.is_some() && rule.json_path.is_none() {
+                anyhow::bail!(
+                    "Egress rule #{idx} ({domain}) sets `credential_file` but is missing `json_path`. \
+                     The proxy needs both to extract a token from the file. \
+                     Either set `json_path = \"path.to.token\"` or remove `credential_file`.",
+                    domain = rule.domain,
+                );
+            }
+        }
+
         Ok(Self {
             cli_policies,
             egress_rules: policy.egress,
@@ -769,6 +785,33 @@ mod tests {
             header_template: "{value}".into(),
         };
         assert_eq!(rule.resolve_credential(), None);
+    }
+
+    #[test]
+    fn test_policy_load_rejects_credential_file_without_json_path() {
+        let policy = PolicyFile {
+            cli: vec![],
+            egress: vec![EgressRule {
+                domain: "api.example.com".into(),
+                inject_header: "Authorization".into(),
+                env_var: None,
+                credential_file: Some("/some/file.json".into()),
+                json_path: None,
+                header_template: "Bearer {value}".into(),
+            }],
+            default_cli_action: "deny".into(),
+            default_egress_action: "deny".into(),
+            bypass_tls: vec![],
+        };
+        let result = PolicyEngine::from_policy_file(policy);
+        // PolicyEngine doesn't implement Debug, so we can't use expect_err.
+        let Err(err) = result else {
+            panic!("policy should be rejected when credential_file is set without json_path")
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("credential_file"), "error mentions the field: {msg}");
+        assert!(msg.contains("json_path"), "error mentions the missing field: {msg}");
+        assert!(msg.contains("api.example.com"), "error names the offending rule: {msg}");
     }
 
     #[test]

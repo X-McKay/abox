@@ -145,22 +145,21 @@ async fn main() -> Result<()> {
     let vm_manager = CloudHypervisorAdapter::new(config.runtime_dir())?;
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm_manager);
 
-    // Load root CA for the per-sandbox egress proxy (MITM credential injection).
-    let ca_dir = abox_core::ca::RootCa::default_dir()?;
-    let root_ca = std::sync::Arc::new(
-        abox_core::ca::RootCa::load_or_generate(&ca_dir)
-            .context("Failed to load or generate root CA")?,
-    );
-
+    // The root CA is only consumed by `abox run` (it backs the per-sandbox
+    // MITM egress proxy). Loading it for read-only commands like `list`,
+    // `stop`, `merge`, or `divergence` would unnecessarily couple them to the
+    // CA's on-disk state — a corrupt or read-only `~/.abox/ca/` would block
+    // commands that have nothing to do with the proxy. Defer the load into
+    // the Run branch.
     match cli.command {
         Commands::Run(args) => {
-            commands::run::execute(
-                args,
-                &orchestrator,
-                std::sync::Arc::clone(&policy),
-                std::sync::Arc::clone(&root_ca),
-            )
-            .await
+            let ca_dir = abox_core::ca::RootCa::default_dir()?;
+            let root_ca = std::sync::Arc::new(
+                abox_core::ca::RootCa::load_or_generate(&ca_dir)
+                    .context("Failed to load or generate root CA")?,
+            );
+            commands::run::execute(args, &orchestrator, std::sync::Arc::clone(&policy), root_ca)
+                .await
         }
         Commands::List => commands::list::execute(&orchestrator).await,
         Commands::Attach(args) => commands::attach::execute(args, &orchestrator).await,

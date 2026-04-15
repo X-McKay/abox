@@ -68,8 +68,22 @@ if [ -x "$SOCAT_BIN" ]; then
                  VSOCK-CONNECT:2:5001 2>/dev/null &
     EGRESS_SOCAT_PID=$!
 
-    # Give socat a moment to bind the sockets before exec'ing the agent.
-    sleep 0.5
+    # Wait for the proxy unix socket to be bound before exec'ing the agent.
+    # Polling beats a fixed sleep because: (a) on a fast host both binds happen
+    # in milliseconds, so we don't pay a 500ms tax on every sandbox start;
+    # (b) on a heavily loaded host the fixed sleep could be too short, leading
+    # to flaky "connection refused" errors. The TCP egress listener on :18443
+    # is inherently bound by the time the unix socket is bound, since both
+    # socat processes were spawned in immediate succession before this poll.
+    i=0
+    while [ ! -S /run/abox-proxy.sock ] && [ "$i" -lt 100 ]; do
+        # 100 * 0.05s = 5s ceiling, far longer than any plausible bind delay.
+        sleep 0.05
+        i=$((i + 1))
+    done
+    if [ ! -S /run/abox-proxy.sock ]; then
+        echo "WARNING: /run/abox-proxy.sock did not appear within 5s; proceeding anyway"
+    fi
 else
     echo "WARNING: $SOCAT_BIN not found; proxy bridge unavailable"
 fi
