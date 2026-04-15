@@ -2,16 +2,26 @@
 #
 # Run with: cargo deny check
 # Install: cargo install cargo-deny
+#
+# Schema v2 (cargo-deny 0.18+). Migration notes:
+# - `vulnerability` and `notice` are implicit in v2 (always deny / always warn).
+# - `unmaintained` is now a scope, not a severity ("workspace" = only check
+#   crates in our workspace, not every transitive dep of a transitive dep).
+# - `unlicensed` and `copyleft` are implicit in v2 — anything not in the
+#   `allow` list fails.
 
 [advisories]
-# Deny crates with known security vulnerabilities.
-vulnerability = "deny"
-unmaintained = "warn"
+version = 2
+# Only flag unmaintained crates in our own workspace (not every transitive).
+unmaintained = "workspace"
+# Warn (not fail) on yanked crates so a yank upstream doesn't break CI mid-flight.
 yanked = "warn"
-notice = "warn"
+# Advisory IDs to explicitly ignore (none today).
+ignore = []
 
 [licenses]
-# Allow only these license families.
+version = 2
+# Allow only these license families. Anything else causes the check to fail.
 allow = [
   "MIT",
   "Apache-2.0",
@@ -23,16 +33,17 @@ allow = [
   "OpenSSL",
   "Zlib",
 ]
-unlicensed = "deny"
-copyleft = "deny"
+# Require SPDX expressions to be at least 80% confident before accepting.
+confidence-threshold = 0.8
 
 [bans]
-# Warn on multiple versions of the same crate.
+# Warn on multiple versions of the same crate (pressure on dependency bloat).
 multiple-versions = "warn"
+# Never allow wildcard version requirements in our own manifests.
 wildcards = "deny"
 
 [sources]
-# Only allow crates from crates.io.
+# Only allow crates from crates.io, no random git deps.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
