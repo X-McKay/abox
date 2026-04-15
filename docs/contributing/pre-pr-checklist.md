@@ -20,8 +20,9 @@ The following paths trigger the `vm-attestation` CI check:
 - `guest/**`
 - `scripts/build_rootfs.sh`
 - `scripts/bootstrap_vm.sh`
-- `crates/abox-runtime/**`
-- `crates/abox-proxy/**`
+- `crates/abox-core/**`
+- `crates/abox-proxyd/**`
+- `crates/abox-protocol/**`
 - `crates/abox-shim/**`
 - `templates/config.example.toml`
 

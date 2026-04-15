@@ -15,7 +15,7 @@ Follow [`docs/contributing/pre-pr-checklist.md`](../docs/contributing/pre-pr-che
 
 ## VM / guest / proxy changes
 
-If this PR touches any of `guest/**`, `scripts/build_rootfs.sh`, `scripts/bootstrap_vm.sh`, `crates/abox-runtime/**`, `crates/abox-proxy/**`, `crates/abox-shim/**`, or `templates/config.example.toml`:
+If this PR touches any of `guest/**`, `scripts/build_rootfs.sh`, `scripts/bootstrap_vm.sh`, `crates/abox-core/**`, `crates/abox-proxyd/**`, `crates/abox-protocol/**`, `crates/abox-shim/**`, or `templates/config.example.toml`:
 
 - [ ] `just e2e-vm` passed locally (phases 6–7).
 - [ ] I have added the `vm-attested` label.

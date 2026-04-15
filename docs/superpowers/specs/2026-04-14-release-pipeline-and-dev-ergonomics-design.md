@@ -40,8 +40,9 @@ A new job using [`dorny/paths-filter`](https://github.com/dorny/paths-filter) ov
 - `abox/guest/**`
 - `abox/scripts/build_rootfs.sh`
 - `abox/scripts/bootstrap_vm.sh`
-- `abox/crates/abox-runtime/**`
-- `abox/crates/abox-proxy/**`
+- `abox/crates/abox-core/**`
+- `abox/crates/abox-proxyd/**`
+- `abox/crates/abox-protocol/**`
 - `abox/crates/abox-shim/**`
 - `abox/templates/config.example.toml`
 

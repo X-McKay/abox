@@ -46,8 +46,9 @@ If any changed path matches one of these globs, VM attestation is required:
 - `guest/**`
 - `scripts/build_rootfs.sh`
 - `scripts/bootstrap_vm.sh`
-- `crates/abox-runtime/**`
-- `crates/abox-proxy/**`
+- `crates/abox-core/**`
+- `crates/abox-proxyd/**`
+- `crates/abox-protocol/**`
 - `crates/abox-shim/**`
 - `templates/config.example.toml`
 
