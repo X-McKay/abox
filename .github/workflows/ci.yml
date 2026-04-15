@@ -5,6 +5,10 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+    # Include label events so adding/removing `vm-attested` re-runs the
+    # attestation check. Without this, the check uses the original event's
+    # label list and misses later label operations.
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
 
 env:
   CARGO_TERM_COLOR: always
