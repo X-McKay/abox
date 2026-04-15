@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// Result of a single doctor check.
 struct Check {
-    label: &'static str,
+    label: String,
     status: CheckStatus,
     detail: Option<String>,
 }
@@ -22,27 +22,27 @@ enum CheckStatus {
 }
 
 impl Check {
-    fn ok(label: &'static str) -> Self {
-        Self { label, status: CheckStatus::Ok, detail: None }
+    fn ok(label: impl Into<String>) -> Self {
+        Self { label: label.into(), status: CheckStatus::Ok, detail: None }
     }
 
-    fn ok_with(label: &'static str, detail: impl Into<String>) -> Self {
-        Self { label, status: CheckStatus::Ok, detail: Some(detail.into()) }
+    fn ok_with(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self { label: label.into(), status: CheckStatus::Ok, detail: Some(detail.into()) }
     }
 
-    fn warn(label: &'static str, detail: impl Into<String>) -> Self {
-        Self { label, status: CheckStatus::Warn, detail: Some(detail.into()) }
+    fn warn(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self { label: label.into(), status: CheckStatus::Warn, detail: Some(detail.into()) }
     }
 
-    fn fail(label: &'static str, detail: impl Into<String>) -> Self {
-        Self { label, status: CheckStatus::Fail, detail: Some(detail.into()) }
+    fn fail(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self { label: label.into(), status: CheckStatus::Fail, detail: Some(detail.into()) }
     }
 
     fn print(&self) {
-        let (icon, _label_style) = match self.status {
-            CheckStatus::Ok => ("✓", ""),
-            CheckStatus::Warn => ("!", ""),
-            CheckStatus::Fail => ("✗", ""),
+        let icon = match self.status {
+            CheckStatus::Ok => "✓",
+            CheckStatus::Warn => "!",
+            CheckStatus::Fail => "✗",
         };
         println!("  [{icon}] {}", self.label);
         if let Some(ref d) = self.detail {
@@ -100,11 +100,11 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
 
     println!();
     if failures == 0 && warnings == 0 {
-        println!("All checks passed. Run 'abox run --task hello -- /bin/sh -c \"echo hi\"' to verify.");
-    } else if failures == 0 {
         println!(
-            "{warnings} warning(s). abox should work but review the items above."
+            "All checks passed. Run 'abox run --task hello -- /bin/sh -c \"echo hi\"' to verify."
         );
+    } else if failures == 0 {
+        println!("{warnings} warning(s). abox should work but review the items above.");
     } else {
         println!(
             "{failures} check(s) failed, {warnings} warning(s). Run 'abox init' to fix setup issues."
@@ -138,8 +138,8 @@ fn check_kvm() -> Check {
     }
 }
 
-fn check_vm_artifact(vm_dir: &Path, name: &str, description: &'static str) -> Check {
-    let label = Box::leak(format!("VM artifact: {description} ({name})").into_boxed_str());
+fn check_vm_artifact(vm_dir: &Path, name: &str, description: &str) -> Check {
+    let label = format!("VM artifact: {description} ({name})");
     let path = vm_dir.join(name);
     if path.exists() {
         Check::ok_with(label, path.display().to_string())
@@ -156,7 +156,8 @@ fn check_vm_artifact(vm_dir: &Path, name: &str, description: &'static str) -> Ch
 }
 
 fn check_config_file(config: &AboxConfig) -> Check {
-    let config_path = AboxConfig::default_path().unwrap_or_else(|_| PathBuf::from("~/.abox/config.toml"));
+    let config_path =
+        AboxConfig::default_path().unwrap_or_else(|_| PathBuf::from("~/.abox/config.toml"));
     if config_path.exists() {
         Check::ok_with("Config file (~/.abox/config.toml)", config_path.display().to_string())
     } else {
@@ -227,9 +228,8 @@ fn check_socket_path_length(config: &AboxConfig) -> Check {
 }
 
 fn check_local_bin_on_path(vm_dir: &Path) -> Check {
-    let local_bin: PathBuf = dirs::home_dir()
-        .map(|h: PathBuf| h.join(".local/bin"))
-        .unwrap_or_else(|| PathBuf::from("~/.local/bin"));
+    let local_bin: PathBuf =
+        dirs::home_dir().map_or_else(|| PathBuf::from("~/.local/bin"), |h| h.join(".local/bin"));
 
     // Check whether cloud-hypervisor is reachable on PATH
     let ch_on_path = std::env::var("PATH")

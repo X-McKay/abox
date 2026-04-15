@@ -81,15 +81,20 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // `abox init` must run before AboxConfig::load so it remains reachable
+    // when the config file is missing OR malformed. The whole point of
+    // `init` is to create (or fix) the config file, so it can't require a
+    // loadable one as a precondition.
+    if let Commands::Init(ref args) = cli.command {
+        return commands::init::execute(args);
+    }
+
     let config_path = cli.config.unwrap_or_else(|| AboxConfig::default_path().unwrap_or_default());
     let config = AboxConfig::load(&config_path)?;
     config.ensure_dirs()?;
 
-    // Init and Doctor do not need the orchestrator and must run before the
-    // policy check so they work even when setup is incomplete.
-    if let Commands::Init(ref args) = cli.command {
-        return commands::init::execute(args);
-    }
+    // Doctor does not need the orchestrator and must run before the policy
+    // check so it works even when setup is incomplete.
     if let Commands::Doctor = cli.command {
         let ok = commands::doctor::execute(&config)?;
         return if ok { Ok(()) } else { std::process::exit(1) };

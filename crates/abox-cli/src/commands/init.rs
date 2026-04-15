@@ -71,9 +71,7 @@ fn print_action(msg: &str) {
 }
 
 fn default_state_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".abox")
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join(".abox")
 }
 
 fn check_kvm() -> Result<()> {
@@ -103,7 +101,8 @@ fn check_kvm() -> Result<()> {
 
 fn ensure_vm_artifacts(vm_dir: &Path, yes: bool) -> Result<()> {
     let required = ["cloud-hypervisor", "virtiofsd", "vmlinux", "rootfs.raw"];
-    let missing: Vec<&str> = required.iter().copied().filter(|f| !vm_dir.join(f).exists()).collect();
+    let missing: Vec<&str> =
+        required.iter().copied().filter(|f| !vm_dir.join(f).exists()).collect();
 
     if missing.is_empty() {
         print_ok("VM artifacts already present");
@@ -116,37 +115,32 @@ fn ensure_vm_artifacts(vm_dir: &Path, yes: bool) -> Result<()> {
     // well-known location. Fall back to asking the user to run it manually.
     let bootstrap = find_bootstrap_script();
 
-    match bootstrap {
-        Some(script) => {
-            print_action(&format!("Running {} --yes --no-symlink", script.display()));
-            let status = std::process::Command::new("bash")
-                .arg(&script)
-                .arg("--yes")
-                .arg("--no-symlink")
-                .env("BOOTSTRAP_YES", if yes { "1" } else { "0" })
-                .status()
-                .with_context(|| format!("Failed to run {}", script.display()))?;
-            if !status.success() {
-                anyhow::bail!(
-                    "bootstrap_vm.sh exited with status {}.\n\
-                     Check the output above for details.",
-                    status
-                );
-            }
-            print_ok("VM artifacts installed");
-        }
-        None => {
-            println!(
-                "\n    Could not locate bootstrap_vm.sh automatically.\n\
-                 \n\
-                 Please run it manually from the abox source tree:\n\
-                 \n\
-                 \x20 ./scripts/bootstrap_vm.sh --yes\n\
-                 \n\
-                 Then re-run 'abox init'."
+    if let Some(script) = bootstrap {
+        print_action(&format!("Running {} --yes --no-symlink", script.display()));
+        let status = std::process::Command::new("bash")
+            .arg(&script)
+            .arg("--yes")
+            .arg("--no-symlink")
+            .env("BOOTSTRAP_YES", if yes { "1" } else { "0" })
+            .status()
+            .with_context(|| format!("Failed to run {}", script.display()))?;
+        if !status.success() {
+            anyhow::bail!(
+                "bootstrap_vm.sh exited with status {status}.\nCheck the output above for details."
             );
-            anyhow::bail!("VM artifacts missing — bootstrap required");
         }
+        print_ok("VM artifacts installed");
+    } else {
+        println!(
+            "\n    Could not locate bootstrap_vm.sh automatically.\n\
+             \n\
+             Please run it manually from the abox source tree:\n\
+             \n\
+             \x20 ./scripts/bootstrap_vm.sh --yes\n\
+             \n\
+             Then re-run 'abox init'."
+        );
+        anyhow::bail!("VM artifacts missing — bootstrap required");
     }
 
     Ok(())
@@ -232,21 +226,18 @@ fn ensure_policy_file() -> Result<()> {
     // Locate the default policy from the source tree (same search as bootstrap).
     let source_policy = find_source_policy();
 
-    match source_policy {
-        Some(src) => {
-            std::fs::copy(&src, &policy_path).with_context(|| {
-                format!("Failed to copy {} to {}", src.display(), policy_path.display())
-            })?;
-            print_action(&format!("Installed default policy to {}", policy_path.display()));
-        }
-        None => {
-            // Embed a minimal but functional default policy as a fallback so
-            // init works even when run from an installed binary with no source tree.
-            let embedded = include_str!("../../../../policies/default.toml");
-            std::fs::write(&policy_path, embedded)
-                .with_context(|| format!("Failed to write {}", policy_path.display()))?;
-            print_action(&format!("Installed embedded default policy to {}", policy_path.display()));
-        }
+    if let Some(src) = source_policy {
+        std::fs::copy(&src, &policy_path).with_context(|| {
+            format!("Failed to copy {} to {}", src.display(), policy_path.display())
+        })?;
+        print_action(&format!("Installed default policy to {}", policy_path.display()));
+    } else {
+        // Embed a minimal but functional default policy as a fallback so
+        // init works even when run from an installed binary with no source tree.
+        let embedded = include_str!("../../../../policies/default.toml");
+        std::fs::write(&policy_path, embedded)
+            .with_context(|| format!("Failed to write {}", policy_path.display()))?;
+        print_action(&format!("Installed embedded default policy to {}", policy_path.display()));
     }
 
     Ok(())
@@ -266,9 +257,8 @@ fn find_source_policy() -> Option<PathBuf> {
 }
 
 fn check_path(vm_dir: &Path) {
-    let local_bin: PathBuf = dirs::home_dir()
-        .map(|h: PathBuf| h.join(".local/bin"))
-        .unwrap_or_else(|| PathBuf::from("~/.local/bin"));
+    let local_bin: PathBuf =
+        dirs::home_dir().map_or_else(|| PathBuf::from("~/.local/bin"), |h| h.join(".local/bin"));
 
     let ch_on_path = std::env::var("PATH")
         .unwrap_or_default()

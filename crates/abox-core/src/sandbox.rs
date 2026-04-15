@@ -9,7 +9,6 @@ use crate::vm::{VmConfig, VmInfo, VmPort, VmState};
 use crate::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Parameters for creating a new sandbox.
 #[derive(Debug, Clone)]
@@ -117,12 +116,18 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         // with an actionable message rather than attempting to start with a
         // non-existent path and producing a cryptic OS error.
         let default_vm_dir = self.config.state_dir.join("vm");
-        let image_path = self.config.vm_defaults.image_path.clone().unwrap_or_else(|| {
-            default_vm_dir.join("rootfs.raw")
-        });
-        let kernel_path = self.config.vm_defaults.kernel_path.clone().unwrap_or_else(|| {
-            default_vm_dir.join("vmlinux")
-        });
+        let image_path = self
+            .config
+            .vm_defaults
+            .image_path
+            .clone()
+            .unwrap_or_else(|| default_vm_dir.join("rootfs.raw"));
+        let kernel_path = self
+            .config
+            .vm_defaults
+            .kernel_path
+            .clone()
+            .unwrap_or_else(|| default_vm_dir.join("vmlinux"));
         if !image_path.exists() {
             // Roll back the worktree we just created before returning the error.
             let _ = self.workspace.remove_worktree(&params.task_id, true);
