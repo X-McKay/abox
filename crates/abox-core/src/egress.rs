@@ -162,104 +162,133 @@ async fn handle_mitm(
     Ok(())
 }
 
-/// Handle MITM with header injection.
+/// Handle MITM with header injection, using hyper for proper HTTP/1.1
+/// framing on both client and upstream sides.
+///
+/// # Why hyper, not hand-rolled bytes
+///
+/// The previous implementation read request bytes from the client, searched
+/// for `\r\n\r\n`, did string surgery to inject the Authorization header,
+/// then handed off to `copy_bidirectional` for the rest. That approach had
+/// three latent bugs we traced during the credential-forwarding investigation:
+///
+/// 1. **Keep-alive** — only the first request on each TLS tunnel got header
+///    injection; subsequent requests pipelined over the same connection flowed
+///    through `copy_bidirectional` unmodified.
+/// 2. **Header ordering** — inserting Authorization at the end of the header
+///    block rewrote the client's original ordering. Some endpoints are
+///    order-sensitive.
+/// 3. **Body framing** — request bodies are delivered via `Content-Length` or
+///    `Transfer-Encoding: chunked`; hand-rolled forwarding can leak prefix
+///    body bytes or corrupt framing when the head and body are read in the
+///    same TLS record.
+///
+/// Hyper's HTTP/1.1 codec handles all three correctly: each request is
+/// parsed into a `Request<Incoming>`, we mutate exactly one header, and the
+/// codec writes it back to upstream with correct framing. Response streams
+/// (SSE, chunked) are forwarded through hyper's body types, preserving
+/// byte-perfect delivery.
 async fn handle_mitm_with_injection(
-    mut client_tls: tokio_rustls::server::TlsStream<
-        hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
-    >,
-    mut upstream_tls: tokio_rustls::client::TlsStream<TcpStream>,
+    client_tls: tokio_rustls::server::TlsStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
+    upstream_tls: tokio_rustls::client::TlsStream<TcpStream>,
     rule: Option<&crate::policy::EgressRule>,
 ) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use hyper::header::{HeaderName, HeaderValue};
 
-    // Read the request head (up to and including the `\r\n\r\n` terminator)
-    // into `head_buf` using chunked reads. Anything we read past the terminator
-    // is the start of the body — captured in `body_overshoot` and forwarded
-    // upstream verbatim after the (possibly modified) head.
-    //
-    // Using a chunk buffer instead of byte-at-a-time reads cuts syscall count
-    // by ~4KB× for typical request heads, which matters for chatty clients.
-    let mut head_buf: Vec<u8> = Vec::with_capacity(8192);
-    let mut chunk = [0u8; 4096];
-    let mut found_end_at: Option<usize> = None;
-    let mut body_overshoot: Vec<u8> = Vec::new();
-
-    while head_buf.len() < 65536 && found_end_at.is_none() {
-        // Search starts 3 bytes back from the previous tail so we don't miss
-        // a terminator that straddles the chunk boundary.
-        let search_start = head_buf.len().saturating_sub(3);
-        let n = client_tls.read(&mut chunk).await?;
-        if n == 0 {
-            break;
+    // Set up hyper client connection against the upstream TLS stream. The
+    // connection driver runs on a background task; the SendRequest handle
+    // below sends requests over that connection and gets back responses.
+    let upstream_io = hyper_util::rt::TokioIo::new(upstream_tls);
+    let (sender, upstream_conn) = hyper::client::conn::http1::handshake(upstream_io)
+        .await
+        .context("upstream http1 handshake failed")?;
+    let upstream_driver = tokio::spawn(async move {
+        if let Err(e) = upstream_conn.await {
+            tracing::debug!(error = %e, "upstream connection driver ended");
         }
-        head_buf.extend_from_slice(&chunk[..n]);
+    });
 
-        if let Some(rel) = head_buf[search_start..].windows(4).position(|w| w == b"\r\n\r\n") {
-            let absolute_end = search_start + rel + 4;
-            found_end_at = Some(absolute_end);
-            // Anything past the terminator is the body — preserve it.
-            if head_buf.len() > absolute_end {
-                body_overshoot = head_buf.split_off(absolute_end);
-            }
-        }
-    }
+    // Share the single SendRequest between all HTTP/1 requests that may flow
+    // over the same TLS tunnel (keep-alive). A Mutex serializes access; for
+    // HTTP/1.1 on one connection, requests are inherently sequential anyway.
+    let sender = std::sync::Arc::new(tokio::sync::Mutex::new(sender));
 
-    if found_end_at.is_none() {
-        upstream_tls.write_all(&head_buf).await?;
-        let _ = tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls).await;
-        return Ok(());
-    }
+    // Parse the rule's header name and resolve the credential once. If
+    // anything is wrong (malformed header name / missing credential), we
+    // still proxy the request but don't modify it — Claude Code on the
+    // host works without an injected Authorization only when the client
+    // supplies a valid one itself, so this degrades gracefully.
+    let inject_header_name: Option<HeaderName> =
+        rule.and_then(|r| HeaderName::from_bytes(r.inject_header.as_bytes()).ok());
+    let header_template = rule.map(|r| r.header_template.clone());
+    let credential_value = rule.and_then(crate::policy::EgressRule::resolve_credential);
+    let rule_domain = rule.map(|r| r.domain.clone());
 
-    let head_str = String::from_utf8_lossy(&head_buf);
-    let mut lines: Vec<String> = head_str.lines().map(String::from).collect();
-
-    if let Some(rule) = rule {
-        match rule.resolve_credential() {
-            Some(value) => {
-                let header_value = rule.header_template.replace("{value}", &value);
-                let inject_line = format!("{}: {}", rule.inject_header, header_value);
-
-                let header_lower = rule.inject_header.to_lowercase();
-                lines.retain(|l| {
-                    if let Some(colon_pos) = l.find(':') {
-                        l[..colon_pos].trim().to_lowercase() != header_lower
+    let service = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+        let sender = std::sync::Arc::clone(&sender);
+        let inject_header_name = inject_header_name.clone();
+        let header_template = header_template.clone();
+        let credential_value = credential_value.clone();
+        let rule_domain = rule_domain.clone();
+        async move {
+            // Replace-only: modify the header if the client sent it AND we
+            // have a credential to inject. Never invent a header on paths
+            // where the client didn't send one.
+            if let (Some(name), Some(tmpl), Some(value)) =
+                (inject_header_name, header_template, credential_value)
+            {
+                if req.headers().contains_key(&name) {
+                    let new_value = tmpl.replace("{value}", &value);
+                    if let Ok(hv) = HeaderValue::from_str(&new_value) {
+                        req.headers_mut().insert(name.clone(), hv);
+                        tracing::debug!(
+                            header = %name,
+                            "Replaced credential header"
+                        );
                     } else {
-                        true
+                        tracing::warn!(
+                            header = %name,
+                            "Rejected injected header value (not valid HeaderValue); forwarding unmodified"
+                        );
                     }
-                });
-
-                if let Some(pos) = lines.iter().rposition(|l| !l.is_empty()) {
-                    lines.insert(pos + 1, inject_line);
-                } else {
-                    lines.push(inject_line);
                 }
-
+            } else if let Some(domain) = rule_domain {
                 tracing::debug!(
-                    header = %rule.inject_header,
-                    "Injected credential header"
+                    domain = %domain,
+                    "Rule present but no credential resolved; forwarding unmodified"
                 );
             }
-            None => {
-                tracing::warn!(
-                    domain = %rule.domain,
-                    "No credential value available (env var not set or credential file not found)"
-                );
-            }
+
+            let mut s = sender.lock().await;
+            let resp = s.send_request(req).await?;
+            let (parts, body) = resp.into_parts();
+            let boxed: BoxBody<Bytes, hyper::Error> = body.boxed();
+            Ok::<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>(Response::from_parts(
+                parts, boxed,
+            ))
         }
+    });
+
+    // Serve HTTP/1 requests from the client over the TLS tunnel we've already
+    // accepted. `preserve_header_case` and `title_case_headers` keep the
+    // original on-the-wire casing (important for some servers that hash
+    // header names case-sensitively for TLS-independent fingerprinting).
+    let client_io = hyper_util::rt::TokioIo::new(client_tls);
+    let serve_result = hyper::server::conn::http1::Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .serve_connection(client_io, service)
+        .with_upgrades()
+        .await;
+
+    if let Err(e) = serve_result {
+        tracing::debug!(error = %e, "MITM server connection ended");
     }
 
-    let mut reconstructed = lines.join("\r\n");
-    reconstructed.push_str("\r\n");
-    upstream_tls.write_all(reconstructed.as_bytes()).await?;
-
-    // If the chunked read pulled bytes past the head terminator (the start of
-    // the request body), forward them now before pumping the rest of the
-    // bidirectional stream. Otherwise the body's prefix would be lost.
-    if !body_overshoot.is_empty() {
-        upstream_tls.write_all(&body_overshoot).await?;
-    }
-
-    let _ = tokio::io::copy_bidirectional(&mut client_tls, &mut upstream_tls).await;
+    // Upstream driver is owned by the spawn; abort to release resources when
+    // the client side is done. If the driver already exited (normal case on
+    // clean close), abort is a no-op.
+    upstream_driver.abort();
     Ok(())
 }
 
