@@ -39,8 +39,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
                     let still_alive = std::process::Command::new("kill")
                         .args(["-0", &pid.to_string()])
                         .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false);
+                        .is_ok_and(|s| s.success());
                     if !still_alive {
                         break;
                     }
