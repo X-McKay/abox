@@ -198,6 +198,8 @@ async fn handle_mitm_with_injection(
     // Set up hyper client connection against the upstream TLS stream. The
     // connection driver runs on a background task; the SendRequest handle
     // below sends requests over that connection and gets back responses.
+    // Keep-alive works naturally: multiple client requests flow over the
+    // same tunnel, each passes through the service_fn, each gets injection.
     let upstream_io = hyper_util::rt::TokioIo::new(upstream_tls);
     let (sender, upstream_conn) = hyper::client::conn::http1::handshake(upstream_io)
         .await
@@ -213,50 +215,57 @@ async fn handle_mitm_with_injection(
     // HTTP/1.1 on one connection, requests are inherently sequential anyway.
     let sender = std::sync::Arc::new(tokio::sync::Mutex::new(sender));
 
-    // Parse the rule's header name and resolve the credential once. If
-    // anything is wrong (malformed header name / missing credential), we
-    // still proxy the request but don't modify it — Claude Code on the
-    // host works without an injected Authorization only when the client
-    // supplies a valid one itself, so this degrades gracefully.
+    // Take owned copies of the rule and its parsed header name. Both are
+    // captured by the service_fn closure below and cloned into each
+    // per-request future. The credential itself is resolved *per request*
+    // (not cached at tunnel setup) so that OAuth tokens rotated mid-tunnel
+    // (common for file-backed credentials via `credential_file` + periodic
+    // refresh on the host) take effect immediately on the next request.
+    let rule_owned: Option<crate::policy::EgressRule> = rule.cloned();
     let inject_header_name: Option<HeaderName> =
-        rule.and_then(|r| HeaderName::from_bytes(r.inject_header.as_bytes()).ok());
-    let header_template = rule.map(|r| r.header_template.clone());
-    let credential_value = rule.and_then(crate::policy::EgressRule::resolve_credential);
-    let rule_domain = rule.map(|r| r.domain.clone());
+        rule_owned.as_ref().and_then(|r| HeaderName::from_bytes(r.inject_header.as_bytes()).ok());
 
     let service = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
         let sender = std::sync::Arc::clone(&sender);
+        let rule_owned = rule_owned.clone();
         let inject_header_name = inject_header_name.clone();
-        let header_template = header_template.clone();
-        let credential_value = credential_value.clone();
-        let rule_domain = rule_domain.clone();
         async move {
-            // Replace-only: modify the header if the client sent it AND we
-            // have a credential to inject. Never invent a header on paths
-            // where the client didn't send one.
-            if let (Some(name), Some(tmpl), Some(value)) =
-                (inject_header_name, header_template, credential_value)
-            {
-                if req.headers().contains_key(&name) {
-                    let new_value = tmpl.replace("{value}", &value);
-                    if let Ok(hv) = HeaderValue::from_str(&new_value) {
-                        req.headers_mut().insert(name.clone(), hv);
-                        tracing::debug!(
-                            header = %name,
-                            "Replaced credential header"
-                        );
-                    } else {
+            // Credential injection: if a rule matches and a credential
+            // resolves, insert-or-replace the target header. This matches
+            // the original proxy contract: the proxy's job is to *provide*
+            // the credential on behalf of the guest, whether or not the
+            // guest shipped a placeholder header. `HeaderMap::insert`
+            // replaces any existing value with the same name.
+            if let (Some(name), Some(r)) = (inject_header_name, rule_owned.as_ref()) {
+                match r.resolve_credential() {
+                    Some(value) => {
+                        let new_value = r.header_template.replace("{value}", &value);
+                        match HeaderValue::from_str(&new_value) {
+                            Ok(hv) => {
+                                let had_prior = req.headers().contains_key(&name);
+                                req.headers_mut().insert(name.clone(), hv);
+                                tracing::debug!(
+                                    header = %name,
+                                    had_prior,
+                                    "Injected credential header"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    header = %name,
+                                    error = %e,
+                                    "Injected header value is not a valid HeaderValue; forwarding unmodified"
+                                );
+                            }
+                        }
+                    }
+                    None => {
                         tracing::warn!(
-                            header = %name,
-                            "Rejected injected header value (not valid HeaderValue); forwarding unmodified"
+                            domain = %r.domain,
+                            "Rule matched but credential could not be resolved (env var not set, file missing, or json path absent); forwarding unmodified"
                         );
                     }
                 }
-            } else if let Some(domain) = rule_domain {
-                tracing::debug!(
-                    domain = %domain,
-                    "Rule present but no credential resolved; forwarding unmodified"
-                );
             }
 
             let mut s = sender.lock().await;
