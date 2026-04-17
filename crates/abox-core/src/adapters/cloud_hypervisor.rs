@@ -35,7 +35,9 @@ fn workspace_virtiofsd_args(
         format!("--socket-path={}", socket_path.display()),
         format!("--shared-dir={}", shared_dir.display()),
         "--cache=never".to_string(),
-        "--sandbox=none".to_string(),
+        // --sandbox=namespace required for --uid-map/--gid-map (user-namespace based remapping).
+        // Requires unprivileged user namespaces on the host (default on Linux 5.x+).
+        "--sandbox=namespace".to_string(),
         "--thread-pool-size=4".to_string(),
         format!("--uid-map=:1000:{uid}:1:"),
         format!("--gid-map=:1000:{gid}:1:"),
@@ -539,7 +541,7 @@ mod tests {
         assert!(args.iter().any(|a| a == "--uid-map=:1000:1000:1:"));
         assert!(args.iter().any(|a| a == "--gid-map=:1000:1000:1:"));
         assert!(args.iter().any(|a| a == "--cache=never"));
-        assert!(args.iter().any(|a| a == "--sandbox=none"));
+        assert!(args.iter().any(|a| a == "--sandbox=namespace"));
     }
 
     #[test]

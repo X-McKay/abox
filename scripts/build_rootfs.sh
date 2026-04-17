@@ -110,7 +110,7 @@ cp "$STAGE"/usr/share/apk/keys/x86/*.pub "$STAGE/etc/apk/keys/" 2>/dev/null || t
 echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/main" > "$STAGE/etc/apk/repositories"
 echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> "$STAGE/etc/apk/repositories"
 fakeroot "$APK_STATIC" --root "$STAGE" --initdb --no-cache --no-scripts add \
-    bash nodejs npm 2>&1 | tail -10
+    bash nodejs npm su-exec 2>&1 | tail -10
 # Clean up the static apk binary — not needed in the guest.
 rm -f "$APK_STATIC"
 

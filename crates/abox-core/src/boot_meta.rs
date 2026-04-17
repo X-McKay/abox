@@ -74,7 +74,7 @@ impl BootMeta {
     /// variables are exported before the `exec`.
     ///
     /// The script runs as root (inherited from init.sh), stages credentials,
-    /// fixes ownership, then drops privileges via `setpriv` before exec-ing
+    /// fixes ownership, then drops privileges via `su-exec` before exec-ing
     /// the agent. See ADR-004.
     pub fn runner_script(&self) -> String {
         let mut s = String::from("#!/bin/sh\n");
@@ -104,7 +104,7 @@ impl BootMeta {
             s.push_str("'\n");
         }
         // Fix ownership of agent home regardless of rootfs build host uid.
-        // This runs as root (inherited from init.sh) before setpriv drops privs.
+        // This runs as root (inherited from init.sh) before su-exec drops privs.
         if !self.credential_files.is_empty() {
             s.push_str("chown -R abox:abox /home/abox\n");
         }
@@ -130,11 +130,11 @@ impl BootMeta {
                 sh_escape(&cred.guest_path)
             );
         }
-        // Drop privileges and exec agent.
-        s.push_str(
-            "exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups \
-             -- env HOME=/home/abox USER=abox",
-        );
+        // Drop privileges and exec agent. su-exec is Alpine's standard
+        // atomic uid/gid-drop-and-exec tool (like setpriv but available in
+        // BusyBox-based rootfs). It sets uid, gid, and supplementary groups
+        // from /etc/group, then execs the command.
+        s.push_str("exec su-exec abox:abox env HOME=/home/abox USER=abox");
         for arg in &self.agent_command {
             s.push_str(" '");
             s.push_str(&sh_escape(arg));
@@ -200,7 +200,7 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("export PATH='/usr/local/bin:/usr/bin:/bin:/sbin'\n"));
         assert!(script.contains("export ABOX_SANDBOX_ID='task-a'\n"));
-        assert!(script.contains("-- env HOME=/home/abox USER=abox '/bin/echo' 'hello'\n"));
+        assert!(script.contains("su-exec abox:abox env HOME=/home/abox USER=abox '/bin/echo' 'hello'\n"));
     }
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_script_execs_via_setpriv() {
+    fn runner_script_execs_via_su_exec() {
         let meta = BootMeta {
             sandbox_id: "t".into(),
             agent_command: vec!["/bin/true".into()],
@@ -346,10 +346,8 @@ mod tests {
         };
         let script = meta.runner_script();
         assert!(
-            script.contains(
-                "exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups --"
-            ),
-            "runner script must exec via setpriv, got:\n{script}"
+            script.contains("exec su-exec abox:abox"),
+            "runner script must exec via su-exec, got:\n{script}"
         );
         assert!(
             script.contains("env HOME=/home/abox USER=abox"),
