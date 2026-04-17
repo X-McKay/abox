@@ -13,16 +13,12 @@ use tokio::sync::Mutex;
 
 fn host_uid() -> u32 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata("/proc/self")
-        .map(|m| m.uid())
-        .unwrap_or(0)
+    std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0)
 }
 
 fn host_gid() -> u32 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata("/proc/self")
-        .map(|m| m.gid())
-        .unwrap_or(0)
+    std::fs::metadata("/proc/self").map(|m| m.gid()).unwrap_or(0)
 }
 
 fn workspace_virtiofsd_args(
@@ -235,17 +231,15 @@ impl VmPort for CloudHypervisorAdapter {
         // (running as uid 1000) can read/write the worktree without privilege issues.
         let uid = host_uid();
         let gid = host_gid();
-        let virtiofsd_args = workspace_virtiofsd_args(&virtiofs_socket, &config.worktree_path, uid, gid);
+        let virtiofsd_args =
+            workspace_virtiofsd_args(&virtiofs_socket, &config.worktree_path, uid, gid);
         let mut cmd = Command::new("virtiofsd");
         for a in &virtiofsd_args {
             cmd.arg(a);
         }
-        let virtiofsd_child = cmd
-            .kill_on_drop(true)
-            .spawn()
-            .context(
-                "Failed to start workspace virtiofsd. Run scripts/bootstrap_vm.sh to install it.",
-            )?;
+        let virtiofsd_child = cmd.kill_on_drop(true).spawn().context(
+            "Failed to start workspace virtiofsd. Run scripts/bootstrap_vm.sh to install it.",
+        )?;
 
         Self::wait_for_socket(&virtiofs_socket, 5000)
             .await

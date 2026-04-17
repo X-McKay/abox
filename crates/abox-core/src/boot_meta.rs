@@ -200,7 +200,8 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("export PATH='/usr/local/bin:/usr/bin:/bin:/sbin'\n"));
         assert!(script.contains("export ABOX_SANDBOX_ID='task-a'\n"));
-        assert!(script.contains("su-exec abox:abox env HOME=/home/abox USER=abox '/bin/echo' 'hello'\n"));
+        assert!(script
+            .contains("su-exec abox:abox env HOME=/home/abox USER=abox '/bin/echo' 'hello'\n"));
     }
 
     #[test]
@@ -369,15 +370,9 @@ mod tests {
             }],
         };
         let script = meta.runner_script();
-        let cp_pos = script
-            .find("cp '/abox-meta/credentials/0'")
-            .expect("cp line missing");
-        let chmod_pos = script
-            .find("chmod 0600")
-            .expect("chmod line missing");
-        let chown_pos = script
-            .find("chown abox:abox")
-            .expect("chown line missing");
+        let cp_pos = script.find("cp '/abox-meta/credentials/0'").expect("cp line missing");
+        let chmod_pos = script.find("chmod 0600").expect("chmod line missing");
+        let chown_pos = script.find("chown abox:abox").expect("chown line missing");
         let exec_pos = script.find("\nexec ").expect("exec line missing");
         assert!(cp_pos < chmod_pos, "cp must precede chmod");
         assert!(chmod_pos < chown_pos, "chmod must precede chown");
@@ -407,10 +402,7 @@ mod tests {
     fn expand_guest_path_rejects_bare_relative() {
         for bad in ["foo", "./foo", "../foo", "~user/foo", "~"] {
             let result = expand_guest_path(bad);
-            assert!(
-                result.is_err(),
-                "expected Err for {bad:?}, got {result:?}"
-            );
+            assert!(result.is_err(), "expected Err for {bad:?}, got {result:?}");
             let msg = format!("{}", result.err().unwrap());
             assert!(
                 msg.contains(bad),

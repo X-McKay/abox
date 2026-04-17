@@ -304,9 +304,8 @@ fn check_rootfs_freshness(vm_dir: &Path) -> Check {
              If you're running from source, re-run 'just rebuild-rootfs' to populate it.",
         );
     }
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return Check::warn(label, "Could not locate running binary; skipping check."),
+    let Ok(exe) = std::env::current_exe() else {
+        return Check::warn(label, "Could not locate running binary; skipping check.");
     };
     let mut dir = exe.parent();
     let (mut init_sh, mut shim_bin): (Option<PathBuf>, Option<PathBuf>) = (None, None);
@@ -314,9 +313,15 @@ fn check_rootfs_freshness(vm_dir: &Path) -> Check {
         let Some(d) = dir else { break };
         let c1 = d.join("guest/init.sh");
         let c2 = d.join("target/x86_64-unknown-linux-musl/release/abox-shim");
-        if c1.exists() && init_sh.is_none() { init_sh = Some(c1); }
-        if c2.exists() && shim_bin.is_none() { shim_bin = Some(c2); }
-        if init_sh.is_some() && shim_bin.is_some() { break; }
+        if c1.exists() && init_sh.is_none() {
+            init_sh = Some(c1);
+        }
+        if c2.exists() && shim_bin.is_none() {
+            shim_bin = Some(c2);
+        }
+        if init_sh.is_some() && shim_bin.is_some() {
+            break;
+        }
         dir = d.parent();
     }
     let (Some(init_sh), Some(shim_bin)) = (init_sh, shim_bin) else {
@@ -329,8 +334,10 @@ fn check_rootfs_freshness(vm_dir: &Path) -> Check {
     let init_hash = sha256_file(&init_sh);
     let shim_hash = sha256_file(&shim_bin);
     let recorded = std::fs::read_to_string(&inputs).unwrap_or_default();
-    let recorded_init = recorded.lines().find_map(|l| l.strip_prefix("init_sh=")).unwrap_or("<missing>");
-    let recorded_shim = recorded.lines().find_map(|l| l.strip_prefix("shim=")).unwrap_or("<missing>");
+    let recorded_init =
+        recorded.lines().find_map(|l| l.strip_prefix("init_sh=")).unwrap_or("<missing>");
+    let recorded_shim =
+        recorded.lines().find_map(|l| l.strip_prefix("shim=")).unwrap_or("<missing>");
     if init_hash == recorded_init && shim_hash == recorded_shim {
         Check::ok(label)
     } else {
