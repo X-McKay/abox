@@ -72,8 +72,21 @@ impl BootMeta {
     /// argument is wrapped in single quotes; embedded single quotes are
     /// escaped using the standard `'\''` shell idiom. Environment
     /// variables are exported before the `exec`.
+    ///
+    /// The script runs as root (inherited from init.sh), stages credentials,
+    /// fixes ownership, then drops privileges via `setpriv` before exec-ing
+    /// the agent. See ADR-004.
     pub fn runner_script(&self) -> String {
         let mut s = String::from("#!/bin/sh\n");
+        s.push_str("set -e\n");
+        // Pre-flight: fail fast if rootfs is missing the abox user.
+        s.push_str(
+            "getent passwd abox >/dev/null 2>&1 || {\n\
+             \x20   echo \"ERROR: guest rootfs is missing the 'abox' user \
+             — rootfs rebuild required\" >&2\n\
+             \x20   exit 69\n\
+             }\n",
+        );
         // Change to the workspace mount so the agent's CWD is the git worktree.
         // Also export ABOX_CWD so the shim can use it directly if getcwd(2)
         // fails (e.g. virtiofs mount points can confuse getcwd on some kernels).
@@ -90,6 +103,11 @@ impl BootMeta {
             s.push_str(&sh_escape(v));
             s.push_str("'\n");
         }
+        // Fix ownership of agent home regardless of rootfs build host uid.
+        // This runs as root (inherited from init.sh) before setpriv drops privs.
+        if !self.credential_files.is_empty() {
+            s.push_str("chown -R abox:abox /home/abox\n");
+        }
         for cred in &self.credential_files {
             let parent = std::path::Path::new(&cred.guest_path)
                 .parent()
@@ -105,8 +123,18 @@ impl BootMeta {
             );
             let _ =
                 writeln!(s, "chmod {} '{}'", sh_escape(&cred.mode), sh_escape(&cred.guest_path));
+            let _ = writeln!(
+                s,
+                "chown abox:abox '{}' '{}'",
+                sh_escape(&parent),
+                sh_escape(&cred.guest_path)
+            );
         }
-        s.push_str("exec");
+        // Drop privileges and exec agent.
+        s.push_str(
+            "exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups \
+             -- env HOME=/home/abox USER=abox",
+        );
         for arg in &self.agent_command {
             s.push_str(" '");
             s.push_str(&sh_escape(arg));
@@ -172,7 +200,7 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("export PATH='/usr/local/bin:/usr/bin:/bin:/sbin'\n"));
         assert!(script.contains("export ABOX_SANDBOX_ID='task-a'\n"));
-        assert!(script.contains("\nexec '/bin/echo' 'hello'\n"));
+        assert!(script.contains("-- env HOME=/home/abox USER=abox '/bin/echo' 'hello'\n"));
     }
 
     #[test]
@@ -287,6 +315,75 @@ mod tests {
         meta.stage(tmp.path()).unwrap();
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
         assert!(runner.contains("cp '/abox-meta/credentials/0'"));
+    }
+
+    #[test]
+    fn runner_script_contains_abox_user_preflight() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(
+            script.contains("getent passwd abox"),
+            "runner script must contain getent passwd abox preflight, got:\n{script}"
+        );
+        assert!(
+            script.contains("exit 69"),
+            "runner script must exit 69 on missing abox user, got:\n{script}"
+        );
+    }
+
+    #[test]
+    fn runner_script_execs_via_setpriv() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(
+            script.contains(
+                "exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups --"
+            ),
+            "runner script must exec via setpriv, got:\n{script}"
+        );
+        assert!(
+            script.contains("env HOME=/home/abox USER=abox"),
+            "runner script must set HOME and USER for the dropped-priv child, got:\n{script}"
+        );
+        assert!(script.contains("'/bin/true'"), "agent command missing, got:\n{script}");
+    }
+
+    #[test]
+    fn runner_script_chowns_staged_credentials() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![StagedCredential {
+                index: 0,
+                guest_path: "/home/abox/.claude/.credentials.json".into(),
+                mode: "0600".into(),
+            }],
+        };
+        let script = meta.runner_script();
+        let cp_pos = script
+            .find("cp '/abox-meta/credentials/0'")
+            .expect("cp line missing");
+        let chmod_pos = script
+            .find("chmod 0600")
+            .expect("chmod line missing");
+        let chown_pos = script
+            .find("chown abox:abox")
+            .expect("chown line missing");
+        let exec_pos = script.find("\nexec ").expect("exec line missing");
+        assert!(cp_pos < chmod_pos, "cp must precede chmod");
+        assert!(chmod_pos < chown_pos, "chmod must precede chown");
+        assert!(chown_pos < exec_pos, "chown must precede exec");
     }
 
     #[test]
