@@ -13,12 +13,12 @@ use tokio::sync::Mutex;
 
 fn host_uid() -> u32 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0)
+    std::fs::metadata("/proc/self").map_or(0, |m| m.uid())
 }
 
 fn host_gid() -> u32 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata("/proc/self").map(|m| m.gid()).unwrap_or(0)
+    std::fs::metadata("/proc/self").map_or(0, |m| m.gid())
 }
 
 fn workspace_virtiofsd_args(
