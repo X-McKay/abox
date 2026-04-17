@@ -60,7 +60,7 @@ egress_port = 18443
 # [guest]
 # [[guest.credential_files]]
 # host = "~/.claude/.credentials.json"
-# guest = "/.claude/.credentials.json"
+# guest = "~/.claude/.credentials.json"
 # mode = "0600"
 #
 # [guest.credential_files.stub]
