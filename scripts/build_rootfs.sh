@@ -114,6 +114,25 @@ fakeroot "$APK_STATIC" --root "$STAGE" --initdb --no-cache --no-scripts add \
 # Clean up the static apk binary — not needed in the guest.
 rm -f "$APK_STATIC"
 
+# ── Create the unprivileged abox user (uid=1000) ───────────────────────
+# The agent command drops to this user via setpriv in runner.sh. PID 1
+# (init.sh) stays root for mounts and socat bridges; only the final exec
+# of the agent runs unprivileged. See ADR-004.
+echo "  creating abox user (uid=1000)..."
+# Fallback: fakeroot chroot adduser is not available on this host (chroot
+# requires real root even under fakeroot). Instead, append the user/group
+# entries directly to the staged rootfs's /etc/passwd, /etc/group, and
+# /etc/shadow, then create the home directory via install. This is
+# equivalent to what Alpine's adduser/addgroup would do inside the chroot.
+printf 'abox:x:1000:1000:Linux User,,,:/home/abox:/bin/bash\n' >> "$STAGE/etc/passwd"
+printf 'abox:x:1000:\n' >> "$STAGE/etc/group"
+# Shadow entry: locked password ('!'), no aging fields set.
+printf 'abox:!::0:::::\n' >> "$STAGE/etc/shadow"
+# Create home dir and .claude subdir with correct ownership markers.
+# fakeroot tracks the fake uid/gid so mkisofs/mke2fs will bake them in.
+fakeroot install -d -m 755 -o 1000 -g 1000 "$STAGE/home/abox"
+fakeroot install -d -m 700 -o 1000 -g 1000 "$STAGE/home/abox/.claude"
+
 # ── Install Claude Code and Codex CLIs via npm ─────────────────────────
 echo "  installing Claude Code and Codex CLIs..."
 # npm install into the staged rootfs's global prefix so the binaries
