@@ -90,11 +90,22 @@ pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<Credential
         let host_path = crate::policy::expand_tilde(&entry.host);
         let path = std::path::Path::new(&host_path);
         if !path.exists() {
-            tracing::debug!(
-                host_path = %host_path,
-                guest_path = %entry.guest,
-                "Host credential file does not exist; skipping (user is not logged in for this tool)"
-            );
+            if entry.stub.is_some() {
+                tracing::warn!(
+                    host_path = %host_path,
+                    guest_path = %entry.guest,
+                    "No host credential file for a stub-bearing entry; agent will \
+                     start without this credential and may fail at first API call. \
+                     Log in to the tool on the host, or unset the entry in \
+                     ~/.abox/config.toml if intentional."
+                );
+            } else {
+                tracing::debug!(
+                    host_path = %host_path,
+                    guest_path = %entry.guest,
+                    "Host credential file does not exist; skipping (optional entry)"
+                );
+            }
             continue;
         }
 
