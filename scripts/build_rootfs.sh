@@ -124,14 +124,23 @@ echo "  creating abox user (uid=1000)..."
 # entries directly to the staged rootfs's /etc/passwd, /etc/group, and
 # /etc/shadow, then create the home directory via install. This is
 # equivalent to what Alpine's adduser/addgroup would do inside the chroot.
-printf 'abox:x:1000:1000:Linux User,,,:/home/abox:/bin/bash\n' >> "$STAGE/etc/passwd"
-printf 'abox:x:1000:\n' >> "$STAGE/etc/group"
-# Shadow entry: locked password ('!'), no aging fields set.
-printf 'abox:!::0:::::\n' >> "$STAGE/etc/shadow"
-# Create home dir and .claude subdir with correct ownership markers.
-# fakeroot tracks the fake uid/gid so mkisofs/mke2fs will bake them in.
-fakeroot install -d -m 755 -o 1000 -g 1000 "$STAGE/home/abox"
-fakeroot install -d -m 700 -o 1000 -g 1000 "$STAGE/home/abox/.claude"
+{
+    printf 'abox:x:1000:1000:Linux User,,,:/home/abox:/bin/bash\n' >> "$STAGE/etc/passwd"
+    printf 'abox:x:1000:\n' >> "$STAGE/etc/group"
+    # Shadow entry: locked password ('!'), no aging fields set.
+    printf 'abox:!::0:::::\n' >> "$STAGE/etc/shadow"
+    # Create home dir and .claude subdir with correct ownership markers.
+    # Note: standalone fakeroot install sessions do not persist virtual ownership
+    # across calls. The -o/-g flags are cosmetic here — mkfs.ext4 -d reads real
+    # stat(). Ownership is correct when the build host uid is 1000 (the common
+    # case). For other build hosts, the runner script fixes ownership at boot
+    # time via chown before dropping privileges. See Task 3 / ADR-004.
+    fakeroot install -d -m 755 -o 1000 -g 1000 "$STAGE/home/abox"
+    fakeroot install -d -m 700 -o 1000 -g 1000 "$STAGE/home/abox/.claude"
+} || {
+    echo "ERROR: failed to create abox user in rootfs stage" >&2
+    exit 1
+}
 
 # ── Install Claude Code and Codex CLIs via npm ─────────────────────────
 echo "  installing Claude Code and Codex CLIs..."
