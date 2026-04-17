@@ -10,6 +10,30 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// Home directory of the unprivileged guest agent user.
+/// Baked into the rootfs by `scripts/build_rootfs.sh`. Referenced as the
+/// target of `~/` expansion in guest paths. See ADR-004.
+pub const GUEST_AGENT_HOME: &str = "/home/abox";
+
+/// Expand a guest-side path against [`GUEST_AGENT_HOME`].
+///
+/// Rules:
+///   * `~/…`  → `/home/abox/…`
+///   * `/…`   → absolute, unchanged
+///   * anything else → [`Err`] with the offending entry in the message
+pub fn expand_guest_path(raw: &str) -> Result<String> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        Ok(format!("{GUEST_AGENT_HOME}/{rest}"))
+    } else if raw.starts_with('/') {
+        Ok(raw.to_string())
+    } else {
+        anyhow::bail!(
+            "invalid guest path {raw:?}: must start with '/' (absolute) or '~/' \
+             (relative to agent home /home/abox)"
+        )
+    }
+}
+
 /// A credential file staged in the boot metadata directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedCredential {
@@ -263,5 +287,40 @@ mod tests {
         meta.stage(tmp.path()).unwrap();
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
         assert!(runner.contains("cp '/abox-meta/credentials/0'"));
+    }
+
+    #[test]
+    fn expand_guest_path_tilde_prefix() {
+        assert_eq!(
+            expand_guest_path("~/.claude/.credentials.json").unwrap(),
+            "/home/abox/.claude/.credentials.json"
+        );
+        assert_eq!(expand_guest_path("~/foo").unwrap(), "/home/abox/foo");
+        assert_eq!(expand_guest_path("~/").unwrap(), "/home/abox/");
+    }
+
+    #[test]
+    fn expand_guest_path_absolute_unchanged() {
+        assert_eq!(expand_guest_path("/etc/foo").unwrap(), "/etc/foo");
+        assert_eq!(
+            expand_guest_path("/home/abox/.claude/.credentials.json").unwrap(),
+            "/home/abox/.claude/.credentials.json"
+        );
+    }
+
+    #[test]
+    fn expand_guest_path_rejects_bare_relative() {
+        for bad in ["foo", "./foo", "../foo", "~user/foo", "~"] {
+            let result = expand_guest_path(bad);
+            assert!(
+                result.is_err(),
+                "expected Err for {bad:?}, got {result:?}"
+            );
+            let msg = format!("{}", result.err().unwrap());
+            assert!(
+                msg.contains(bad),
+                "error message should cite offending entry {bad:?}, got: {msg}"
+            );
+        }
     }
 }
