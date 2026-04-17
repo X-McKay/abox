@@ -23,6 +23,7 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 clap = { version = "4", features = ["derive"] }
 dirs.workspace = true
+sha2 = "0.10"
 ratatui = "0.29"
 crossterm = "0.28"
 

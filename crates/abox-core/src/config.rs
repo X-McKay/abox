@@ -54,11 +54,24 @@ pub struct VmDefaults {
 }
 
 /// Guest VM configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuestConfig {
     /// Credential files to stage in the guest VM.
     #[serde(default)]
     pub credential_files: Vec<CredentialFileEntry>,
+}
+
+impl Default for GuestConfig {
+    fn default() -> Self {
+        Self {
+            credential_files: vec![CredentialFileEntry {
+                host: "~/.claude/.credentials.json".to_string(),
+                guest: "~/.claude/.credentials.json".to_string(),
+                mode: default_credential_mode(),
+                stub: None,
+            }],
+        }
+    }
 }
 
 /// A credential file to place inside the guest VM at boot.
@@ -240,6 +253,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_guest_credential_path_is_tilde_prefixed() {
+        let cfg = GuestConfig::default();
+        let first = cfg.credential_files.first().expect("default must have one credential entry");
+        assert_eq!(
+            first.guest, "~/.claude/.credentials.json",
+            "default guest path should use ~/ form"
+        );
+    }
+
+    #[test]
     fn test_parse_guest_credential_files() {
         let toml_str = r#"
         [guest]
@@ -282,12 +305,20 @@ mod tests {
 
     #[test]
     fn test_parse_empty_guest_section() {
+        // When no [guest] section is present, serde falls back to
+        // GuestConfig::default() which now provides a single Claude credential
+        // entry (the tilde-form path). An explicit empty [[guest.credential_files]]
+        // list in the TOML would still produce zero entries.
         let toml_str = r"
         [vm_defaults]
         memory_mib = 2048
     ";
         let config: AboxConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.guest.credential_files.is_empty());
+        assert_eq!(
+            config.guest.credential_files.len(),
+            1,
+            "absent [guest] section should fall back to the default Claude credential entry"
+        );
     }
 
     #[test]

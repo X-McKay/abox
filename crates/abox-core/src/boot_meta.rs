@@ -10,6 +10,30 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// Home directory of the unprivileged guest agent user.
+/// Baked into the rootfs by `scripts/build_rootfs.sh`. Referenced as the
+/// target of `~/` expansion in guest paths. See ADR-004.
+pub const GUEST_AGENT_HOME: &str = "/home/abox";
+
+/// Expand a guest-side path against [`GUEST_AGENT_HOME`].
+///
+/// Rules:
+///   * `~/…`  → `/home/abox/…`
+///   * `/…`   → absolute, unchanged
+///   * anything else → [`Err`] with the offending entry in the message
+pub fn expand_guest_path(raw: &str) -> Result<String> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        Ok(format!("{GUEST_AGENT_HOME}/{rest}"))
+    } else if raw.starts_with('/') {
+        Ok(raw.to_string())
+    } else {
+        anyhow::bail!(
+            "invalid guest path {raw:?}: must start with '/' (absolute) or '~/' \
+             (relative to agent home /home/abox)"
+        )
+    }
+}
+
 /// A credential file staged in the boot metadata directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedCredential {
@@ -48,8 +72,21 @@ impl BootMeta {
     /// argument is wrapped in single quotes; embedded single quotes are
     /// escaped using the standard `'\''` shell idiom. Environment
     /// variables are exported before the `exec`.
+    ///
+    /// The script runs as root (inherited from init.sh), stages credentials,
+    /// fixes ownership, then drops privileges via `su-exec` before exec-ing
+    /// the agent. See ADR-004.
     pub fn runner_script(&self) -> String {
         let mut s = String::from("#!/bin/sh\n");
+        s.push_str("set -e\n");
+        // Pre-flight: fail fast if rootfs is missing the abox user.
+        s.push_str(
+            "getent passwd abox >/dev/null 2>&1 || {\n\
+             \x20   echo \"ERROR: guest rootfs is missing the 'abox' user \
+             — rootfs rebuild required\" >&2\n\
+             \x20   exit 69\n\
+             }\n",
+        );
         // Change to the workspace mount so the agent's CWD is the git worktree.
         // Also export ABOX_CWD so the shim can use it directly if getcwd(2)
         // fails (e.g. virtiofs mount points can confuse getcwd on some kernels).
@@ -66,6 +103,9 @@ impl BootMeta {
             s.push_str(&sh_escape(v));
             s.push_str("'\n");
         }
+        // Fix ownership of agent home regardless of rootfs build host uid.
+        // Unconditional: even with no credentials, the agent needs a writable $HOME.
+        s.push_str("chown -R abox:abox /home/abox\n");
         for cred in &self.credential_files {
             let parent = std::path::Path::new(&cred.guest_path)
                 .parent()
@@ -81,8 +121,15 @@ impl BootMeta {
             );
             let _ =
                 writeln!(s, "chmod {} '{}'", sh_escape(&cred.mode), sh_escape(&cred.guest_path));
+            // Only chown the file, not the parent directory — chowning an
+            // arbitrary parent (e.g. /etc) would be a privilege escalation risk.
+            let _ = writeln!(s, "chown abox:abox '{}'", sh_escape(&cred.guest_path));
         }
-        s.push_str("exec");
+        // Drop privileges and exec agent. su-exec is Alpine's standard
+        // atomic uid/gid-drop-and-exec tool (like setpriv but available in
+        // BusyBox-based rootfs). It sets uid, gid, and supplementary groups
+        // from /etc/group, then execs the command.
+        s.push_str("exec su-exec abox:abox env HOME=/home/abox USER=abox");
         for arg in &self.agent_command {
             s.push_str(" '");
             s.push_str(&sh_escape(arg));
@@ -148,7 +195,8 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("export PATH='/usr/local/bin:/usr/bin:/bin:/sbin'\n"));
         assert!(script.contains("export ABOX_SANDBOX_ID='task-a'\n"));
-        assert!(script.contains("\nexec '/bin/echo' 'hello'\n"));
+        assert!(script
+            .contains("su-exec abox:abox env HOME=/home/abox USER=abox '/bin/echo' 'hello'\n"));
     }
 
     #[test]
@@ -263,5 +311,98 @@ mod tests {
         meta.stage(tmp.path()).unwrap();
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
         assert!(runner.contains("cp '/abox-meta/credentials/0'"));
+    }
+
+    #[test]
+    fn runner_script_contains_abox_user_preflight() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(
+            script.contains("getent passwd abox"),
+            "runner script must contain getent passwd abox preflight, got:\n{script}"
+        );
+        assert!(
+            script.contains("exit 69"),
+            "runner script must exit 69 on missing abox user, got:\n{script}"
+        );
+    }
+
+    #[test]
+    fn runner_script_execs_via_su_exec() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(
+            script.contains("exec su-exec abox:abox"),
+            "runner script must exec via su-exec, got:\n{script}"
+        );
+        assert!(
+            script.contains("env HOME=/home/abox USER=abox"),
+            "runner script must set HOME and USER for the dropped-priv child, got:\n{script}"
+        );
+        assert!(script.contains("'/bin/true'"), "agent command missing, got:\n{script}");
+    }
+
+    #[test]
+    fn runner_script_chowns_staged_credentials() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![StagedCredential {
+                index: 0,
+                guest_path: "/home/abox/.claude/.credentials.json".into(),
+                mode: "0600".into(),
+            }],
+        };
+        let script = meta.runner_script();
+        let cp_pos = script.find("cp '/abox-meta/credentials/0'").expect("cp line missing");
+        let chmod_pos = script.find("chmod 0600").expect("chmod line missing");
+        let chown_pos = script.find("chown abox:abox").expect("chown line missing");
+        let exec_pos = script.find("\nexec ").expect("exec line missing");
+        assert!(cp_pos < chmod_pos, "cp must precede chmod");
+        assert!(chmod_pos < chown_pos, "chmod must precede chown");
+        assert!(chown_pos < exec_pos, "chown must precede exec");
+    }
+
+    #[test]
+    fn expand_guest_path_tilde_prefix() {
+        assert_eq!(
+            expand_guest_path("~/.claude/.credentials.json").unwrap(),
+            "/home/abox/.claude/.credentials.json"
+        );
+        assert_eq!(expand_guest_path("~/foo").unwrap(), "/home/abox/foo");
+        assert_eq!(expand_guest_path("~/").unwrap(), "/home/abox/");
+    }
+
+    #[test]
+    fn expand_guest_path_absolute_unchanged() {
+        assert_eq!(expand_guest_path("/etc/foo").unwrap(), "/etc/foo");
+        assert_eq!(
+            expand_guest_path("/home/abox/.claude/.credentials.json").unwrap(),
+            "/home/abox/.claude/.credentials.json"
+        );
+    }
+
+    #[test]
+    fn expand_guest_path_rejects_bare_relative() {
+        for bad in ["foo", "./foo", "../foo", "~user/foo", "~"] {
+            let result = expand_guest_path(bad);
+            assert!(result.is_err(), "expected Err for {bad:?}, got {result:?}");
+            let msg = format!("{}", result.err().unwrap());
+            assert!(
+                msg.contains(bad),
+                "error message should cite offending entry {bad:?}, got: {msg}"
+            );
+        }
     }
 }
