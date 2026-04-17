@@ -150,12 +150,34 @@ exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups \
   which is the only window where both `/abox-meta/` and the agent user's
   home are writable. After `chown`, the stub belongs to `abox:abox`.
 
-### 4. Config default — `crates/abox-core/src/config.rs`
+### 4. Config path semantics and default — `crates/abox-core/src/config.rs` + `crates/abox-core/src/boot_meta.rs`
 
-The default value for `guest.credential_files[0].guest` changes from
-`/.claude/.credentials.json` to `/home/abox/.claude/.credentials.json`.
-Existing user configs that override `guest =` explicitly are not
-rewritten; release notes call out the required update.
+The `guest` field in `[[guest.credential_files]]` gains the same `~`
+expansion semantics the `host` field already has — with `~` resolving
+against the guest agent's home rather than the host user's. A single
+compiled-in constant `GUEST_AGENT_HOME = "/home/abox"` lives beside the
+runner-script generator.
+
+```toml
+[[guest.credential_files]]
+host  = "~/.claude/.credentials.json"    # expands against host user's home
+guest = "~/.claude/.credentials.json"    # expands against /home/abox
+```
+
+Expansion happens once, when the config is consumed to generate the
+runner script (not at deserialisation time — the config model stays a
+plain data struct). A small helper in `boot_meta.rs` normalises the
+path:
+
+- `~/…` → `/home/abox/…`
+- `/…` → unchanged (users can still pin anywhere they want)
+- Anything else → rejected with `ConfigError` citing the offending entry
+
+The default changes from `/.claude/.credentials.json` to
+`~/.claude/.credentials.json`. Fresh installs and users who inherited
+the old default are handled transparently; the only migration case left
+is users who explicitly overrode `guest` to the literal prior default
+string, which is called out in release notes.
 
 ### 5. Doctor check — `crates/abox-cli/src/commands/doctor.rs`
 
@@ -199,6 +221,7 @@ meta virtiofs ─► /abox-meta/credentials/0        (root:root in guest)
 | abox user missing from `/etc/passwd` | `setpriv` exits with `user 'abox': no such user`, non-zero; sandbox exits with rc | Per-sandbox; no privilege leak |
 | Host uid not 1000 and uid-map somehow missing | Guest sees worktree files as the literal host uid; agent (uid=1000) gets EACCES on first read | Visible in tests immediately; doctor check prevents silent mis-config |
 | Config override still points at `/.claude/.credentials.json` | Stub staged to the old path; agent does not find it, auth fails with a clear error early | User-addressable via release notes; no stability surprise |
+| Guest path uses unsupported form (e.g. `./foo` or `~user/foo`) | `ConfigError` at config-consumption time with the offending entry cited; sandbox never boots | Pre-boot; clear error surface |
 
 ## Testing
 
@@ -210,7 +233,14 @@ meta virtiofs ─► /abox-meta/credentials/0        (root:root in guest)
   - Asserts the `exec` line is exactly
     `exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups -- env HOME=/home/abox USER=abox <cmd>`.
   - Asserts ordering invariant: mkdir → cp → chmod → chown → exec setpriv.
-- `config::GuestConfig` default roundtrip covers the new guest path.
+- `boot_meta::expand_guest_path()` (new helper):
+  - `~/.claude/.credentials.json` → `/home/abox/.claude/.credentials.json`
+  - `~/foo` → `/home/abox/foo`, `~/` → `/home/abox/`
+  - `/etc/foo` → `/etc/foo` (unchanged)
+  - `./foo`, `foo`, `~user/foo` → `Err(ConfigError)` with offending
+    entry in the message.
+- `config::GuestConfig` default roundtrip: the deserialised default now
+  carries `guest = "~/.claude/.credentials.json"`.
 - `cloud_hypervisor`: table test that the virtiofsd `Command` for the
   workspace share includes both map flags with the process's real uid/gid,
   and that meta/status commands do not include map flags.
@@ -244,15 +274,17 @@ problems before the full soak re-run):
 
 ## Migration
 
-- **Fresh installs:** no user-visible migration — `just bootstrap-vm`
-  builds the new rootfs; default config points at the new guest path.
-- **Existing installs with default config:** run `just rebuild-rootfs`.
-  Config default is updated automatically on first read (no cached
-  override exists for `guest.credential_files`).
-- **Existing installs with custom `credential_files` in config:** release
-  notes document the one-line change. `abox doctor` does not currently
-  inspect config for this field; adding a warning is a post-v0.1.0
-  enhancement if the class of user warrants it.
+- **Fresh installs:** zero user-visible migration. `just bootstrap-vm`
+  builds the new rootfs; default config uses `~/.claude/.credentials.json`,
+  which expands to the agent-user home inside the guest.
+- **Existing installs inheriting the default:** `just rebuild-rootfs`
+  and pull. The default moves with the codebase.
+- **Existing installs with an explicit prior-default override**
+  (`guest = "/.claude/.credentials.json"` written verbatim into
+  `~/.abox/config.toml`): one-line edit to
+  `guest = "~/.claude/.credentials.json"`. Called out in release notes.
+  `abox doctor` adding a config-level warning for this narrow case is
+  a post-v0.1.0 enhancement, not a blocker.
 
 ## Rollout
 

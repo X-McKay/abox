@@ -71,11 +71,26 @@ Mechanism:
    entries for the target user. `HOME` and `USER` are injected via `env`
    because `setpriv` deliberately does not touch the environment.
 
-4. **Credential stub default path.** `crates/abox-core/src/config.rs`
-   default for `guest.credential_files[].guest` migrates from
-   `/.claude/.credentials.json` to `/home/abox/.claude/.credentials.json`.
-   Users who have written their own `~/.abox/config.toml` with an explicit
-   `guest =` override must update it; release notes call this out.
+4. **Credential stub path — tilde expansion symmetric with `host`.** The
+   `host` field in `[[guest.credential_files]]` already expands `~` against
+   the host user's home. The `guest` field gains the same convention: a
+   `~/` prefix expands against the guest agent's home (compiled-in
+   constant `GUEST_AGENT_HOME = "/home/abox"`). This keeps the config
+   self-documenting and host-independent. Expansion rules:
+   - `~/…` → `/home/abox/…`
+   - `/…` → absolute, unchanged (explicit overrides remain possible)
+   - Anything else → rejected at config-load time with a clear error
+
+   The default migrates from the literal absolute path
+   `/.claude/.credentials.json` to the symmetric form
+   `~/.claude/.credentials.json`. Fresh installs require no action. Users
+   who inherited the prior default by never writing their own config are
+   transparently updated on first read. Users who explicitly overrode the
+   `guest` field to the literal prior default need to edit one line; this
+   is flagged in release notes. No compat shim — v0.1.0 is the first
+   tagged release, so there is no external install base to migrate, and
+   rewrite-with-warning code is the kind of thing that outlives its
+   usefulness.
 
 ## Consequences
 
@@ -98,10 +113,12 @@ Mechanism:
   `guest/init.sh` inputs (hashes), so every existing install must
   `just rebuild-rootfs` after pulling. `just check-rootfs` surfaces the
   staleness. This is an already-documented workflow but still friction.
-- **Config migration for users with custom `credential_files`.** Anyone who
-  has pinned `guest = "/.claude/.credentials.json"` in `~/.abox/config.toml`
-  must change it to `/home/abox/.claude/.credentials.json` or their stub
-  won't be visible to the agent. The default handles fresh installs.
+- **Config migration — narrow case only.** Users who explicitly pinned
+  `guest = "/.claude/.credentials.json"` in `~/.abox/config.toml` need to
+  change the field to `~/.claude/.credentials.json` (or an equivalent
+  absolute path under `/home/abox/`). Users who inherited the default
+  and users writing a fresh config require no action. Release notes
+  flag the narrow case explicitly.
 - **virtiofsd `--uid-map` coverage.** Present in virtiofsd 1.10+ (the
   version shipped in `~/.abox/vm/virtiofsd`). Older forks of virtiofsd
   without the flag are incompatible; `abox doctor` should verify.
