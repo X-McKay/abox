@@ -104,6 +104,8 @@ header_template = "Bearer {value}"
 domain = "api.openai.com"
 inject_header = "Authorization"
 env_var = "OPENAI_API_KEY"
+credential_file = "~/.codex/auth.json"
+json_path = "tokens.access_token"
 header_template = "Bearer {value}"
 
 [[egress]]
