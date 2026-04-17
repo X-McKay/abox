@@ -75,6 +75,7 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
     let vm_dir = config.state_dir.join("vm");
     checks.push(check_vm_artifact(&vm_dir, "cloud-hypervisor", "VMM binary"));
     checks.push(check_vm_artifact(&vm_dir, "virtiofsd", "virtiofs daemon"));
+    checks.push(check_virtiofsd_uid_map(&vm_dir));
     checks.push(check_vm_artifact(&vm_dir, "vmlinux", "guest kernel"));
     checks.push(check_vm_artifact(&vm_dir, "rootfs.raw", "guest root filesystem"));
 
@@ -223,6 +224,36 @@ fn check_socket_path_length(config: &AboxConfig) -> Check {
         Check::ok_with(
             "Runtime dir socket path length",
             format!("{} (worst-case ~{worst_case} bytes, limit 108)", runtime.display()),
+        )
+    }
+}
+
+fn check_virtiofsd_uid_map(vm_dir: &Path) -> Check {
+    let label = "virtiofsd supports --uid-map";
+    let bin = vm_dir.join("virtiofsd");
+    if !bin.exists() {
+        return Check::warn(label, "virtiofsd not yet installed — run 'abox init' first.");
+    }
+    let output = match std::process::Command::new(&bin).arg("--help").output() {
+        Ok(o) => o,
+        Err(e) => {
+            return Check::fail(label, format!("Failed to run virtiofsd --help: {e}"));
+        }
+    };
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    if combined.contains("--uid-map") {
+        Check::ok(label)
+    } else {
+        Check::fail(
+            label,
+            format!(
+                "The shipped virtiofsd at {} does not advertise --uid-map.\n\
+                 abox uses --uid-map to remap workspace file ownership into the\n\
+                 guest agent user (see ADR-004). Requires virtiofsd >= 1.10.\n\
+                 Re-run 'just bootstrap-vm' to refresh the binary.",
+                bin.display()
+            ),
         )
     }
 }
