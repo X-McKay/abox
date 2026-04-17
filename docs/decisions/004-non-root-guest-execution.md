@@ -59,8 +59,9 @@ Mechanism:
    only root touches them inside the guest.
 
 3. **Runner script (`crates/abox-core/src/boot_meta.rs`).** The generated
-   `runner.sh` stages credentials as root (`cp`, `chmod`, then
-   `chown abox:abox`) and ends with:
+   `runner.sh` begins with a `getent passwd abox` pre-flight check,
+   stages credentials as root (`cp`, `chmod`, then `chown abox:abox`),
+   and ends with:
 
        exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups \
            -- env HOME=/home/abox USER=abox <user-command>
@@ -69,7 +70,11 @@ Mechanism:
    changes followed by `execve`. `--clear-groups --init-groups` wipes
    inherited supplementary groups and repopulates from `/etc/group`
    entries for the target user. `HOME` and `USER` are injected via `env`
-   because `setpriv` deliberately does not touch the environment.
+   because `setpriv` deliberately does not touch the environment. The
+   pre-flight check exits with a distinctive rc (69, `EX_UNAVAILABLE`)
+   and a clear remediation message if the rootfs is missing the `abox`
+   user, rather than surfacing the opaque `setpriv: no such user`
+   stderr line.
 
 4. **Credential stub path — tilde expansion symmetric with `host`.** The
    `host` field in `[[guest.credential_files]]` already expands `~` against
@@ -90,7 +95,23 @@ Mechanism:
    is flagged in release notes. No compat shim — v0.1.0 is the first
    tagged release, so there is no external install base to migrate, and
    rewrite-with-warning code is the kind of thing that outlives its
-   usefulness.
+   usefulness. `templates/config.example.toml` is updated in lockstep so
+   commented-out snippets show the new form.
+
+5. **Onboarding hygiene checks.** Two `abox doctor` additions and one
+   `abox run` warning lift common "silent failure" classes into clear,
+   pre-boot signals:
+   - `virtiofsd --uid-map` capability check (required for the uid
+     remapping above).
+   - Rootfs freshness check — compares recorded input hashes in
+     `~/.abox/vm/rootfs.raw.inputs` against live `guest/init.sh` and
+     shim hashes; reports red with the rebuild command when they drift.
+     Skipped (neutral) for released binaries that have no source tree
+     on disk, where the check is moot.
+   - Missing-host-credential warning — `abox run` logs at `warn` when a
+     `[[guest.credential_files]]` entry has a `stub` but no host file,
+     so first-time users understand why auth is going to fail instead
+     of debugging the resulting 401 inside an SSE stream.
 
 ## Consequences
 

@@ -134,6 +134,13 @@ to:
 
 ```sh
 set -e
+# Pre-flight: belt-and-suspenders assertion that the rootfs was built
+# with the abox user. If absent, exit with a clear message rather than
+# the stderr-only 'setpriv: user abox: no such user' noise.
+getent passwd abox >/dev/null 2>&1 || {
+    echo "ERROR: guest rootfs is missing the 'abox' user — rootfs rebuild required" >&2
+    exit 69
+}
 mkdir -p '/home/abox/.claude'
 cp '/abox-meta/credentials/0' '/home/abox/.claude/.credentials.json'
 chmod 0600 '/home/abox/.claude/.credentials.json'
@@ -149,6 +156,12 @@ exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups \
 - Credential staging runs while still root (inherited from init.sh),
   which is the only window where both `/abox-meta/` and the agent user's
   home are writable. After `chown`, the stub belongs to `abox:abox`.
+- The `getent passwd abox` pre-flight covers the narrow case where the
+  rootfs hash still matches `check-rootfs` expectations but the user
+  somehow wasn't created (e.g., fakeroot chroot silently dropped an
+  error during build). Exit code 69 (`EX_UNAVAILABLE` from
+  `<sysexits.h>`) gives a distinctive rc so external runners can tell
+  this apart from agent failures.
 
 ### 4. Config path semantics and default — `crates/abox-core/src/config.rs` + `crates/abox-core/src/boot_meta.rs`
 
@@ -179,14 +192,59 @@ the old default are handled transparently; the only migration case left
 is users who explicitly overrode `guest` to the literal prior default
 string, which is called out in release notes.
 
-### 5. Doctor check — `crates/abox-cli/src/commands/doctor.rs`
+### 5. Doctor checks — `crates/abox-cli/src/commands/doctor.rs`
 
-Add one verification: run `virtiofsd --help` once and grep for
-`--uid-map`. If absent, report a red check with text:
+Add **two** verifications.
+
+**5a. virtiofsd `--uid-map` capability.** Run `virtiofsd --help` once and
+grep for `--uid-map`. If absent, report a red check with text:
 
     virtiofsd must support --uid-map (requires virtiofsd >= 1.10).
     The shipped binary at ~/.abox/vm/virtiofsd is older. Run
     'just bootstrap-vm' to refresh.
+
+**5b. Rootfs freshness.** Read `~/.abox/vm/rootfs.raw.inputs`
+(written by `scripts/build_rootfs.sh`) and compare the recorded
+`init_sh` and `shim` SHA-256s against the live hashes of
+`guest/init.sh` and the embedded shim binary found next to the running
+`abox` binary. If either mismatches, or if the `.inputs` sidecar file
+is missing, report a red check with text:
+
+    rootfs.raw is stale or unverifiable — run 'just rebuild-rootfs' to
+    rebuild with the current abox user and runner.
+
+When the abox binary is installed away from its source tree (no
+`guest/init.sh` or shim on disk next to the binary), skip this check
+with a neutral status rather than failing — released binaries are
+expected not to carry build inputs. The scope of this check is the
+"developer running from source" flow, which is the only path where
+stale-rootfs friction actually bites new contributors.
+
+### 6. Host-side onboarding hygiene
+
+**6a. Template update.** `templates/config.example.toml` currently
+shows `guest = "/.claude/.credentials.json"` in the
+`[[guest.credential_files]]` example block. Update to
+`guest = "~/.claude/.credentials.json"` so the commented-out example
+a user copies into their real config matches the new semantics.
+
+**6b. Missing-host-credentials warning.** In `sandbox.rs`
+(`stage_credential_files` path), today a host credential file that does
+not exist is logged at `debug` level and silently skipped. For first-
+time users who haven't logged into Claude on the host, this manifests
+as an opaque 401 inside the SSE stream mid-agent-run. Change the log
+level to `warn` **only when the entry has a configured `stub`** (the
+signal that the file is semantically required for auth, not optional).
+Warning text:
+
+    No host credential file at <path> for guest target <path>;
+    agent will start without this credential and may fail at first
+    API call. Log in to the tool on the host, or unset the entry
+    in ~/.abox/config.toml if intentional.
+
+Emitted once per absent entry, at sandbox start. Does not block the
+run — a user testing without credentials for a no-auth command like
+`claude --version` should still succeed.
 
 ## Data flow
 
@@ -218,7 +276,9 @@ meta virtiofs ─► /abox-meta/credentials/0        (root:root in guest)
 | `adduser` in rootfs build fails | `just rebuild-rootfs` exits non-zero with fakeroot error | Build-time only; no bad rootfs shipped |
 | virtiofsd rejects `--uid-map` (too old) | `abox doctor` fails with the message above, before any sandbox boot | Pre-run check; user sees actionable message |
 | `setpriv` missing from `$PATH` in runner | Runner exits non-zero; sandbox reports rc; stderr contains `setpriv: command not found` | Per-sandbox; no privilege leak |
-| abox user missing from `/etc/passwd` | `setpriv` exits with `user 'abox': no such user`, non-zero; sandbox exits with rc | Per-sandbox; no privilege leak |
+| abox user missing from `/etc/passwd` | `getent passwd abox` pre-flight in runner exits 69 with "guest rootfs is missing the 'abox' user — rebuild required"; `setpriv` never runs | Per-sandbox; distinctive exit code; clear remediation |
+| Rootfs hash drift from current `guest/init.sh` or shim | `abox doctor` check 5b reports red with "rootfs.raw is stale" and the rebuild command | Pre-run; surfaced before the user hits the pre-flight failure above |
+| Host credential file missing when `stub` is set | `warn` log at sandbox start naming the missing path and recommending `claude login` or entry removal | Non-fatal; agent starts and may fail at first API call |
 | Host uid not 1000 and uid-map somehow missing | Guest sees worktree files as the literal host uid; agent (uid=1000) gets EACCES on first read | Visible in tests immediately; doctor check prevents silent mis-config |
 | Config override still points at `/.claude/.credentials.json` | Stub staged to the old path; agent does not find it, auth fails with a clear error early | User-addressable via release notes; no stability surprise |
 | Guest path uses unsupported form (e.g. `./foo` or `~user/foo`) | `ConfigError` at config-consumption time with the offending entry cited; sandbox never boots | Pre-boot; clear error surface |
@@ -244,6 +304,15 @@ meta virtiofs ─► /abox-meta/credentials/0        (root:root in guest)
 - `cloud_hypervisor`: table test that the virtiofsd `Command` for the
   workspace share includes both map flags with the process's real uid/gid,
   and that meta/status commands do not include map flags.
+- `boot_meta::runner_script()` contains the `getent passwd abox` pre-flight
+  before the credential-staging block; exits 69 on failure.
+- `sandbox::stage_credential_files` emits a `warn`-level log when a
+  `stub`-bearing entry's host file is missing; no warn when the entry
+  has no `stub` (user intentionally forwarding an optional file).
+- `doctor` rootfs-freshness check unit test: stub a fake
+  `rootfs.raw.inputs` with mismatching hashes and assert the check
+  reports red; with matching hashes assert green; with missing inputs
+  file but no source tree on disk, assert neutral/skip.
 
 **Integration (microVM; `just e2e-vm`):**
 
