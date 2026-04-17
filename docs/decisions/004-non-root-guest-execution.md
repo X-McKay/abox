@@ -63,18 +63,17 @@ Mechanism:
    stages credentials as root (`cp`, `chmod`, then `chown abox:abox`),
    and ends with:
 
-       exec setpriv --reuid=abox --regid=abox --clear-groups --init-groups \
-           -- env HOME=/home/abox USER=abox <user-command>
+       exec su-exec abox:abox env HOME=/home/abox USER=abox <user-command>
 
-   `setpriv` is the util-linux primitive for atomic uid/gid/capability
-   changes followed by `execve`. `--clear-groups --init-groups` wipes
-   inherited supplementary groups and repopulates from `/etc/group`
-   entries for the target user. `HOME` and `USER` are injected via `env`
-   because `setpriv` deliberately does not touch the environment. The
-   pre-flight check exits with a distinctive rc (69, `EX_UNAVAILABLE`)
-   and a clear remediation message if the rootfs is missing the `abox`
-   user, rather than surfacing the opaque `setpriv: no such user`
-   stderr line.
+   `su-exec` is Alpine's standard atomic uid/gid-drop-and-exec tool —
+   equivalent to util-linux's `setpriv` but available in BusyBox-based
+   rootfs (Alpine's BusyBox `setpriv` only supports capabilities, not
+   `--reuid`/`--regid`). `su-exec` sets uid, gid, and supplementary
+   groups from `/etc/group`, then execs the command. `HOME` and `USER`
+   are injected via `env` because `su-exec` does not touch the
+   environment. The pre-flight check exits with a distinctive rc (69,
+   `EX_UNAVAILABLE`) and a clear remediation message if the rootfs is
+   missing the `abox` user.
 
 4. **Credential stub path — tilde expansion symmetric with `host`.** The
    `host` field in `[[guest.credential_files]]` already expands `~` against
@@ -147,9 +146,10 @@ Mechanism:
   uid to guest 1000. Multi-user hosts or shared-worktree scenarios are
   not supported. Neither were they under the root-in-guest design, so
   this is a carry-forward limitation, not a regression.
-- **`setpriv` failure modes.** If the rootfs is ever built without `abox`
-  in `/etc/passwd`, `setpriv` exits non-zero with a clear error before
-  `exec`. Not silent. Covered by unit tests on the runner-script shape.
+- **`su-exec` failure modes.** If the rootfs is ever built without `abox`
+  in `/etc/passwd`, the `getent passwd abox` pre-flight exits with rc 69
+  before `su-exec` runs. Not silent. Covered by unit tests on the
+  runner-script shape.
 
 ## Alternatives Considered
 
@@ -166,11 +166,19 @@ Mechanism:
   depth concern, and (c) it doesn't generalise to Codex or other agents
   with their own root checks.
 
-- **`su -l abox -c …` instead of `setpriv`.** Works, but `su` wraps PAM
+- **`su -l abox -c …` instead of `su-exec`.** Works, but `su` wraps PAM
   and shell setup, introduces a login shell between init and the agent,
   and has historically been a source of subtle bugs around signal
-  handling, tty allocation, and environment inheritance. `setpriv` is the
+  handling, tty allocation, and environment inheritance. `su-exec` is the
   sharper tool for this job.
+
+- **util-linux `setpriv` instead of `su-exec`.** The original design
+  specified `setpriv --reuid=abox --regid=abox --clear-groups --init-groups`.
+  Alpine's BusyBox `setpriv` only supports capability manipulation, not
+  uid/gid switching. Installing `util-linux-misc` would provide the full
+  `setpriv`, but `su-exec` is lighter (single 10KB binary), is the
+  standard Alpine/Docker privilege-drop primitive, and achieves the same
+  atomic uid/gid-switch-and-exec.
 
 - **Run init.sh itself as non-root.** Would require delegating mounts and
   socat bridges to the kernel / a pre-init stage. Substantially more

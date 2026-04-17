@@ -104,10 +104,8 @@ impl BootMeta {
             s.push_str("'\n");
         }
         // Fix ownership of agent home regardless of rootfs build host uid.
-        // This runs as root (inherited from init.sh) before su-exec drops privs.
-        if !self.credential_files.is_empty() {
-            s.push_str("chown -R abox:abox /home/abox\n");
-        }
+        // Unconditional: even with no credentials, the agent needs a writable $HOME.
+        s.push_str("chown -R abox:abox /home/abox\n");
         for cred in &self.credential_files {
             let parent = std::path::Path::new(&cred.guest_path)
                 .parent()
@@ -123,12 +121,9 @@ impl BootMeta {
             );
             let _ =
                 writeln!(s, "chmod {} '{}'", sh_escape(&cred.mode), sh_escape(&cred.guest_path));
-            let _ = writeln!(
-                s,
-                "chown abox:abox '{}' '{}'",
-                sh_escape(&parent),
-                sh_escape(&cred.guest_path)
-            );
+            // Only chown the file, not the parent directory — chowning an
+            // arbitrary parent (e.g. /etc) would be a privilege escalation risk.
+            let _ = writeln!(s, "chown abox:abox '{}'", sh_escape(&cred.guest_path));
         }
         // Drop privileges and exec agent. su-exec is Alpine's standard
         // atomic uid/gid-drop-and-exec tool (like setpriv but available in
