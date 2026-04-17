@@ -76,6 +76,17 @@ pub fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<CredentialToStage> {
     let mut result = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
+        let guest_expanded = match crate::boot_meta::expand_guest_path(&entry.guest) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    guest_path = %entry.guest,
+                    error = %e,
+                    "Invalid guest path in credential_files; skipping entry"
+                );
+                continue;
+            }
+        };
         let host_path = crate::policy::expand_tilde(&entry.host);
         let path = std::path::Path::new(&host_path);
         if !path.exists() {
@@ -104,7 +115,7 @@ pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<Credential
             };
             result.push(CredentialToStage {
                 index,
-                guest_path: entry.guest.clone(),
+                guest_path: guest_expanded.clone(),
                 mode: entry.mode.clone(),
                 content,
             });
@@ -114,7 +125,7 @@ pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<Credential
                 Ok(content) => {
                     result.push(CredentialToStage {
                         index,
-                        guest_path: entry.guest.clone(),
+                        guest_path: guest_expanded.clone(),
                         mode: entry.mode.clone(),
                         content,
                     });
@@ -657,6 +668,18 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
 mod tests {
     use super::*;
     use crate::config::CredentialFileEntry;
+
+    #[test]
+    fn stage_expands_tilde_in_guest_path() {
+        let expanded = crate::boot_meta::expand_guest_path("~/.claude/.credentials.json").unwrap();
+        assert_eq!(expanded, "/home/abox/.claude/.credentials.json");
+    }
+
+    #[test]
+    fn stage_rejects_invalid_guest_path() {
+        let result = crate::boot_meta::expand_guest_path("foo/bar");
+        assert!(result.is_err());
+    }
 
     #[test]
     fn toml_to_json_string() {
