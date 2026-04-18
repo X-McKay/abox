@@ -82,16 +82,12 @@ pub fn diagnose_kvm() -> KvmStatus {
 
 /// Check `/proc/cpuinfo` for vmx (Intel) or svm (AMD) flags.
 fn has_cpu_virt_extensions() -> bool {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .map(|s| s.contains(" vmx") || s.contains(" svm"))
-        .unwrap_or(false)
+    std::fs::read_to_string("/proc/cpuinfo").is_ok_and(|s| s.contains(" vmx") || s.contains(" svm"))
 }
 
 /// Detect WSL2 via `/proc/version`.
 fn is_wsl2() -> bool {
-    std::fs::read_to_string("/proc/version")
-        .map(|s| s.to_lowercase().contains("microsoft"))
-        .unwrap_or(false)
+    std::fs::read_to_string("/proc/version").is_ok_and(|s| s.to_lowercase().contains("microsoft"))
 }
 
 /// Detect container environment (Docker, Podman, etc.).
@@ -102,8 +98,7 @@ fn is_container() -> bool {
     }
     // cgroup-based detection: look for container-specific cgroup paths.
     std::fs::read_to_string("/proc/1/cgroup")
-        .map(|s| s.contains("/docker/") || s.contains("/lxc/") || s.contains("/kubepods/"))
-        .unwrap_or(false)
+        .is_ok_and(|s| s.contains("/docker/") || s.contains("/lxc/") || s.contains("/kubepods/"))
 }
 
 #[cfg(test)]
