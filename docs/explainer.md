@@ -231,7 +231,7 @@ The `env_var` and `credential_file` fields are both read from the **host**, not 
 [guest]
 [[guest.credential_files]]
 host = "~/.claude/.credentials.json"
-guest = "/.claude/.credentials.json"
+guest = "~/.claude/.credentials.json"
 
 [guest.credential_files.stub.claudeAiOauth]
 accessToken = "abox-proxy-managed"
@@ -275,7 +275,7 @@ The stub is written into the guest filesystem at boot with placeholder values. T
 
 ## 10. The bootstrap script: `bootstrap_vm.sh`
 
-**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles a 96 MiB ext4 rootfs containing busybox + socat + the shim + a guest init script. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
+**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles an ext4 rootfs containing busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. The rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). CLI versions are pinned in `build_rootfs.sh` for reproducible builds. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
 
 **Why it's bash and not Rust:** Bootstrapping is a one-time operation per machine. Bash is universal, easy to read, and avoids the chicken-and-egg problem of "you need cargo to build the bootstrap, but the bootstrap installs cargo's musl target". The `vendor/` cache and SHA256 checksums make it idempotent and recoverable from network blips. The 200 lines are ~50% comments and pinned-version constants — the actual logic is small.
 
@@ -356,10 +356,15 @@ abox run --task fix-auth -- claude
 2. Print "abox guest init: online".
 3. `socat UNIX-LISTEN:/run/abox-proxy.sock,fork VSOCK-CONNECT:2:5000 &` — starts the unix↔vsock bridge.
 4. `if sh /abox-meta/runner.sh; then RC=0; else RC=$?; fi`
-5. Inside `runner.sh`: `cd /workspace; ABOX_CWD=/workspace ABOX_SANDBOX_ID=fix-auth exec claude`
-6. `claude` runs. Eventually it exits with some code N.
-7. `echo $N > /abox-status/exit-code; sync`
-8. `kill $SOCAT_PID; poweroff -f`
+5. Inside `runner.sh` (runs as root initially):
+   - Pre-flight: `getent passwd abox` — exits 69 if the rootfs is missing the unprivileged user.
+   - Stages credential stubs from `/abox-meta/credentials/` into `/home/abox/.claude/` (or `.codex/`), chowns them to `abox:abox`.
+   - Fixes `/home/abox` ownership via `chown -R abox:abox /home/abox`.
+   - Drops privileges: `exec su-exec abox:abox env HOME=/home/abox USER=abox claude …`
+6. The agent runs as `uid=1000(abox)`, not root. The workspace virtiofs share is launched with `--uid-map=:1000:<host_uid>:1:` so host-owned worktree files appear as uid 1000 in the guest and agent-created files land on the host owned by the host user. See ADR-004.
+7. Eventually the agent exits with some code N.
+8. `echo $N > /abox-status/exit-code; sync`
+9. `kill $SOCAT_PID; poweroff -f`
 
 **Stage 8: Each guest `git`/`gh`/`aws` invocation** (while the agent is running) goes through the shim → vsock → bridge → policy → exec → audit → response cycle described in section 7. Console output goes through the kernel's serial driver → `--console file=...` → console tailer → orchestrator's stdout.
 
