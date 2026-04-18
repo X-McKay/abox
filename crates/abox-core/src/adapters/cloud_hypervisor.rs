@@ -136,7 +136,7 @@ impl CloudHypervisorAdapter {
             if start.elapsed().as_millis() > u128::from(timeout_ms) {
                 bail!("Timed out waiting for socket: {}", path.display());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 }
@@ -176,6 +176,8 @@ impl VmPort for CloudHypervisorAdapter {
                 (self.runtime_dir.join(ws), self.runtime_dir.join(mt), self.runtime_dir.join(st))
             }
         };
+
+        let t_meta = std::time::Instant::now();
 
         // Stage boot metadata into meta_dir.
         let staged_creds: Vec<crate::boot_meta::StagedCredential> = config
@@ -217,19 +219,29 @@ impl VmPort for CloudHypervisorAdapter {
         // and the guest can truncate it without permission errors.
         let _ = std::fs::write(status_dir.join("exit-code"), "");
 
+        tracing::info!(
+            sandbox_id = %config.id,
+            elapsed_ms = t_meta.elapsed().as_millis() as u64,
+            "boot metadata staged"
+        );
+
         // Clean up any stale sockets/files from a previous run
         for sock in [&virtiofs_socket, &meta_socket, &status_socket, &api_socket, &vsock_socket] {
             let _ = std::fs::remove_file(sock);
         }
         let _ = std::fs::remove_file(&console_socket);
 
-        // ── Step 1: Start workspace virtiofsd ──
-        // virtiofsd serves the git worktree to the VM via the vhost-user protocol.
-        // --sandbox=namespace confines virtiofsd to its shared directory via Linux
-        // user namespaces (required for --uid-map/--gid-map and for security).
-        // --cache=never avoids consuming host page cache (important at scale).
-        // --uid-map / --gid-map remap host uid/gid to guest uid 1000 so the agent
-        // (running as uid 1000) can read/write the worktree without privilege issues.
+        // ── Step 1: Start all three virtiofsd instances ──
+        // Spawn all three processes up front, then wait for their sockets in
+        // parallel via tokio::join!(). This collapses ~3× the single-socket
+        // wait time down to ~1× (saving ~100-200ms on the critical path).
+        let t_vfs = std::time::Instant::now();
+
+        // Workspace virtiofsd: serves the git worktree to the VM.
+        // --sandbox=namespace confines virtiofsd via Linux user namespaces
+        // (required for --uid-map/--gid-map and for security).
+        // --cache=never avoids host page-cache pressure at scale.
+        // --uid-map / --gid-map remap host uid/gid → guest uid 1000.
         let uid = host_uid();
         let gid = host_gid();
         let virtiofsd_args =
@@ -242,14 +254,7 @@ impl VmPort for CloudHypervisorAdapter {
             "Failed to start workspace virtiofsd. Run scripts/bootstrap_vm.sh to install it.",
         )?;
 
-        Self::wait_for_socket(&virtiofs_socket, 5000)
-            .await
-            .context("workspace virtiofsd socket did not appear within 5 seconds")?;
-
-        // ── Step 1b: Start meta virtiofsd ──
-        // Note: virtiofsd 1.x removed the --readonly flag; the guest only reads
-        // this mount in practice.
-        // Defaults: --sandbox=namespace (confines to shared-dir), --seccomp=kill.
+        // Meta virtiofsd (read-only in practice; serves boot metadata).
         let meta_virtiofsd_child = Command::new("virtiofsd")
             .arg(format!("--socket-path={}", meta_socket.display()))
             .arg(format!("--shared-dir={}", meta_dir.display()))
@@ -258,14 +263,7 @@ impl VmPort for CloudHypervisorAdapter {
             .spawn()
             .context("Failed to start meta virtiofsd")?;
 
-        Self::wait_for_socket(&meta_socket, 5000)
-            .await
-            .context("meta virtiofsd socket did not appear within 5 seconds")?;
-
-        // ── Step 1c: Start status virtiofsd (read-write) ──
-        // This share is writable from inside the guest so `init.sh` can
-        // report the agent's exit code back to the host via a staged file.
-        // Defaults: --sandbox=namespace (confines to shared-dir), --seccomp=kill.
+        // Status virtiofsd (read-write; for exit-code reporting).
         let status_virtiofsd_child = Command::new("virtiofsd")
             .arg(format!("--socket-path={}", status_socket.display()))
             .arg(format!("--shared-dir={}", status_dir.display()))
@@ -274,19 +272,24 @@ impl VmPort for CloudHypervisorAdapter {
             .spawn()
             .context("Failed to start status virtiofsd")?;
 
-        Self::wait_for_socket(&status_socket, 5000)
-            .await
-            .context("status virtiofsd socket did not appear within 5 seconds")?;
+        // Wait for all three sockets concurrently instead of sequentially.
+        let (ws_res, meta_res, status_res) = tokio::join!(
+            Self::wait_for_socket(&virtiofs_socket, 5000),
+            Self::wait_for_socket(&meta_socket, 5000),
+            Self::wait_for_socket(&status_socket, 5000),
+        );
+        ws_res.context("workspace virtiofsd socket did not appear within 5 seconds")?;
+        meta_res.context("meta virtiofsd socket did not appear within 5 seconds")?;
+        status_res.context("status virtiofsd socket did not appear within 5 seconds")?;
 
-        tracing::debug!(
+        tracing::info!(
             sandbox_id = %config.id,
-            workspace_socket = %virtiofs_socket.display(),
-            meta_socket = %meta_socket.display(),
-            status_socket = %status_socket.display(),
-            "virtiofsd up"
+            elapsed_ms = t_vfs.elapsed().as_millis() as u64,
+            "virtiofsd ready"
         );
 
         // ── Step 2: Start Cloud Hypervisor ──
+        let t_ch = std::time::Instant::now();
         let ch_child = match &config.start_mode {
             StartMode::Fresh => {
                 // --memory shared=on is REQUIRED for virtiofs (enables shared memory mapping).
@@ -372,6 +375,7 @@ impl VmPort for CloudHypervisorAdapter {
             pid,
             memory_mib = config.memory_mib,
             vcpus = config.vcpus,
+            elapsed_ms = t_ch.elapsed().as_millis() as u64,
             "MicroVM started"
         );
 

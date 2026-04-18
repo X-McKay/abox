@@ -103,9 +103,12 @@ impl BootMeta {
             s.push_str(&sh_escape(v));
             s.push_str("'\n");
         }
-        // Fix ownership of agent home regardless of rootfs build host uid.
-        // Unconditional: even with no credentials, the agent needs a writable $HOME.
-        s.push_str("chown -R abox:abox /home/abox\n");
+        // Fix ownership of agent home if it doesn't belong to the abox user
+        // (uid 1000). Skipped on template-restored VMs where ownership is
+        // already correct, avoiding a redundant recursive chown on every boot.
+        s.push_str(
+            "[ \"$(stat -c %u /home/abox)\" = \"1000\" ] || chown -R abox:abox /home/abox\n",
+        );
         for cred in &self.credential_files {
             let parent = std::path::Path::new(&cred.guest_path)
                 .parent()

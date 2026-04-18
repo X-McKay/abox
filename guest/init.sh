@@ -35,7 +35,7 @@ mount -t virtiofs aboxmeta /abox-meta 2>/dev/null || \
     echo "WARNING: failed to mount aboxmeta virtiofs"
 
 echo
-echo "==> abox guest init: online"
+echo "==> abox guest init: online ($(awk '{print $1}' /proc/uptime)s)"
 echo "    kernel: $(uname -r)"
 echo "    root:   $(mount | awk '/ \/ /{print $1,$5}')"
 echo
@@ -76,9 +76,9 @@ if [ -x "$SOCAT_BIN" ]; then
     # is inherently bound by the time the unix socket is bound, since both
     # socat processes were spawned in immediate succession before this poll.
     i=0
-    while [ ! -S /run/abox-proxy.sock ] && [ "$i" -lt 100 ]; do
-        # 100 * 0.05s = 5s ceiling, far longer than any plausible bind delay.
-        sleep 0.05
+    while [ ! -S /run/abox-proxy.sock ] && [ "$i" -lt 500 ]; do
+        # 500 * 0.01s = 5s ceiling, far longer than any plausible bind delay.
+        sleep 0.01
         i=$((i + 1))
     done
     if [ ! -S /run/abox-proxy.sock ]; then
@@ -98,7 +98,7 @@ mount -t virtiofs aboxstatus /abox-status 2>/dev/null || \
     echo "WARNING: failed to mount aboxstatus virtiofs"
 
 if [ -f /abox-meta/runner.sh ]; then
-    echo "==> running /abox-meta/runner.sh"
+    echo "==> running /abox-meta/runner.sh ($(awk '{print $1}' /proc/uptime)s)"
     # `set -e` is in effect; use an if-conditional so a non-zero runner
     # exit does NOT terminate init.sh before we report the exit code.
     if sh /abox-meta/runner.sh; then
@@ -121,7 +121,7 @@ kill "$SOCAT_PID" 2>/dev/null || true
 kill "$EGRESS_SOCAT_PID" 2>/dev/null || true
 
 echo
-echo "==> abox guest init: poweroff (rc=$RC)"
+echo "==> abox guest init: poweroff (rc=$RC) ($(awk '{print $1}' /proc/uptime)s)"
 # Use exec so poweroff replaces this shell — if poweroff somehow fails,
 # PID 1 must never exit (that triggers a kernel panic).
 exec poweroff -f

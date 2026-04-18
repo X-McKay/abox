@@ -182,6 +182,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     /// 3. The VM boots, mounts the worktree at /workspace, and runs the agent
     pub async fn create_sandbox(&self, params: CreateSandboxParams) -> Result<SandboxStatus> {
         // Step 1: Create the git worktree
+        let t_worktree = std::time::Instant::now();
         let worktree_path = self
             .workspace
             .create_worktree(&params.task_id, &params.base_branch)
@@ -190,6 +191,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         tracing::info!(
             task_id = %params.task_id,
             worktree = %worktree_path.display(),
+            elapsed_ms = t_worktree.elapsed().as_millis() as u64,
             "Worktree created"
         );
 
