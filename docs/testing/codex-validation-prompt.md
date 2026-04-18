@@ -25,7 +25,7 @@ the host-side egress proxy at the network layer.
 ## Preconditions
 
 ```bash
-cd /home/al/git/bakudo-abox/abox
+cd /path/to/your/abox/repo
 
 # 1. Binary up to date
 abox --version   # expect 0.1.0
