@@ -117,26 +117,11 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
 }
 
 fn check_kvm() -> Check {
-    let kvm = Path::new("/dev/kvm");
-    if !kvm.exists() {
-        return Check::fail(
-            "KVM device /dev/kvm",
-            "Not found. abox requires a Linux host with KVM support.\n\
-             Check that your kernel has KVM enabled and that you're not inside\n\
-             a VM that doesn't expose nested virtualisation.",
-        );
-    }
-    // Check read/write access
-    match std::fs::OpenOptions::new().read(true).write(true).open(kvm) {
-        Ok(_) => Check::ok("/dev/kvm accessible"),
-        Err(_) => Check::fail(
-            "/dev/kvm accessible",
-            "Permission denied. Add yourself to the kvm group:\n\
-             \n\
-             \x20 sudo usermod -aG kvm $USER\n\
-             \n\
-             Then log out and back in for the change to take effect.",
-        ),
+    match crate::kvm::diagnose_kvm() {
+        crate::kvm::KvmStatus::Available => Check::ok("/dev/kvm accessible"),
+        crate::kvm::KvmStatus::Unavailable { condition, remediation } => {
+            Check::fail(condition, remediation)
+        }
     }
 }
 

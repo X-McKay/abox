@@ -169,12 +169,10 @@ if ls "$STAGE/usr/share/ca-certificates/mozilla/"*.crt >/dev/null 2>&1; then
     cat "$STAGE/usr/share/ca-certificates/mozilla/"*.crt \
         > "$STAGE/etc/ssl/certs/ca-certificates.crt"
 fi
-# Append the abox MITM CA so agents trust the TLS-terminating proxy.
-if [ -f "$HOME/.abox/ca/root.crt" ]; then
-    echo "  installing abox CA cert into guest trust store..."
-    cp "$HOME/.abox/ca/root.crt" "$STAGE/etc/ssl/certs/abox-ca.pem"
-    cat "$HOME/.abox/ca/root.crt" >> "$STAGE/etc/ssl/certs/ca-certificates.crt"
-fi
+# The abox MITM CA is NOT baked into the rootfs. It is injected at boot
+# via the aboxmeta virtiofs share so that CI-built and user-built rootfs
+# images are identical and each user's per-machine CA is trusted. See
+# guest/init.sh for the boot-time injection logic.
 
 echo "  installing abox-shim and symlinks..."
 mkdir -p "$STAGE/usr/local/bin" "$STAGE/sbin"

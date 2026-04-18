@@ -41,7 +41,11 @@ pub enum TemplateAction {
 /// Execute a template subcommand that does not require the orchestrator
 /// (List, Delete). Returns `Ok(true)` if the command was handled.
 pub fn execute_without_orchestrator(args: &TemplateArgs, config: &AboxConfig) -> Result<bool> {
-    let snap_mgr = SnapshotManager::new(config.templates_dir(), config.runtime_dir())?;
+    let snap_mgr = SnapshotManager::new(
+        config.templates_dir(),
+        config.runtime_dir(),
+        config.state_dir.clone(),
+    )?;
 
     match &args.action {
         TemplateAction::List => {
@@ -81,7 +85,11 @@ pub async fn execute_create<W: WorkspacePort, V: VmPort>(
     orchestrator: &SandboxOrchestrator<W, V>,
     config: &AboxConfig,
 ) -> Result<()> {
-    let snap_mgr = SnapshotManager::new(config.templates_dir(), config.runtime_dir())?;
+    let snap_mgr = SnapshotManager::new(
+        config.templates_dir(),
+        config.runtime_dir(),
+        config.state_dir.clone(),
+    )?;
 
     // Look up the VM info (gives us the API socket path).
     let info = orchestrator.vm_info(from).await?;

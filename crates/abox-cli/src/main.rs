@@ -1,6 +1,7 @@
 //! abox: CLI for managing parallel AI agent sandboxes.
 
 mod commands;
+mod kvm;
 mod tui;
 
 use abox_core::adapters::cloud_hypervisor::CloudHypervisorAdapter;
@@ -142,7 +143,7 @@ async fn main() -> Result<()> {
     // Build the orchestrator
     let repo_path = cli.repo.canonicalize()?;
     let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
-    let vm_manager = CloudHypervisorAdapter::new(config.runtime_dir())?;
+    let vm_manager = CloudHypervisorAdapter::new(config.runtime_dir(), config.state_dir.clone())?;
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm_manager);
 
     // The root CA is only consumed by `abox run` (it backs the per-sandbox

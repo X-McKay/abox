@@ -34,6 +34,20 @@ mount -t virtiofs workspace /workspace 2>/dev/null || \
 mount -t virtiofs aboxmeta /abox-meta 2>/dev/null || \
     echo "WARNING: failed to mount aboxmeta virtiofs"
 
+# ── Inject the host-generated abox MITM CA into the guest trust store ──
+# The rootfs ships with only the Mozilla CA set; the per-user abox CA is
+# staged into /abox-meta/root.crt by the host orchestrator at boot time.
+# Rebuild the system bundle from the immutable Mozilla source, then append
+# the abox CA. This is idempotent: the rootfs is booted read-write, so a
+# naive `cat >>` would duplicate the CA on repeated runs and leave stale
+# CAs trusted after rotation. Rebuilding from source avoids both problems.
+if [ -f /abox-meta/root.crt ]; then
+    cat /usr/share/ca-certificates/mozilla/*.crt \
+        > /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+    cat /abox-meta/root.crt >> /etc/ssl/certs/ca-certificates.crt
+    cp /abox-meta/root.crt /etc/ssl/certs/abox-ca.pem
+fi
+
 echo
 echo "==> abox guest init: online ($(awk '{print $1}' /proc/uptime)s)"
 echo "    kernel: $(uname -r)"
@@ -76,9 +90,9 @@ if [ -x "$SOCAT_BIN" ]; then
     # is inherently bound by the time the unix socket is bound, since both
     # socat processes were spawned in immediate succession before this poll.
     i=0
-    while [ ! -S /run/abox-proxy.sock ] && [ "$i" -lt 500 ]; do
-        # 500 * 0.01s = 5s ceiling, far longer than any plausible bind delay.
-        sleep 0.01
+    while [ ! -S /run/abox-proxy.sock ] && [ "$i" -lt 5000 ]; do
+        # 5000 * 0.001s = 5s ceiling, far longer than any plausible bind delay.
+        sleep 0.001
         i=$((i + 1))
     done
     if [ ! -S /run/abox-proxy.sock ]; then

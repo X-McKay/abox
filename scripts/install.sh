@@ -18,10 +18,14 @@ VM_DIR="${ABOX_VM_DIR:-$HOME/.abox/vm}"
 ARCH="$(uname -m)"
 case "$ARCH" in
     x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
-    aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+    aarch64)
+        echo "ERROR: aarch64 support is not yet available." >&2
+        echo "See https://github.com/X-McKay/abox for tracking." >&2
+        exit 1
+        ;;
     *)
         echo "ERROR: unsupported architecture: $ARCH" >&2
-        echo "abox currently supports x86_64 and aarch64 Linux." >&2
+        echo "abox currently supports x86_64 Linux." >&2
         exit 1
         ;;
 esac
@@ -66,7 +70,9 @@ EOF
     echo "Installing abox $VERSION (latest)..."
 fi
 
-BASE_URL="https://github.com/$REPO/releases/download/$VERSION"
+# BASE_URL can be overridden for local smoke testing (e.g., serving artifacts
+# from a local HTTP server via `python3 -m http.server`).
+BASE_URL="${ABOX_BASE_URL:-https://github.com/$REPO/releases/download/$VERSION}"
 
 # ─── Download artifacts ─────────────────────────────────────────────────
 TMP_DIR="$(mktemp -d)"

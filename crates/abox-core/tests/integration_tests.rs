@@ -590,7 +590,8 @@ fn test_snapshot_manager_list_empty() {
     let template_dir = tmp.path().join("templates");
     let runtime_dir = tmp.path().join("runtime");
 
-    let mgr = SnapshotManager::new(template_dir.clone(), runtime_dir).unwrap();
+    let mgr =
+        SnapshotManager::new(template_dir.clone(), runtime_dir, tmp.path().to_path_buf()).unwrap();
     let templates = mgr.list_templates().unwrap();
     assert!(templates.is_empty());
 }
@@ -601,7 +602,8 @@ fn test_snapshot_manager_list_with_templates() {
     let template_dir = tmp.path().join("templates");
     let runtime_dir = tmp.path().join("runtime");
 
-    let mgr = SnapshotManager::new(template_dir.clone(), runtime_dir).unwrap();
+    let mgr =
+        SnapshotManager::new(template_dir.clone(), runtime_dir, tmp.path().to_path_buf()).unwrap();
 
     // Create fake template directories with files
     let t1 = template_dir.join("base-python");
@@ -632,7 +634,8 @@ fn test_snapshot_manager_delete() {
     let template_dir = tmp.path().join("templates");
     let runtime_dir = tmp.path().join("runtime");
 
-    let mgr = SnapshotManager::new(template_dir.clone(), runtime_dir).unwrap();
+    let mgr =
+        SnapshotManager::new(template_dir.clone(), runtime_dir, tmp.path().to_path_buf()).unwrap();
 
     // Create a fake template
     let t1 = template_dir.join("to-delete");
@@ -652,7 +655,7 @@ fn test_snapshot_manager_delete_nonexistent_fails() {
     let template_dir = tmp.path().join("templates");
     let runtime_dir = tmp.path().join("runtime");
 
-    let mgr = SnapshotManager::new(template_dir, runtime_dir).unwrap();
+    let mgr = SnapshotManager::new(template_dir, runtime_dir, tmp.path().to_path_buf()).unwrap();
     let result = mgr.delete_template("nonexistent");
     assert!(result.is_err());
 }
@@ -771,6 +774,7 @@ async fn test_orchestrator_create_sandbox() {
             command: vec!["claude".to_string()],
             timeout_secs: None,
             ephemeral: false,
+            ca_cert_pem: None,
         })
         .await
         .unwrap();
@@ -805,6 +809,7 @@ async fn test_orchestrator_create_multiple_sandboxes() {
             command: vec!["claude".to_string()],
             timeout_secs: None,
             ephemeral: false,
+            ca_cert_pem: None,
         })
         .await
         .unwrap();
@@ -842,6 +847,7 @@ async fn test_orchestrator_stop_sandbox() {
         command: vec!["claude".to_string()],
         timeout_secs: None,
         ephemeral: false,
+        ca_cert_pem: None,
     })
     .await
     .unwrap();
@@ -876,6 +882,7 @@ async fn test_orchestrator_stop_with_clean() {
         command: vec!["claude".to_string()],
         timeout_secs: None,
         ephemeral: false,
+        ca_cert_pem: None,
     })
     .await
     .unwrap();
@@ -911,6 +918,7 @@ async fn test_orchestrator_divergence() {
             command: vec!["claude".to_string()],
             timeout_secs: None,
             ephemeral: false,
+            ca_cert_pem: None,
         })
         .await
         .unwrap();
@@ -956,6 +964,7 @@ async fn test_orchestrator_vm_config_overrides() {
         command: vec!["claude".to_string()],
         timeout_secs: None,
         ephemeral: false,
+        ca_cert_pem: None,
     })
     .await
     .unwrap();
@@ -1059,6 +1068,7 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         command: vec!["true".into()],
         timeout_secs: None,
         ephemeral: false,
+        ca_cert_pem: None,
     };
 
     let policy = std::sync::Arc::new(
@@ -1169,6 +1179,7 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
         command: vec!["true".into()],
         timeout_secs: None,
         ephemeral: false,
+        ca_cert_pem: None,
     };
 
     let policy = std::sync::Arc::new(
@@ -1303,6 +1314,7 @@ async fn test_run_sandbox_timeout_returns_124() {
         command: vec!["sleep".into(), "infinity".into()],
         timeout_secs: Some(1), // 1-second timeout
         ephemeral: false,
+        ca_cert_pem: None,
     };
 
     let policy = std::sync::Arc::new(
@@ -1410,6 +1422,7 @@ async fn test_run_sandbox_exits_before_timeout() {
         command: vec!["true".into()],
         timeout_secs: Some(60), // generous timeout — should not fire
         ephemeral: false,
+        ca_cert_pem: None,
     };
 
     let policy = std::sync::Arc::new(
@@ -1517,6 +1530,7 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
         command: vec!["true".into()],
         timeout_secs: None,
         ephemeral: true,
+        ca_cert_pem: None,
     };
 
     let policy = std::sync::Arc::new(
@@ -1625,6 +1639,7 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
         command: vec!["true".into()],
         timeout_secs: None,
         ephemeral: false,
+        ca_cert_pem: None,
     };
 
     let policy = std::sync::Arc::new(

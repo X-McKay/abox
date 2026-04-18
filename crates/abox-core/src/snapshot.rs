@@ -55,17 +55,25 @@ impl TemplateMeta {
 }
 
 /// Manages VM snapshots and templates.
+#[allow(clippy::struct_field_names)] // All three fields are semantically distinct directories.
 pub struct SnapshotManager {
     /// Directory where templates are stored (e.g., `~/.abox/templates/`).
     template_dir: PathBuf,
     /// Directory for runtime sockets.
     runtime_dir: PathBuf,
+    /// Base state directory (e.g., `~/.abox`). Used to resolve VM binary paths.
+    state_dir: PathBuf,
 }
 
 impl SnapshotManager {
-    pub fn new(template_dir: PathBuf, runtime_dir: PathBuf) -> Result<Self> {
+    pub fn new(template_dir: PathBuf, runtime_dir: PathBuf, state_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&template_dir)?;
-        Ok(Self { template_dir, runtime_dir })
+        Ok(Self { template_dir, runtime_dir, state_dir })
+    }
+
+    /// Resolve a VM binary using the standard search order.
+    fn resolve_binary(&self, name: &str) -> Result<PathBuf> {
+        crate::binary_resolve::resolve_vm_binary(name, &self.state_dir)
     }
 
     /// Create a snapshot of a paused VM and store it as a template.
@@ -88,7 +96,7 @@ impl SnapshotManager {
         std::fs::create_dir_all(&snap_dir)?;
 
         // Use ch-remote to trigger the snapshot
-        let status = Command::new("ch-remote")
+        let status = Command::new(self.resolve_binary("ch-remote")?)
             .arg("--api-socket")
             .arg(api_socket.display().to_string())
             .arg("snapshot")
@@ -136,7 +144,7 @@ impl SnapshotManager {
         let _ = std::fs::remove_file(&api_socket);
 
         // Start Cloud Hypervisor in restore mode
-        let _child = Command::new("cloud-hypervisor")
+        let _child = Command::new(self.resolve_binary("cloud-hypervisor")?)
             .arg("--api-socket")
             .arg(api_socket.display().to_string())
             .arg("--restore")
@@ -158,7 +166,7 @@ impl SnapshotManager {
         }
 
         // Resume the VM (it was paused when the snapshot was taken)
-        let status = Command::new("ch-remote")
+        let status = Command::new(self.resolve_binary("ch-remote")?)
             .arg("--api-socket")
             .arg(api_socket.display().to_string())
             .arg("resume")
@@ -259,8 +267,12 @@ mod tests {
     fn snapshot_manager_list_empty() {
         let tdir = tempfile::tempdir().unwrap();
         let rdir = tempfile::tempdir().unwrap();
-        let mgr =
-            SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
+        let mgr = SnapshotManager::new(
+            tdir.path().to_path_buf(),
+            rdir.path().to_path_buf(),
+            tdir.path().to_path_buf(),
+        )
+        .unwrap();
         let list = mgr.list_templates().unwrap();
         assert!(list.is_empty());
     }
@@ -269,8 +281,12 @@ mod tests {
     fn snapshot_manager_delete_missing_errors() {
         let tdir = tempfile::tempdir().unwrap();
         let rdir = tempfile::tempdir().unwrap();
-        let mgr =
-            SnapshotManager::new(tdir.path().to_path_buf(), rdir.path().to_path_buf()).unwrap();
+        let mgr = SnapshotManager::new(
+            tdir.path().to_path_buf(),
+            rdir.path().to_path_buf(),
+            tdir.path().to_path_buf(),
+        )
+        .unwrap();
         assert!(mgr.delete_template("nonexistent").is_err());
     }
 }

@@ -33,6 +33,10 @@ pub struct CreateSandboxParams {
     pub timeout_secs: Option<u64>,
     /// Automatically remove the sandbox (worktree + branch) after exit.
     pub ephemeral: bool,
+    /// PEM-encoded root CA certificate to inject into the guest trust store.
+    /// Set by `run_sandbox` from the loaded `RootCa`; `None` for tests or
+    /// callers that don't need MITM proxy support.
+    pub ca_cert_pem: Option<String>,
 }
 
 /// Full sandbox status combining workspace and VM info.
@@ -270,6 +274,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             agent_command: params.command.clone(),
             start_mode,
             credential_files,
+            ca_cert_pem: params.ca_cert_pem.clone(),
         };
 
         // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just
@@ -409,6 +414,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     ) -> Result<i32> {
         let timeout_secs = params.timeout_secs;
         let ephemeral = params.ephemeral;
+        // Inject the root CA PEM so the guest trust store includes it.
+        let mut params = params;
+        params.ca_cert_pem = Some(root_ca.cert_pem.clone());
         let status = self.create_sandbox(params).await?;
         let task_id = status.id.clone();
         let worktree_path = std::path::PathBuf::from(&status.worktree_path);
@@ -555,25 +563,17 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             }
         });
 
-        // Poll for VM exit. The trait doesn't expose a "wait" primitive,
-        // so we poll `info` until it errors out (which the adapter does
-        // when the VM is no longer in its registry — i.e. after it has
-        // been removed from the map). Interval is centralized in
-        // VmRuntimeTuning so tests can tighten it.
+        // Wait for VM exit. The adapter's wait_for_exit() polls the
+        // child process handle directly (5 ms try_wait on the real
+        // adapter, 10 ms info()-based fallback for mocks), replacing
+        // the previous 250 ms info() poll loop.
         let tuning = VmRuntimeTuning::DEFAULT;
 
-        let poll_future = async {
-            loop {
-                tokio::time::sleep(tuning.vm_exit_poll_interval).await;
-                if self.vm_manager.info(&task_id).await.is_err() {
-                    break;
-                }
-            }
-        };
+        let wait_future = self.vm_manager.wait_for_exit(&task_id);
 
         let timed_out = if let Some(secs) = timeout_secs {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), poll_future).await {
-                Ok(()) => false,
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), wait_future).await {
+                Ok(_) => false,
                 Err(_elapsed) => {
                     tracing::warn!(task_id = %task_id, secs, "sandbox timed out");
                     // Graceful shutdown first.
@@ -585,14 +585,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                         );
                     }
                     // Wait up to 10s for the VM to actually exit.
-                    let grace = async {
-                        loop {
-                            tokio::time::sleep(tuning.vm_exit_poll_interval).await;
-                            if self.vm_manager.info(&task_id).await.is_err() {
-                                break;
-                            }
-                        }
-                    };
+                    let grace = self.vm_manager.wait_for_exit(&task_id);
                     if tokio::time::timeout(tuning.vm_timeout_grace_period, grace).await.is_err() {
                         tracing::warn!(
                             task_id = %task_id,
@@ -607,7 +600,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 }
             }
         } else {
-            poll_future.await;
+            let _ = wait_future.await;
             false
         };
 
