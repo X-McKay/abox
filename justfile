@@ -74,6 +74,26 @@ deny:
 # Run all quality checks (what CI runs)
 ci: fmt-check lint test deny
 
+# ─── Pre-Release Validation ─────────────────────────────────────────────────
+
+# Run all pre-release validation tiers, attest what passes.
+pre-release:
+    ./scripts/pre_release.sh
+
+# Tier 1: CI-safe checks (fmt + clippy + test + supply-chain audit). No KVM needed.
+tier-ci: check deny
+
+# Tier 2: VM end-to-end tests (requires KVM + bootstrapped VM). Checks rootfs freshness first.
+tier-vm: check-rootfs e2e-vm
+
+# Tier 3: Benchmarks — criterion microbenchmarks + VM latency (requires KVM + bootstrapped VM).
+tier-bench: bench
+    just bench-vm-n 5
+
+# Tier 4: Agent smoke tests — real Claude/Codex API calls (requires KVM + credentials). Costs tokens.
+tier-smoke:
+    ./scripts/local/agent_smoke_test.sh
+
 # ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 # Remove build artifacts
@@ -112,11 +132,11 @@ bench:
 
 # Run real VM latency benchmarks (requires bootstrap + /dev/kvm).
 bench-vm:
-    ./scripts/bench.sh
+    ./scripts/local/bench.sh
 
 # Run VM latency benchmarks averaged over N runs.
 bench-vm-n n="5":
-    ./scripts/bench.sh --runs {{n}}
+    ./scripts/local/bench.sh --runs {{n}}
 
 # ─── Release ────────────────────────────────────────────────────────────────
 
@@ -140,4 +160,4 @@ clean-vm:
 
 # Run the e2e test, including phase 6 (live VM) if the bootstrap is present.
 e2e-vm:
-    ./scripts/e2e_test.sh
+    ./scripts/local/e2e_test.sh
