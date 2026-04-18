@@ -1,6 +1,6 @@
 ---
 name: release-preparation
-description: Use when the user asks to cut a release, run release.sh, or tag a new version (e.g. "release v0.5.0"). Walks scripts/release.sh preconditions, invokes it, and explains the rollback path if the release turns out bad.
+description: Use when the user asks to cut a release, run release.sh, or tag a new version (e.g. "release v0.5.0"). Ensures pre-release attestation stamps exist, then walks release.sh.
 ---
 
 # Release Preparation
@@ -15,12 +15,10 @@ Cutting a release runs `scripts/release.sh <version>`. That script is the 12-ste
 ## Preconditions (check before running)
 
 - `git status` shows a clean working tree on `main` (up to date with `origin/main`).
-- `~/.abox/vm/cloud-hypervisor` and `~/.abox/vm/rootfs.raw` exist (bootstrapped VM).
-- `/dev/kvm` exists and is accessible to the current user (the benchmark step requires it).
+- **`just pre-release` has been run** and all attestation stamps in `.abox-attestations/` match HEAD. If stamps are missing or stale, run `just pre-release` first.
 - The version number follows SemVer: `v<major>.<minor>.<patch>`. The leading `v` is optional; `release.sh` normalizes.
-- The Always gates from the pre-PR checklist are green on `main`: `just check`, `just deny`, `./scripts/e2e_test.sh`.
 
-If any precondition fails, stop and report. Do not pass `--force` flags to bypass.
+If any precondition fails, stop and report. Do not use `--skip-attestation` unless the user explicitly requests it for an emergency.
 
 ## Invocation
 
@@ -32,22 +30,20 @@ just release <version>
 
 Use `just release-dry <version>` first to see the plan without committing or tagging.
 
-## What the script does (summary; see `scripts/release.sh:47-55` for the definitive list)
+## What the script does (summary; see `scripts/release.sh --help` for the definitive list)
 
-1. Preflight (clean tree, version validity, bootstrap present).
-2. Bump `Cargo.toml` + `Cargo.lock`.
-3. Run fmt / clippy / test.
-4. Run `scripts/e2e_test.sh` (all phases, including 6–7).
-5. Build `--release`.
-6. Run VM benchmarks (5 runs, average, write to `benchmarks/<version>.json`).
-7. Update the benchmark table in `README.md`.
-8. Regenerate `README.md` top-level sections (if changed).
-9. Generate `CHANGELOG.md` entry from `git log` since last tag (Keep-a-Changelog format).
-10. `cargo install --path` locally so the developer has the new binary.
-11. `git commit` version bump + benchmarks + changelog.
-12. `git tag v<version>` (no push).
+1. Preflight (clean tree, version validity).
+2. Verify attestation stamps (vm, bench, smoke must match HEAD and pass).
+3. Bump `Cargo.toml` + `Cargo.lock`.
+4. Build `--release`.
+5. Update benchmark table in `README.md` (data from attestation + criterion).
+6. Save benchmark JSON to `benchmarks/<version>.json`.
+7. Generate `CHANGELOG.md` entry from `git log` since last tag.
+8. `cargo install --path` locally so the developer has the new binary.
+9. `git commit` version bump + benchmarks + changelog.
+10. `git tag v<version>` (no push).
 
-After step 12, the developer pushes manually: `git push origin main --tags`. The tag push triggers the `release.yml` GitHub Actions workflow which builds binaries + VM assets and publishes a GitHub release.
+After step 10, the developer pushes manually: `git push origin main --tags`. The tag push triggers the `release.yml` GitHub Actions workflow.
 
 ## After tag push
 
@@ -69,5 +65,6 @@ Do not delete tags; do not rewrite history. Immutable artifacts are the rollback
 ## Do not
 
 - Edit `CHANGELOG.md` by hand as part of release prep. The script generates it from commit messages.
-- Skip the e2e step. Phase 6–7 regressions only surface here.
+- Skip `just pre-release`. The attestation stamps are the proof that all tiers passed.
+- Use `--skip-attestation` routinely. It exists for emergencies only.
 - Push the tag before `release.sh` has committed the version bump + benchmarks.
