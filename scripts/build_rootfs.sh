@@ -110,7 +110,7 @@ cp "$STAGE"/usr/share/apk/keys/x86/*.pub "$STAGE/etc/apk/keys/" 2>/dev/null || t
 echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/main" > "$STAGE/etc/apk/repositories"
 echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> "$STAGE/etc/apk/repositories"
 fakeroot "$APK_STATIC" --root "$STAGE" --initdb --no-cache --no-scripts add \
-    bash nodejs npm su-exec ca-certificates 2>&1 | tail -10
+    bash nodejs npm su-exec ca-certificates gcompat 2>&1 | tail -10
 # Clean up the static apk binary — not needed in the guest.
 rm -f "$APK_STATIC"
 
@@ -148,8 +148,12 @@ echo "  installing Claude Code and Codex CLIs..."
 # land at /usr/local/bin inside the guest.
 NPM_PREFIX="$STAGE/usr/local"
 mkdir -p "$NPM_PREFIX/lib" "$NPM_PREFIX/bin"
+# Pin claude-code to a Node.js-script version. Newer versions ship a native
+# glibc binary (claude.exe) that requires glibc compat on Alpine. Codex is
+# a Rust binary but works via gcompat. Update these pins when rootfs glibc
+# support is properly tested.
 npm install --global --prefix "$NPM_PREFIX" \
-    @anthropic-ai/claude-code @openai/codex 2>&1 | tail -5
+    @anthropic-ai/claude-code@2.1.109 @openai/codex@0.121.0 2>&1 | tail -5
 
 # ── Install abox CA cert into the system trust store ──────────────────
 # The MITM egress proxy presents leaf certs signed by this CA. Node.js
