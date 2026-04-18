@@ -11,7 +11,7 @@
 # It is self-contained: everything lives under a fresh sandbox directory
 # inside this repo (.scratch/e2e-run-<pid>) and is removed on exit.
 #
-# Usage:  ./scripts/e2e_test.sh
+# Usage:  ./scripts/local/e2e_test.sh
 #
 # Exit code: 0 on success, non-zero on first failed assertion.
 

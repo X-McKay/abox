@@ -24,6 +24,7 @@ Thumbs.db
 
 # Local scratch and worktrees
 .scratch/
+.abox-attestations/
 .worktrees/
 
 vendor/*

@@ -11,9 +11,9 @@
 # NOT run in CI — these hit real APIs and cost real tokens.
 #
 # Usage:
-#   ./scripts/agent_smoke_test.sh           # run all tests
-#   ./scripts/agent_smoke_test.sh claude    # run Claude tests only
-#   ./scripts/agent_smoke_test.sh codex     # run Codex tests only
+#   ./scripts/local/agent_smoke_test.sh           # run all tests
+#   ./scripts/local/agent_smoke_test.sh claude    # run Claude tests only
+#   ./scripts/local/agent_smoke_test.sh codex     # run Codex tests only
 set -uo pipefail  # no -e: we handle errors per-test
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

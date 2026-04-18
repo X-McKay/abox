@@ -77,7 +77,7 @@ jobs:
         # Phase 6 is gated on ~/.abox/vm/cloud-hypervisor + rootfs.raw
         # existing, which they don't on a stock GitHub runner. The script
         # prints "skipped: VM artifacts not found" and continues.
-        run: ./scripts/e2e_test.sh
+        run: ./scripts/local/e2e_test.sh
 
   vm-attestation:
     name: VM attestation (label required when VM paths touched)
