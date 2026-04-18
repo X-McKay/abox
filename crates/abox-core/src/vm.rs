@@ -61,6 +61,10 @@ pub struct VmConfig {
     pub start_mode: StartMode,
     /// Credential files to stage in the boot metadata directory.
     pub credential_files: Vec<CredentialToStage>,
+    /// PEM-encoded root CA certificate to inject into the guest trust store.
+    /// Staged as `root.crt` in the boot metadata directory so `guest/init.sh`
+    /// can rebuild the system CA bundle with it at boot time.
+    pub ca_cert_pem: Option<String>,
 }
 
 /// Information about a running or stopped VM.
@@ -118,6 +122,22 @@ pub trait VmPort: Send + Sync {
 
     /// List all managed VMs.
     async fn list(&self) -> anyhow::Result<Vec<VmInfo>>;
+
+    /// Wait for a VM to exit.
+    ///
+    /// Blocks until the VM identified by `id` has terminated. The default
+    /// implementation polls [`Self::info()`] at 10 ms intervals; adapters
+    /// backed by a real hypervisor override this with a tighter loop that
+    /// calls `try_wait()` directly on the child process handle, avoiding
+    /// the HashMap-lookup and VmInfo-construction overhead on each tick.
+    async fn wait_for_exit(&self, id: &str) -> anyhow::Result<()> {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if self.info(id).await.is_err() {
+                return Ok(());
+            }
+        }
+    }
 
     /// Return the path to the status directory for a given sandbox id.
     ///

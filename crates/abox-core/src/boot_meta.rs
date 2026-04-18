@@ -103,9 +103,12 @@ impl BootMeta {
             s.push_str(&sh_escape(v));
             s.push_str("'\n");
         }
-        // Fix ownership of agent home regardless of rootfs build host uid.
-        // Unconditional: even with no credentials, the agent needs a writable $HOME.
-        s.push_str("chown -R abox:abox /home/abox\n");
+        // Fix ownership of agent home if it doesn't belong to the abox user
+        // (uid 1000). Skipped on template-restored VMs where ownership is
+        // already correct, avoiding a redundant recursive chown on every boot.
+        s.push_str(
+            "[ \"$(stat -c %u /home/abox)\" = \"1000\" ] || chown -R abox:abox /home/abox\n",
+        );
         for cred in &self.credential_files {
             let parent = std::path::Path::new(&cred.guest_path)
                 .parent()
@@ -113,6 +116,13 @@ impl BootMeta {
                 .display()
                 .to_string();
             let _ = writeln!(s, "mkdir -p '{}'", sh_escape(&parent));
+            // Chown the parent directory if it's under the agent home — tools
+            // like Codex write config/lock files into their credential directory
+            // and fail with EACCES if it's owned by root. Directories outside
+            // /home/abox (e.g. /etc) are left alone to avoid privilege escalation.
+            if parent.starts_with(GUEST_AGENT_HOME) {
+                let _ = writeln!(s, "chown abox:abox '{}'", sh_escape(&parent));
+            }
             let _ = writeln!(
                 s,
                 "cp '/abox-meta/credentials/{}' '{}'",
@@ -121,8 +131,6 @@ impl BootMeta {
             );
             let _ =
                 writeln!(s, "chmod {} '{}'", sh_escape(&cred.mode), sh_escape(&cred.guest_path));
-            // Only chown the file, not the parent directory — chowning an
-            // arbitrary parent (e.g. /etc) would be a privilege escalation risk.
             let _ = writeln!(s, "chown abox:abox '{}'", sh_escape(&cred.guest_path));
         }
         // Drop privileges and exec agent. su-exec is Alpine's standard
@@ -365,13 +373,18 @@ mod tests {
             }],
         };
         let script = meta.runner_script();
+        // Directory under agent home gets chowned so tools can write config there.
+        assert!(
+            script.contains("chown abox:abox '/home/abox/.claude'"),
+            "parent dir under agent home must be chowned"
+        );
         let cp_pos = script.find("cp '/abox-meta/credentials/0'").expect("cp line missing");
         let chmod_pos = script.find("chmod 0600").expect("chmod line missing");
-        let chown_pos = script.find("chown abox:abox").expect("chown line missing");
+        // The file chown comes after cp + chmod.
+        let file_chown_pos = script[cp_pos..].find("chown abox:abox").expect("file chown missing");
         let exec_pos = script.find("\nexec ").expect("exec line missing");
         assert!(cp_pos < chmod_pos, "cp must precede chmod");
-        assert!(chmod_pos < chown_pos, "chmod must precede chown");
-        assert!(chown_pos < exec_pos, "chown must precede exec");
+        assert!(cp_pos + file_chown_pos < exec_pos, "file chown must precede exec");
     }
 
     #[test]

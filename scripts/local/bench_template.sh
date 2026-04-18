@@ -6,9 +6,9 @@
 # the speedup from P3 (Snapshot/Template Fast Startup).
 #
 # Usage:
-#   ./scripts/bench_template.sh                 # 5 runs (default)
-#   ./scripts/bench_template.sh --runs 10       # 10 runs
-#   ./scripts/bench_template.sh --template base # use a specific template name
+#   ./scripts/local/bench_template.sh                 # 5 runs (default)
+#   ./scripts/local/bench_template.sh --runs 10       # 10 runs
+#   ./scripts/local/bench_template.sh --template base # use a specific template name
 #
 # Prerequisites:
 #   - A working abox installation (see scripts/bootstrap_vm.sh)

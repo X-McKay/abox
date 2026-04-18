@@ -303,9 +303,9 @@ If any of these get re-published or corrupted in transit, the bootstrap fails fa
 
 ---
 
-## 11. The end-to-end test: `scripts/e2e_test.sh`
+## 11. The end-to-end test: `scripts/local/e2e_test.sh`
 
-**What it is:** A seven-phase bash script (`./scripts/e2e_test.sh` or `just e2e`) that exercises every major component without needing a CI runner with KVM enabled.
+**What it is:** A seven-phase bash script (`./scripts/local/e2e_test.sh` or `just e2e`) that exercises every major component without needing a CI runner with KVM enabled.
 
 **The seven phases:**
 
@@ -317,7 +317,7 @@ If any of these get re-published or corrupted in transit, the bootstrap fails fa
 6. **full VM end-to-end** *(gated)* — Boots a real microVM, runs `git status` inside it, verifies audit log attribution, tests `--detach` lifecycle, and asserts exit code propagation. Skipped if `~/.abox/vm/` artifacts aren't present (so phases 1-5 work in CI).
 7. **agent lifecycle** *(gated)* — Full agent commit/diverge/deny/merge cycle: boots a sandbox that creates a file and commits, verifies divergence reporting, tests policy denial of `git push --force`, merges the work into main, and cleans up. Also runs the HTTPS credential injection e2e (gated on `ANTHROPIC_API_KEY`).
 
-**How to add an eighth phase:** Append a `section "phase 8 — ..."` block at the end of `scripts/e2e_test.sh`. Use `step` / `how` / `expect` / `pass` / `fail` for each assertion. The summary footer counts every `pass`/`fail` invocation, so new phases are picked up automatically.
+**How to add an eighth phase:** Append a `section "phase 8 — ..."` block at the end of `scripts/local/e2e_test.sh`. Use `step` / `how` / `expect` / `pass` / `fail` for each assertion. The summary footer counts every `pass`/`fail` invocation, so new phases are picked up automatically.
 
 **Why the e2e is in bash and not Rust:** Because phases 4-6 test the *binary* (`./target/debug/abox`) and its actual filesystem and process side effects, not its library API. Bash + the abox CLI is the most accurate simulation of how a user invokes it. The Rust unit tests in `cargo test --workspace` cover the library-level cases (mocks, bypass parsers, exit code helpers); the e2e covers the integration cases.
 
@@ -387,6 +387,6 @@ That's the whole lifecycle. Every step has a single owner and a clear failure mo
 - **[`docs/tutorial.md`](tutorial.md)** — actually do all of this on your machine in 10 minutes.
 - **[`docs/decisions/`](decisions/)** — the architecture decision records for the choices that shaped abox.
 - **[`docs/plans/`](plans/)** — historical and planned implementation work.
-- **[`scripts/e2e_test.sh`](../scripts/e2e_test.sh)** — the canonical "is this thing working?" gate (46 assertions across 7 phases).
+- **[`scripts/local/e2e_test.sh`](../scripts/local/e2e_test.sh)** — the canonical "is this thing working?" gate (46 assertions across 7 phases).
 - **[`docs/future-work.md`](future-work.md)** — what's next after the priorities roadmap landed.
 - **[`docs/decisions/003-https-credential-injection.md`](decisions/003-https-credential-injection.md)** — ADR for the TLS-terminating MITM proxy architecture.

@@ -8,7 +8,7 @@ Follow [`docs/contributing/pre-pr-checklist.md`](../docs/contributing/pre-pr-che
 
 - [ ] `just check` passes locally.
 - [ ] `just deny` passes locally.
-- [ ] `./scripts/e2e_test.sh` phases 1–5 pass locally.
+- [ ] `./scripts/local/e2e_test.sh` phases 1–5 pass locally.
 - [ ] On a typed feature branch, not `main`.
 - [ ] Conventional-Commits subject lines (they feed the auto-generated `CHANGELOG.md`).
 - [ ] No `unwrap()` added in `abox-core`.

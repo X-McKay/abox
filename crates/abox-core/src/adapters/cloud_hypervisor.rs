@@ -50,6 +50,9 @@ const LONGEST_SOCKET_SUFFIX: &str = "vfs-status-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 pub struct CloudHypervisorAdapter {
     /// Base directory for runtime files (sockets, PIDs).
     runtime_dir: PathBuf,
+    /// Base state directory (e.g., `~/.abox`). Used to resolve VM binary
+    /// paths via `state_dir/vm/<name>` for curl-pipe installs.
+    state_dir: PathBuf,
     /// Active VMs indexed by sandbox ID.
     vms: Arc<Mutex<HashMap<String, RunningVm>>>,
 }
@@ -85,7 +88,9 @@ impl CloudHypervisorAdapter {
     ///
     /// # Arguments
     /// * `runtime_dir` - Directory for runtime sockets (e.g., `/run/abox`).
-    pub fn new(runtime_dir: PathBuf) -> Result<Self> {
+    /// * `state_dir` - Base abox state directory (e.g., `~/.abox`). Used to
+    ///   resolve VM binary paths at `state_dir/vm/<name>`.
+    pub fn new(runtime_dir: PathBuf, state_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&runtime_dir)?;
         let max_path = runtime_dir.join(LONGEST_SOCKET_SUFFIX);
         let max_len = max_path.as_os_str().len();
@@ -96,7 +101,13 @@ impl CloudHypervisorAdapter {
             runtime_dir.display(),
             max_len
         );
-        Ok(Self { runtime_dir, vms: Arc::new(Mutex::new(HashMap::new())) })
+        Ok(Self { runtime_dir, state_dir, vms: Arc::new(Mutex::new(HashMap::new())) })
+    }
+
+    /// Resolve a VM binary (cloud-hypervisor, virtiofsd, ch-remote) using the
+    /// standard search order: `state_dir/vm/<name>` then `$PATH`.
+    fn resolve_binary(&self, name: &str) -> Result<PathBuf> {
+        crate::binary_resolve::resolve_vm_binary(name, &self.state_dir)
     }
 
     /// Remove all runtime files associated with a VM (sockets, console log,
@@ -136,7 +147,7 @@ impl CloudHypervisorAdapter {
             if start.elapsed().as_millis() > u128::from(timeout_ms) {
                 bail!("Timed out waiting for socket: {}", path.display());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 }
@@ -177,6 +188,8 @@ impl VmPort for CloudHypervisorAdapter {
             }
         };
 
+        let t_meta = std::time::Instant::now();
+
         // Stage boot metadata into meta_dir.
         let staged_creds: Vec<crate::boot_meta::StagedCredential> = config
             .credential_files
@@ -210,6 +223,15 @@ impl VmPort for CloudHypervisorAdapter {
             }
         }
 
+        // Stage the root CA certificate so guest/init.sh can inject it
+        // into the guest trust store at boot. This decouples the rootfs
+        // image from any specific CA, enabling CI-built rootfs distribution.
+        if let Some(ref pem) = config.ca_cert_pem {
+            std::fs::write(meta_dir.join("root.crt"), pem).with_context(|| {
+                format!("Failed to write CA cert to {}", meta_dir.join("root.crt").display())
+            })?;
+        }
+
         // Stage the status dir for the writable aboxstatus virtiofs share.
         std::fs::create_dir_all(&status_dir)
             .with_context(|| format!("Failed to create status dir {}", status_dir.display()))?;
@@ -217,23 +239,34 @@ impl VmPort for CloudHypervisorAdapter {
         // and the guest can truncate it without permission errors.
         let _ = std::fs::write(status_dir.join("exit-code"), "");
 
+        tracing::info!(
+            sandbox_id = %config.id,
+            elapsed_ms = t_meta.elapsed().as_millis() as u64,
+            "boot metadata staged"
+        );
+
         // Clean up any stale sockets/files from a previous run
         for sock in [&virtiofs_socket, &meta_socket, &status_socket, &api_socket, &vsock_socket] {
             let _ = std::fs::remove_file(sock);
         }
         let _ = std::fs::remove_file(&console_socket);
 
-        // ── Step 1: Start workspace virtiofsd ──
-        // virtiofsd serves the git worktree to the VM via the vhost-user protocol.
-        // --sandbox=none avoids namespace restrictions that require elevated privileges.
-        // --cache=never avoids consuming host page cache (important at scale).
-        // --uid-map / --gid-map remap host uid/gid to guest uid 1000 so the agent
-        // (running as uid 1000) can read/write the worktree without privilege issues.
+        // ── Step 1: Start all three virtiofsd instances ──
+        // Spawn all three processes up front, then wait for their sockets in
+        // parallel via tokio::join!(). This collapses ~3× the single-socket
+        // wait time down to ~1× (saving ~100-200ms on the critical path).
+        let t_vfs = std::time::Instant::now();
+
+        // Workspace virtiofsd: serves the git worktree to the VM.
+        // --sandbox=namespace confines virtiofsd via Linux user namespaces
+        // (required for --uid-map/--gid-map and for security).
+        // --cache=never avoids host page-cache pressure at scale.
+        // --uid-map / --gid-map remap host uid/gid → guest uid 1000.
         let uid = host_uid();
         let gid = host_gid();
         let virtiofsd_args =
             workspace_virtiofsd_args(&virtiofs_socket, &config.worktree_path, uid, gid);
-        let mut cmd = Command::new("virtiofsd");
+        let mut cmd = Command::new(self.resolve_binary("virtiofsd")?);
         for a in &virtiofsd_args {
             cmd.arg(a);
         }
@@ -241,58 +274,49 @@ impl VmPort for CloudHypervisorAdapter {
             "Failed to start workspace virtiofsd. Run scripts/bootstrap_vm.sh to install it.",
         )?;
 
-        Self::wait_for_socket(&virtiofs_socket, 5000)
-            .await
-            .context("workspace virtiofsd socket did not appear within 5 seconds")?;
-
-        // ── Step 1b: Start meta virtiofsd ──
-        // Note: virtiofsd 1.x removed the --readonly flag; the guest only reads
-        // this mount in practice.
-        let meta_virtiofsd_child = Command::new("virtiofsd")
+        // Meta virtiofsd (read-only in practice; serves boot metadata).
+        let meta_virtiofsd_child = Command::new(self.resolve_binary("virtiofsd")?)
             .arg(format!("--socket-path={}", meta_socket.display()))
             .arg(format!("--shared-dir={}", meta_dir.display()))
             .arg("--cache=never")
-            .arg("--sandbox=none")
             .kill_on_drop(true)
             .spawn()
             .context("Failed to start meta virtiofsd")?;
 
-        Self::wait_for_socket(&meta_socket, 5000)
-            .await
-            .context("meta virtiofsd socket did not appear within 5 seconds")?;
-
-        // ── Step 1c: Start status virtiofsd (read-write) ──
-        // This share is writable from inside the guest so `init.sh` can
-        // report the agent's exit code back to the host via a staged file.
-        let status_virtiofsd_child = Command::new("virtiofsd")
+        // Status virtiofsd (read-write; for exit-code reporting).
+        let status_virtiofsd_child = Command::new(self.resolve_binary("virtiofsd")?)
             .arg(format!("--socket-path={}", status_socket.display()))
             .arg(format!("--shared-dir={}", status_dir.display()))
             .arg("--cache=never")
-            .arg("--sandbox=none")
             .kill_on_drop(true)
             .spawn()
             .context("Failed to start status virtiofsd")?;
 
-        Self::wait_for_socket(&status_socket, 5000)
-            .await
-            .context("status virtiofsd socket did not appear within 5 seconds")?;
+        // Wait for all three sockets concurrently instead of sequentially.
+        let (ws_res, meta_res, status_res) = tokio::join!(
+            Self::wait_for_socket(&virtiofs_socket, 5000),
+            Self::wait_for_socket(&meta_socket, 5000),
+            Self::wait_for_socket(&status_socket, 5000),
+        );
+        ws_res.context("workspace virtiofsd socket did not appear within 5 seconds")?;
+        meta_res.context("meta virtiofsd socket did not appear within 5 seconds")?;
+        status_res.context("status virtiofsd socket did not appear within 5 seconds")?;
 
-        tracing::debug!(
+        tracing::info!(
             sandbox_id = %config.id,
-            workspace_socket = %virtiofs_socket.display(),
-            meta_socket = %meta_socket.display(),
-            status_socket = %status_socket.display(),
-            "virtiofsd up"
+            elapsed_ms = t_vfs.elapsed().as_millis() as u64,
+            "virtiofsd ready"
         );
 
         // ── Step 2: Start Cloud Hypervisor ──
+        let t_ch = std::time::Instant::now();
         let ch_child = match &config.start_mode {
             StartMode::Fresh => {
                 // --memory shared=on is REQUIRED for virtiofs (enables shared memory mapping).
                 // --fs connects virtiofsd sockets as virtio-fs devices.
                 // --console file= captures the VM's serial console for debugging.
                 // --vsock allows the guest shim to communicate with the host proxy daemon.
-                let child = Command::new("cloud-hypervisor")
+                let child = Command::new(self.resolve_binary("cloud-hypervisor")?)
                     .arg("--api-socket")
                     .arg(api_socket.display().to_string())
                     .arg("--cpus")
@@ -304,7 +328,7 @@ impl VmPort for CloudHypervisorAdapter {
                     .arg("--kernel")
                     .arg(config.kernel_path.display().to_string())
                     .arg("--cmdline")
-                    .arg("console=hvc0 root=/dev/vda rw quiet")
+                    .arg("console=hvc0 root=/dev/vda rw quiet nomodeset noresume nokaslr raid=noautodetect")
                     // cloud-hypervisor v44+ requires multiple --fs values as separate
                     // positional values after a single --fs flag (not repeated --fs flags).
                     .arg("--fs")
@@ -333,7 +357,7 @@ impl VmPort for CloudHypervisorAdapter {
             }
             StartMode::Restore { template_path } => {
                 // Restore from snapshot: CH starts paused, then we resume.
-                let child = Command::new("cloud-hypervisor")
+                let child = Command::new(self.resolve_binary("cloud-hypervisor")?)
                     .arg("--api-socket")
                     .arg(api_socket.display().to_string())
                     .arg("--restore")
@@ -352,7 +376,7 @@ impl VmPort for CloudHypervisorAdapter {
         // In restore mode the VM comes up paused; resume it now that
         // virtiofsd instances are listening on the expected socket paths.
         if matches!(&config.start_mode, StartMode::Restore { .. }) {
-            let status = Command::new("ch-remote")
+            let status = Command::new(self.resolve_binary("ch-remote")?)
                 .arg("--api-socket")
                 .arg(api_socket.display().to_string())
                 .arg("resume")
@@ -371,6 +395,7 @@ impl VmPort for CloudHypervisorAdapter {
             pid,
             memory_mib = config.memory_mib,
             vcpus = config.vcpus,
+            elapsed_ms = t_ch.elapsed().as_millis() as u64,
             "MicroVM started"
         );
 
@@ -496,6 +521,26 @@ impl VmPort for CloudHypervisorAdapter {
             .collect())
     }
 
+    async fn wait_for_exit(&self, id: &str) -> Result<()> {
+        loop {
+            {
+                let mut vms = self.vms.lock().await;
+                match vms.get_mut(id) {
+                    Some(vm) => {
+                        if let Ok(Some(_)) = vm.ch_child.try_wait() {
+                            self.cleanup_vm_files(id, vm, false);
+                            drop(vms);
+                            self.vms.lock().await.remove(id);
+                            return Ok(());
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     fn status_dir(&self, id: &str) -> Option<PathBuf> {
         Some(self.runtime_dir.join(format!("status-{id}")))
     }
@@ -512,7 +557,7 @@ mod tests {
         // Pad with nested directories to push total length well past 108.
         let deep = tmp.path().join("a".repeat(90));
         std::fs::create_dir_all(&deep).unwrap();
-        let result = CloudHypervisorAdapter::new(deep);
+        let result = CloudHypervisorAdapter::new(deep, tmp.path().to_path_buf());
         assert!(result.is_err(), "expected Err for deep runtime_dir");
         let msg = format!("{}", result.err().unwrap());
         assert!(msg.contains("too deep"), "error should mention 'too deep', got: {msg}");
@@ -523,7 +568,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // A short path should succeed.
         let short = tmp.path().join("r");
-        let result = CloudHypervisorAdapter::new(short);
+        let result = CloudHypervisorAdapter::new(short, tmp.path().to_path_buf());
         assert!(result.is_ok(), "expected Ok for short runtime_dir, got: {:?}", result.err());
     }
 

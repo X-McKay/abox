@@ -95,6 +95,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         command: args.command,
         timeout_secs: args.timeout,
         ephemeral: args.ephemeral,
+        ca_cert_pem: None, // Populated by run_sandbox from the loaded RootCa.
     };
 
     println!("Sandbox '{}' starting...", args.task);

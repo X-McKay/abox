@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build artifacts without publishing a release (for smoke testing)'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -73,6 +79,8 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    # Skip publishing on dry-run (workflow_dispatch with dry_run=true).
+    if: ${{ !inputs.dry_run }}
     needs: [build, vm-assets]
     runs-on: ubuntu-latest
     steps:

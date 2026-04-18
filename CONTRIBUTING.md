@@ -53,7 +53,7 @@ We enforce strict code quality via CI and pre-commit hooks:
 
 ## Running the End-to-End Test
 
-`./scripts/e2e_test.sh` (or `just e2e`) is the canonical
+`./scripts/local/e2e_test.sh` (or `just e2e`) is the canonical
 verification gate for any change touching the orchestrator, the
 proxy bridge, the bootstrap, or the guest init. It runs six phases:
 
@@ -74,7 +74,7 @@ continues. The CI workflow runs phases 1-5 only — phase 6 needs
 `/dev/kvm` which most managed runners don't expose.
 
 To add a new phase, append a `section "phase N — ..."` block in
-`scripts/e2e_test.sh` with `step` / `how` / `expect` / `pass` /
+`scripts/local/e2e_test.sh` with `step` / `how` / `expect` / `pass` /
 `fail` calls. The summary footer counts every `pass`/`fail`
 invocation so new assertions are picked up automatically.
 
@@ -88,7 +88,7 @@ log readable and lets the project evolve in small, reviewable steps.
 
 A recent example: `docs/plans/2026-04-08-vm-e2e-hardening.md`,
 which drained 13 P0/P1/P2 backlog items in one session, every
-behavior change gated on TDD + `just check` + `./scripts/e2e_test.sh`.
+behavior change gated on TDD + `just check` + `./scripts/local/e2e_test.sh`.
 
 ## Pull Request Process
 

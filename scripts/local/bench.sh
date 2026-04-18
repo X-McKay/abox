@@ -16,9 +16,9 @@
 # simple `jq` pipeline that tracks regressions over time.
 #
 # Usage:
-#   ./scripts/bench.sh                # run once, print results
-#   ./scripts/bench.sh --runs 5       # average over 5 runs
-#   ./scripts/bench.sh --json-only    # suppress the table, emit only JSON
+#   ./scripts/local/bench.sh                # run once, print results
+#   ./scripts/local/bench.sh --runs 5       # average over 5 runs
+#   ./scripts/local/bench.sh --json-only    # suppress the table, emit only JSON
 #
 # Requirements: same as phase 6 of e2e_test.sh — a bootstrapped VM stack
 # under ~/.abox/vm/ and /dev/kvm accessible to the current user.
@@ -50,7 +50,7 @@ EOF
 done
 
 # ─── Prereq check ────────────────────────────────────────────────────────────
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ABOX_VM="$HOME/.abox/vm"
 
 if [[ ! -x "$ABOX_VM/cloud-hypervisor" ]] || [[ ! -f "$ABOX_VM/rootfs.raw" ]]; then

@@ -60,8 +60,8 @@ Walk the canonical [`docs/contributing/pre-pr-checklist.md`](docs/contributing/p
 
 Key gates at a glance:
 
-- `just check` and `just deny` pass.
-- `scripts/e2e_test.sh` phases 1–5 pass locally.
+- `just tier-ci` passes (fmt + clippy + test + supply-chain audit).
+- `scripts/local/e2e_test.sh` phases 1–5 pass locally (or `just tier-vm` for all phases with KVM).
 - If the diff touches VM/guest/proxy code (see the checklist for the exact path list), `just e2e-vm` passes and the PR carries the `vm-attested` label.
 
 ### When You Change `just`, CI, or Release Steps
@@ -70,7 +70,7 @@ Tooling changes ship with their documentation update **in the same PR**. If you:
 
 - Add or modify a recipe in `justfile` →
 - Add or modify a workflow under `.github/workflows/` →
-- Change a step in `scripts/release.sh` →
+- Change a step in `scripts/release.sh` or `scripts/pre_release.sh` →
 
 …then the same PR must update `AGENTS.md` and any affected skill in `.claude/skills/`. The pre-PR checklist and an advisory CI reminder both flag this; the PR is not complete until the docs reflect the new reality. This keeps AI assistants (Copilot, Codex, Claude Code) from steering future contributors toward stale commands.
 
@@ -111,6 +111,23 @@ cargo test --workspace -- --nocapture
 - **Unit tests** (`#[test]`): Run everywhere, no external dependencies.
 - **Async tests** (`#[tokio::test]`): For orchestrator and proxy tests.
 - **Integration tests** (`#[ignore]`): Require KVM/Cloud Hypervisor. Run with `cargo test -- --ignored`.
+
+### Test Tiers
+
+Tests are organized into four tiers by their requirements:
+
+| Tier | Recipe | What Runs | Requires |
+|------|--------|-----------|----------|
+| 1 | `just tier-ci` | fmt + clippy + test + cargo deny | Nothing special |
+| 2 | `just tier-vm` | e2e_test.sh (all phases) + rootfs freshness check | `/dev/kvm` + bootstrapped VM |
+| 3 | `just tier-bench` | criterion + VM latency benchmarks (5 runs) | `/dev/kvm` + bootstrapped VM |
+| 4 | `just tier-smoke` | real Claude/Codex API calls through MITM proxy | KVM + real OAuth credentials |
+
+**CI-safe vs local-only:** Scripts in `scripts/ci/` are safe for GitHub Actions. Scripts in `scripts/local/` require KVM, VM artifacts, or credentials — never wire them into CI workflows.
+
+**Before a release:** Run `just pre-release`. It detects host capabilities, runs all applicable tiers, compares benchmarks against the previous release, and writes attestation stamps. `release.sh` verifies these stamps before tagging.
+
+**During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just tier-vm` after VM/guest changes.
 
 ## Files You Should NOT Modify Without Good Reason
 

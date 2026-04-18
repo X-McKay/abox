@@ -11,7 +11,7 @@
 # It is self-contained: everything lives under a fresh sandbox directory
 # inside this repo (.scratch/e2e-run-<pid>) and is removed on exit.
 #
-# Usage:  ./scripts/e2e_test.sh
+# Usage:  ./scripts/local/e2e_test.sh
 #
 # Exit code: 0 on success, non-zero on first failed assertion.
 
@@ -96,7 +96,7 @@ assert_file_absent() {
 }
 
 # ─── Setup ──────────────────────────────────────────────────────────────────
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRATCH="$REPO_ROOT/.scratch/e2e-run-$$"
 ABOX_BIN="$REPO_ROOT/target/debug/abox"
 PROXYD_BIN="$REPO_ROOT/target/debug/abox-proxyd"
@@ -305,10 +305,21 @@ ABOX_HOME_DEFAULT="$HOME/.abox"
 PROXYD_PID=$!
 # Wait for socket to appear (max ~2s).
 SOCK="$SCRATCH/r/cli-proxy.sock"
-for _ in $(seq 1 40); do
-    [[ -S "$SOCK" ]] && break
-    sleep 0.05
-done
+if command -v inotifywait >/dev/null 2>&1; then
+    inotifywait -qq -t 2 -e create "$(dirname "$SOCK")" 2>/dev/null &
+    INOTIFY_PID=$!
+    if [[ -S "$SOCK" ]]; then
+        kill "$INOTIFY_PID" 2>/dev/null || true
+        wait "$INOTIFY_PID" 2>/dev/null || true
+    else
+        wait "$INOTIFY_PID" 2>/dev/null || true
+    fi
+else
+    for _ in $(seq 1 40); do
+        [[ -S "$SOCK" ]] && break
+        sleep 0.05
+    done
+fi
 assert_file_exists "cli-proxy.sock present" "$SOCK"
 # Confirm proxyd actually honored --config (not ~/.abox/...).
 if grep -q "$SCRATCH/state/logs/audit.jsonl" "$SCRATCH/proxyd.log"; then
@@ -429,7 +440,7 @@ else
     # Capture stdout+stderr to a file so we can also assert on the live
     # console output (D4): the guest init banner must reach the host.
     RUN_OUT_FILE="$SCRATCH/vm-e2e-run.out"
-    if timeout 90 $ABOX run --task vm-e2e --base main -- \
+    if timeout 30 $ABOX run --task vm-e2e --base main -- \
         /usr/local/bin/git status >"$RUN_OUT_FILE" 2>&1; then
         pass "vm boot + agent exec"
     else
@@ -486,7 +497,7 @@ else
     step "Non-zero agent exit propagates to abox run"
     how 'abox run --task vm-e2e-fail -- /bin/sh -c "exit 7"'
     expect "abox run exits with 7 (guest runner.sh RC bubbled out through aboxstatus)"
-    if timeout 90 $ABOX run --task vm-e2e-fail --base main -- \
+    if timeout 30 $ABOX run --task vm-e2e-fail --base main -- \
         /bin/sh -c "exit 7" >"$SCRATCH/fail-run.log" 2>&1; then
         fail "exit code propagation" "abox run returned 0 but guest exited 7"
         tail -20 "$SCRATCH/fail-run.log" | sed "s/^/    /"
@@ -507,7 +518,7 @@ else
     step "Boot a sandbox that creates a file, commits it, and exits"
     how 'abox run --task lifecycle -- /bin/sh -c "create LICENSE, git add, git commit"'
     expect "agent exits 0; worktree has 1 commit ahead of main"
-    if timeout 90 $ABOX run --task lifecycle --base main -- \
+    if timeout 30 $ABOX run --task lifecycle --base main -- \
         /bin/sh -c 'echo "MIT License" > LICENSE && git add LICENSE && git -c user.email=e2e@abox -c user.name=e2e commit -q -m "add license"' \
         >"$SCRATCH/lifecycle-run.log" 2>&1; then
         pass "agent commit sandbox booted and exited cleanly"
@@ -542,7 +553,7 @@ else
     step "Policy denies git push --force from inside a sandbox"
     how 'abox run --task deny-test -- git push --force origin main'
     expect "exit 126; stderr mentions denied"
-    DENY_OUT=$(timeout 90 $ABOX run --task deny-test --base main -- \
+    DENY_OUT=$(timeout 30 $ABOX run --task deny-test --base main -- \
         /usr/local/bin/git push --force origin main 2>&1 || true)
     if echo "$DENY_OUT" | grep -qi "denied"; then
         pass "force push denied by policy"
@@ -576,7 +587,7 @@ else
         step "Credential injection: curl through proxy"
         how 'abox run --task cred-test -- curl -sf -o /dev/null -w "%{http_code}" https://api.anthropic.com/v1/messages'
         expect "curl exits 0 (proxy injects x-api-key header)"
-        if timeout 90 $ABOX run --task cred-test --base main -- \
+        if timeout 30 $ABOX run --task cred-test --base main -- \
             curl -sf -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/messages \
             >"$SCRATCH/cred-test.log" 2>&1; then
             pass "curl through injecting proxy succeeded"

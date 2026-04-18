@@ -26,12 +26,11 @@ If the answer is `main` (or empty), stop and invoke the `start-feature` skill. N
 ### 2. Run the Always gates
 
 ```bash
-just check
-just deny
-./scripts/e2e_test.sh
+just tier-ci
+./scripts/local/e2e_test.sh
 ```
 
-`just check` = `fmt-check + lint + test`. `just deny` = `cargo deny check`. The e2e script runs phases 1–5 on any host (no VM needed). If any of these fail, stop and fix. Do not report success until they are green.
+`just tier-ci` = `fmt-check + lint + test + cargo deny check`. The e2e script runs phases 1–5 on any host (no VM needed). If any of these fail, stop and fix. Do not report success until they are green.
 
 ### 3. Evaluate path-triggered VM attestation
 
@@ -58,13 +57,17 @@ If required:
 - Run `just e2e-vm` and wait for completion. This needs a bootstrapped VM and `/dev/kvm`.
 - Record the timestamp. When you report the result to the user, include: "VM attestation required. Run `just e2e-vm` passed at <ISO-8601>. After opening the PR, add the `vm-attested` label and post a PR comment with this timestamp."
 
+### 3b. Note on release vs PR gates
+
+The above gates are for PRs. For releases, the full pre-release validation (`just pre-release`) must pass — this includes benchmarks and agent smoke tests. See the `release-preparation` skill.
+
 ### 4. Evaluate documentation updates
 
 For the same diff, map touched code paths to docs that may need updating (see [`docs/contributing/pre-pr-checklist.md#documentation-updates`](../../docs/contributing/pre-pr-checklist.md#documentation-updates)). Report which docs you checked and whether each needed an update in this PR.
 
 ### 5. Meta-rule: tooling-changed-so-docs-must-too
 
-If the diff touches `justfile`, `.github/workflows/**`, or `scripts/release.sh`, verify that **this same PR** also updates `AGENTS.md` and any affected skill under `.claude/skills/`. If not, refuse to mark the PR ready; add the missing updates first.
+If the diff touches `justfile`, `.github/workflows/**`, `scripts/release.sh`, or `scripts/pre_release.sh`, verify that **this same PR** also updates `AGENTS.md` and any affected skill under `.claude/skills/`. If not, refuse to mark the PR ready; add the missing updates first.
 
 ### 6. Conventional-commit message quality
 

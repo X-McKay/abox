@@ -32,24 +32,32 @@ pub fn execute(args: &InitArgs) -> Result<()> {
     let vm_dir = default_state_dir().join("vm");
     ensure_vm_artifacts(&vm_dir, args.yes)?;
 
-    // ── Step 3: Config file ──────────────────────────────────────────────────
-    print_step(3, "Checking config file");
-    ensure_config_file(&vm_dir)?;
+    // ── Step 3: Root CA ──────────────────────────────────────────────────────
+    print_step(3, "Checking root CA");
+    ensure_root_ca()?;
 
-    // ── Step 4: Policy file ──────────────────────────────────────────────────
-    print_step(4, "Checking policy file");
+    // ── Step 4: Config file ──────────────────────────────────────────────────
+    print_step(4, "Checking config file");
+    let config_path = ensure_config_file(&vm_dir)?;
+
+    // ── Step 5: Policy file ──────────────────────────────────────────────────
+    print_step(5, "Checking policy file");
     ensure_policy_file()?;
 
-    // ── Step 5: PATH ─────────────────────────────────────────────────────────
-    print_step(5, "Checking PATH");
-    check_path(&vm_dir);
+    // ── Step 6: Credential detection ─────────────────────────────────────────
+    print_step(6, "Detecting credentials");
+    detect_credentials(&config_path, args.yes)?;
+
+    // ── Step 7: PATH ─────────────────────────────────────────────────────────
+    print_step(7, "Checking PATH");
+    check_path();
 
     // ── Summary ──────────────────────────────────────────────────────────────
     println!();
     println!("Setup complete. You're ready to run your first sandbox:");
     println!();
     println!("  cd /path/to/your/git/repo");
-    println!("  abox run --task hello -- /bin/sh -c \"echo hello from inside the sandbox\"");
+    println!("  abox run --task hello -- echo \"hello from inside the sandbox\"");
     println!();
     println!("See 'abox doctor' at any time to re-check your environment.");
 
@@ -75,26 +83,13 @@ fn default_state_dir() -> PathBuf {
 }
 
 fn check_kvm() -> Result<()> {
-    let kvm = Path::new("/dev/kvm");
-    if !kvm.exists() {
-        anyhow::bail!(
-            "/dev/kvm not found.\n\n\
-             abox requires a Linux host with KVM support.\n\
-             Ensure your kernel has KVM enabled and that you're running on\n\
-             bare metal or a VM that exposes nested virtualisation."
-        );
-    }
-    match std::fs::OpenOptions::new().read(true).write(true).open(kvm) {
-        Ok(_) => {
+    match crate::kvm::diagnose_kvm() {
+        crate::kvm::KvmStatus::Available => {
             print_ok("/dev/kvm is accessible");
             Ok(())
         }
-        Err(_) => {
-            anyhow::bail!(
-                "Permission denied on /dev/kvm.\n\n\
-                 Add yourself to the kvm group and log out/in:\n\n\
-                 \x20 sudo usermod -aG kvm $USER"
-            )
+        crate::kvm::KvmStatus::Unavailable { condition, remediation } => {
+            anyhow::bail!("{condition}\n\n{remediation}")
         }
     }
 }
@@ -165,13 +160,26 @@ fn find_bootstrap_script() -> Option<PathBuf> {
     None
 }
 
-fn ensure_config_file(vm_dir: &Path) -> Result<()> {
+fn ensure_root_ca() -> Result<()> {
+    let ca_dir = abox_core::ca::RootCa::default_dir()?;
+    if ca_dir.join("root.crt").exists() && ca_dir.join("root.key").exists() {
+        print_ok("Root CA already exists");
+        return Ok(());
+    }
+    // Generate directly — no need for cargo/source tree.
+    let _ca =
+        abox_core::ca::RootCa::load_or_generate(&ca_dir).context("Failed to generate root CA")?;
+    print_action(&format!("Generated root CA at {}", ca_dir.display()));
+    Ok(())
+}
+
+fn ensure_config_file(vm_dir: &Path) -> Result<PathBuf> {
     let state_dir = default_state_dir();
     let config_path = state_dir.join("config.toml");
 
     if config_path.exists() {
         print_ok(&format!("Config file already exists: {}", config_path.display()));
-        return Ok(());
+        return Ok(config_path);
     }
 
     std::fs::create_dir_all(&state_dir)
@@ -208,7 +216,7 @@ fn ensure_config_file(vm_dir: &Path) -> Result<()> {
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
 
     print_action(&format!("Created {}", config_path.display()));
-    Ok(())
+    Ok(config_path)
 }
 
 fn ensure_policy_file() -> Result<()> {
@@ -256,29 +264,104 @@ fn find_source_policy() -> Option<PathBuf> {
     None
 }
 
-fn check_path(vm_dir: &Path) {
-    let local_bin: PathBuf =
-        dirs::home_dir().map_or_else(|| PathBuf::from("~/.local/bin"), |h| h.join(".local/bin"));
+/// Detect host credentials and offer to add them to config.
+///
+/// Claude credentials are already in the default config (`GuestConfig::default()`
+/// adds `~/.claude/.credentials.json`). This wizard focuses on Codex, which is
+/// not in the default, and prints a summary of all credential sources.
+fn detect_credentials(config_path: &Path, yes: bool) -> Result<()> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
 
-    let ch_on_path = std::env::var("PATH")
+    // Check known credential sources.
+    let claude_found = home.join(".claude/.credentials.json").exists();
+    let codex_found = home.join(".codex/auth.json").exists();
+    let github_token = std::env::var("GITHUB_TOKEN").is_ok();
+    let google_key = std::env::var("GOOGLE_API_KEY").is_ok();
+
+    // Offer to add Codex credentials if found and not already in config.
+    if codex_found {
+        let config_content = std::fs::read_to_string(config_path).unwrap_or_default();
+        if config_content.contains(".codex/auth.json") {
+            print_ok("Codex credentials already configured");
+        } else {
+            let add = if yes {
+                true
+            } else {
+                print!("    Found Codex credentials at ~/.codex/auth.json. Add to sandbox config? [Y/n] ");
+                use std::io::Write;
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let trimmed = input.trim().to_lowercase();
+                trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+            };
+
+            if add {
+                let entry = "\n\
+                    [[guest.credential_files]]\n\
+                    host = \"~/.codex/auth.json\"\n\
+                    guest = \"~/.codex/auth.json\"\n\
+                    mode = \"0600\"\n";
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(config_path)
+                    .with_context(|| format!("Failed to append to {}", config_path.display()))?;
+                use std::io::Write;
+                file.write_all(entry.as_bytes())?;
+                print_action("Added Codex credentials to config");
+            }
+        }
+    }
+
+    // Print status summary.
+    println!();
+    println!("    Credential status:");
+    println!(
+        "      Claude Code: {}",
+        if claude_found {
+            "~/.claude/.credentials.json (configured by default)"
+        } else {
+            "not found"
+        }
+    );
+    println!(
+        "      Codex:       {}",
+        if codex_found { "~/.codex/auth.json (configured)" } else { "not found" }
+    );
+    println!(
+        "      GITHUB_TOKEN: {}",
+        if github_token { "set (policy handles injection)" } else { "not set" }
+    );
+    println!(
+        "      GOOGLE_API_KEY: {}",
+        if google_key { "set (policy handles injection)" } else { "not set" }
+    );
+
+    Ok(())
+}
+
+fn check_path() {
+    let abox_bin = default_state_dir().join("bin");
+
+    let abox_on_path = std::env::var("PATH")
         .unwrap_or_default()
         .split(':')
-        .any(|p| Path::new(p).join("cloud-hypervisor").exists());
+        .any(|p| Path::new(p).join("abox").exists());
 
-    if ch_on_path {
-        print_ok("cloud-hypervisor is on PATH");
-    } else if vm_dir.join("cloud-hypervisor").exists() {
+    if abox_on_path {
+        print_ok("abox is on PATH");
+    } else if abox_bin.join("abox").exists() {
         println!(
-            "    ! ~/.local/bin is not on your PATH.\n\
+            "    ! abox is not on your PATH.\n\
              \n\
              \x20 Add this line to your shell profile (~/.bashrc or ~/.zshrc):\n\
              \n\
              \x20   export PATH=\"{}:$PATH\"\n\
              \n\
              \x20 Then reload your shell: source ~/.bashrc",
-            local_bin.display()
+            abox_bin.display()
         );
     } else {
-        print_ok("PATH check skipped (VM artifacts not yet installed)");
+        print_ok("PATH check skipped (running from source build)");
     }
 }
