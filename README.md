@@ -157,7 +157,7 @@ problems.
    # [guest]
    # [[guest.credential_files]]
    # host = "~/.claude/.credentials.json"
-   # guest = "/.claude/.credentials.json"
+   # guest = "~/.claude/.credentials.json"
    # [guest.credential_files.stub.claudeAiOauth]
    # accessToken = "abox-proxy-managed"
    # ...
