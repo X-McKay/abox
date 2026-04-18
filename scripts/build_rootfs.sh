@@ -154,26 +154,26 @@ mkdir -p "$NPM_PREFIX/lib" "$NPM_PREFIX/bin"
 # support is properly tested.
 npm install --global --prefix "$NPM_PREFIX" \
     @anthropic-ai/claude-code@2.1.109 @openai/codex@0.121.0 2>&1 | tail -5
+# Fix absolute shebangs in npm-generated shims to use /usr/bin/env node.
+# Host npm may embed the host's node path which won't exist in the guest.
+find "$NPM_PREFIX/bin" -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +
 
-# ── Install abox CA cert into the system trust store ──────────────────
-# The MITM egress proxy presents leaf certs signed by this CA. Node.js
-# agents find it via NODE_EXTRA_CA_CERTS, but Rust/Go/Python agents use
-# the system trust bundle. We add it to both paths so all agents work.
+# ── Build the system CA trust bundle ──────────────────────────────────
+# apk --no-scripts installs individual PEM files from ca-certificates but
+# does NOT run update-ca-certificates to build the bundle. We concatenate
+# them manually so OpenSSL/rustls-native-certs/Go crypto find the system
+# trust store at /etc/ssl/certs/ca-certificates.crt.
+echo "  building system CA trust bundle..."
+mkdir -p "$STAGE/etc/ssl/certs"
+if ls "$STAGE/usr/share/ca-certificates/mozilla/"*.crt >/dev/null 2>&1; then
+    cat "$STAGE/usr/share/ca-certificates/mozilla/"*.crt \
+        > "$STAGE/etc/ssl/certs/ca-certificates.crt"
+fi
+# Append the abox MITM CA so agents trust the TLS-terminating proxy.
 if [ -f "$HOME/.abox/ca/root.crt" ]; then
     echo "  installing abox CA cert into guest trust store..."
-    # Individual PEM for NODE_EXTRA_CA_CERTS
-    mkdir -p "$STAGE/etc/ssl/certs"
     cp "$HOME/.abox/ca/root.crt" "$STAGE/etc/ssl/certs/abox-ca.pem"
-    # Append to the system CA bundle so OpenSSL/rustls-native-certs/etc.
-    # trust the MITM CA alongside the standard Mozilla roots.
-    if [ -f "$STAGE/etc/ssl/certs/ca-certificates.crt" ]; then
-        cat "$HOME/.abox/ca/root.crt" >> "$STAGE/etc/ssl/certs/ca-certificates.crt"
-    else
-        # Alpine miniroot may not have the bundle; create one from the
-        # ca-certificates package output + our CA.
-        mkdir -p "$STAGE/usr/local/share/ca-certificates"
-        cp "$HOME/.abox/ca/root.crt" "$STAGE/usr/local/share/ca-certificates/abox-ca.crt"
-    fi
+    cat "$HOME/.abox/ca/root.crt" >> "$STAGE/etc/ssl/certs/ca-certificates.crt"
 fi
 
 echo "  installing abox-shim and symlinks..."
