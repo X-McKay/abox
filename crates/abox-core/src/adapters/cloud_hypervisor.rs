@@ -225,7 +225,8 @@ impl VmPort for CloudHypervisorAdapter {
 
         // ── Step 1: Start workspace virtiofsd ──
         // virtiofsd serves the git worktree to the VM via the vhost-user protocol.
-        // --sandbox=none avoids namespace restrictions that require elevated privileges.
+        // --sandbox=namespace confines virtiofsd to its shared directory via Linux
+        // user namespaces (required for --uid-map/--gid-map and for security).
         // --cache=never avoids consuming host page cache (important at scale).
         // --uid-map / --gid-map remap host uid/gid to guest uid 1000 so the agent
         // (running as uid 1000) can read/write the worktree without privilege issues.
@@ -248,11 +249,11 @@ impl VmPort for CloudHypervisorAdapter {
         // ── Step 1b: Start meta virtiofsd ──
         // Note: virtiofsd 1.x removed the --readonly flag; the guest only reads
         // this mount in practice.
+        // Defaults: --sandbox=namespace (confines to shared-dir), --seccomp=kill.
         let meta_virtiofsd_child = Command::new("virtiofsd")
             .arg(format!("--socket-path={}", meta_socket.display()))
             .arg(format!("--shared-dir={}", meta_dir.display()))
             .arg("--cache=never")
-            .arg("--sandbox=none")
             .kill_on_drop(true)
             .spawn()
             .context("Failed to start meta virtiofsd")?;
@@ -264,11 +265,11 @@ impl VmPort for CloudHypervisorAdapter {
         // ── Step 1c: Start status virtiofsd (read-write) ──
         // This share is writable from inside the guest so `init.sh` can
         // report the agent's exit code back to the host via a staged file.
+        // Defaults: --sandbox=namespace (confines to shared-dir), --seccomp=kill.
         let status_virtiofsd_child = Command::new("virtiofsd")
             .arg(format!("--socket-path={}", status_socket.display()))
             .arg(format!("--shared-dir={}", status_dir.display()))
             .arg("--cache=never")
-            .arg("--sandbox=none")
             .kill_on_drop(true)
             .spawn()
             .context("Failed to start status virtiofsd")?;
