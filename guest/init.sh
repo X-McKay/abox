@@ -83,6 +83,10 @@ if [ -x "$SOCAT_BIN" ]; then
     done
     if [ ! -S /run/abox-proxy.sock ]; then
         echo "WARNING: /run/abox-proxy.sock did not appear within 5s; proceeding anyway"
+    else
+        # The socket is created by socat (running as root). The agent runs
+        # as the unprivileged abox user (uid=1000) and needs connect access.
+        chmod 666 /run/abox-proxy.sock
     fi
 else
     echo "WARNING: $SOCAT_BIN not found; proxy bridge unavailable"
