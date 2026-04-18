@@ -54,10 +54,12 @@ egress_port = 18443
 # by the egress proxy at the network layer (see `policies/default.toml`).
 # Stubs are the preferred mode: the VM never sees the real credential.
 #
-# The example below forwards Claude Code OAuth credentials. Uncomment and
-# adjust for your setup. See docs/explainer.md Section 8 for details.
+# The examples below forward Claude Code and Codex OAuth credentials.
+# Uncomment and adjust for your setup. See docs/explainer.md Section 8.
 #
 # [guest]
+#
+# # ── Claude Code ──
 # [[guest.credential_files]]
 # host = "~/.claude/.credentials.json"
 # guest = "~/.claude/.credentials.json"
@@ -70,3 +72,19 @@ egress_port = 18443
 # expiresAt = 9999999999999
 # scopes = ["user:inference"]
 # subscriptionType = "pro"
+#
+# # ── Codex (OpenAI) ──
+# [[guest.credential_files]]
+# host = "~/.codex/auth.json"
+# guest = "~/.codex/auth.json"
+# mode = "0600"
+#
+# [guest.credential_files.stub]
+# auth_mode = "chatgpt"
+#
+# [guest.credential_files.stub.tokens]
+# id_token = "abox-proxy-managed"
+# access_token = "abox-proxy-managed"
+# refresh_token = "abox-proxy-managed"
+# account_id = "abox-proxy-managed"
+# last_refresh = "2099-01-01T00:00:00Z"
