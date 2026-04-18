@@ -50,7 +50,7 @@ EOF
 done
 
 # ─── Prereq check ────────────────────────────────────────────────────────────
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ABOX_VM="$HOME/.abox/vm"
 
 if [[ ! -x "$ABOX_VM/cloud-hypervisor" ]] || [[ ! -f "$ABOX_VM/rootfs.raw" ]]; then

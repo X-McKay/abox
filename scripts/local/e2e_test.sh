@@ -96,7 +96,7 @@ assert_file_absent() {
 }
 
 # ─── Setup ──────────────────────────────────────────────────────────────────
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRATCH="$REPO_ROOT/.scratch/e2e-run-$$"
 ABOX_BIN="$REPO_ROOT/target/debug/abox"
 PROXYD_BIN="$REPO_ROOT/target/debug/abox-proxyd"

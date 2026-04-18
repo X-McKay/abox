@@ -17,7 +17,7 @@
 set -uo pipefail  # no -e: we handle errors per-test
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # Build the binary if needed, then use it directly.
