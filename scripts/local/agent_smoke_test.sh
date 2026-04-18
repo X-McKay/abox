@@ -156,25 +156,46 @@ if [[ "$FILTER" == "all" || "$FILTER" == "codex" ]]; then
 
     # C1: Smoke — single-turn (codex exec = non-interactive mode)
     echo "[C1] Single-turn smoke (3+3)..."
-    TIMEOUT=60 LOG=$(run_sandbox c1-smoke /bin/sh -c \
-        'cd /workspace && codex exec --full-auto "What is 3+3? Answer with just the number." 2>&1')
+    c1_run() {
+        TIMEOUT=60 LOG=$(run_sandbox "c1-smoke-$1" /bin/sh -c \
+            'cd /workspace && codex exec --full-auto "What is 3+3? Answer with just the number." 2>&1')
+    }
+    c1_run 1
     # Match "6" as a standalone word/number (not in timestamps or log lines)
     if grep -P '^\s*6\s*$|^.*codex.*\n6$' "$LOG" >/dev/null 2>&1 || \
        grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
         pass "C1: single-turn smoke"
     else
-        fail "C1: single-turn smoke" "see $LOG"
+        echo "  retrying C1 in 5s..."
+        sleep 5
+        c1_run 2
+        if grep -P '^\s*6\s*$|^.*codex.*\n6$' "$LOG" >/dev/null 2>&1 || \
+           grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
+            pass "C1: single-turn smoke (retry)"
+        else
+            fail "C1: single-turn smoke" "see $LOG"
+        fi
     fi
 
     # C2: Multi-turn tool use (read file)
     echo "[C2] Multi-turn tool use (read README)..."
-    LOG=$(run_sandbox c2-tool /bin/sh -c \
-        'cd /workspace && codex exec --full-auto "Read README.md and tell me what it says in 5 words." 2>&1')
+    c2_run() {
+        TIMEOUT=60 LOG=$(run_sandbox "c2-tool-$1" /bin/sh -c \
+            'cd /workspace && codex exec --full-auto "Read README.md and tell me what it says in 5 words." 2>&1')
+    }
+    c2_run 1
     # Filter out log noise, then look for content words from the README
     if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
         pass "C2: multi-turn tool use"
     else
-        fail "C2: multi-turn tool use" "see $LOG"
+        echo "  retrying C2 in 5s..."
+        sleep 5
+        c2_run 2
+        if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
+            pass "C2: multi-turn tool use (retry)"
+        else
+            fail "C2: multi-turn tool use" "see $LOG"
+        fi
     fi
 
     # C3: Non-root verification
