@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.2.0 — 2026-04-18
+
+### Features
+
+- Merge pull request #12 from X-McKay/security/harden-virtiofsd-and-credential-docs (535fe23)
+- feat: P1 install experience — ship v0.1.0 prerequisites (3e1ed7b)
+- feat: add pre-release validation orchestrator (8b6025a)
+
+### Fixes
+
+- fix: replace map().unwrap_or(false) with is_ok_and() in kvm.rs (01068a7)
+- fix: use is_ok_and instead of map().unwrap_or(false) for clippy (3c318f5)
+- fix: address PR review feedback (5769c83)
+- fix: correct REPO_ROOT paths after scripts/local/ restructure (008e3e6)
+- fix: improve test robustness (5cbc887)
+- fix(security): harden meta/status virtiofsd with namespace sandbox and seccomp (84b2420)
+
+### Refactoring
+
+- refactor: release.sh verifies attestation stamps instead of running tests (05facf1)
+
+### Documentation
+
+- docs: update pre-pr-checklist skill with tier vocabulary (863a0d0)
+- docs: update release-preparation skill for attestation workflow (07e8d46)
+- docs: update AGENTS.md with test tier system and pre-release workflow (7161f5f)
+- docs: update pre-pr-checklist with tier vocabulary and release process (f83f474)
+- docs: add pre-release validation spec and implementation plan (0cdf515)
+- docs(security): add credential-scoping guide for least-privilege tokens (c3363f5)
+
+### Chores
+
+- chore: add tier recipes and pre-release entrypoint to justfile (160fe26)
+- chore: update script references for scripts/local/ restructure (d0207ee)
+- chore: move local-only test scripts to scripts/local/ (0cba691)
+
+### Other
+
+- Merge pull request #12 from X-McKay/security/harden-virtiofsd-and-credential-docs (535fe23)
+- perf: reduce sandbox startup latency by 38% (478ms → 296ms) (faa3819)
+
+
 All notable changes to abox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 

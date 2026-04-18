@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "abox-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "abox-core",
  "anyhow",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "abox-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "abox-protocol",
  "anyhow",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "abox-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "abox-proxyd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "abox-core",
  "anyhow",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "abox-shim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "abox-protocol",
  "serde_json",
