@@ -10,6 +10,7 @@
 //! that relied solely on PATH, which broke for curl-pipe installs.
 
 use anyhow::{bail, Result};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Resolve a VM binary by name using the standard search order.
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub fn resolve_vm_binary(name: &str, state_dir: &Path) -> Result<PathBuf> {
     // 1. state_dir/vm/<name> (covers install.sh users)
     let vm_path = state_dir.join("vm").join(name);
-    if vm_path.exists() {
+    if is_executable(&vm_path) {
         return Ok(vm_path);
     }
 
@@ -38,12 +39,17 @@ pub fn resolve_vm_binary(name: &str, state_dir: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Check that a path exists and has at least one executable bit set.
+fn is_executable(path: &Path) -> bool {
+    path.metadata().map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0).unwrap_or(false)
+}
+
 /// Minimal `which`-style PATH lookup without pulling in the `which` crate.
 fn which(name: &str) -> Result<PathBuf> {
     let path_var = std::env::var("PATH").unwrap_or_default();
     for dir in path_var.split(':') {
         let candidate = Path::new(dir).join(name);
-        if candidate.exists() {
+        if is_executable(&candidate) {
             return Ok(candidate);
         }
     }
@@ -61,10 +67,25 @@ mod tests {
         std::fs::create_dir_all(&vm_dir).unwrap();
         let bin = vm_dir.join("test-binary");
         std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        // Must be executable to be found.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let result = resolve_vm_binary("test-binary", tmp.path());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), bin);
+    }
+
+    #[test]
+    fn resolve_skips_non_executable_in_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vm_dir = tmp.path().join("vm");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let bin = vm_dir.join("not-executable");
+        std::fs::write(&bin, b"data").unwrap();
+        // Leave permissions as 0o644 (not executable).
+
+        let result = resolve_vm_binary("not-executable", tmp.path());
+        assert!(result.is_err());
     }
 
     #[test]

@@ -147,7 +147,7 @@ impl CloudHypervisorAdapter {
             if start.elapsed().as_millis() > u128::from(timeout_ms) {
                 bail!("Timed out waiting for socket: {}", path.display());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 }
@@ -328,7 +328,7 @@ impl VmPort for CloudHypervisorAdapter {
                     .arg("--kernel")
                     .arg(config.kernel_path.display().to_string())
                     .arg("--cmdline")
-                    .arg("console=hvc0 root=/dev/vda rw quiet nomodeset noresume nokaslr nosmp raid=noautodetect")
+                    .arg("console=hvc0 root=/dev/vda rw quiet nomodeset noresume nokaslr raid=noautodetect")
                     // cloud-hypervisor v44+ requires multiple --fs values as separate
                     // positional values after a single --fs flag (not repeated --fs flags).
                     .arg("--fs")
