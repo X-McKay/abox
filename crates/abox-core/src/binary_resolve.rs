@@ -41,7 +41,7 @@ pub fn resolve_vm_binary(name: &str, state_dir: &Path) -> Result<PathBuf> {
 
 /// Check that a path exists and has at least one executable bit set.
 fn is_executable(path: &Path) -> bool {
-    path.metadata().map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0).unwrap_or(false)
+    path.metadata().is_ok_and(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
 }
 
 /// Minimal `which`-style PATH lookup without pulling in the `which` crate.
