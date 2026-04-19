@@ -8,6 +8,44 @@ use anyhow::Result;
 use std::path::Path;
 use std::path::PathBuf;
 
+// ── ANSI color helpers (crossterm is already a dep of abox-cli) ──────────────
+
+use crossterm::style::Stylize;
+use crossterm::tty::IsTty;
+
+/// Returns true when stdout is a TTY and NO_COLOR / TERM=dumb are not set.
+fn use_color() -> bool {
+    std::env::var("NO_COLOR").is_err()
+        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
+        && std::io::stdout().is_tty()
+}
+
+fn col_green(s: &str) -> String {
+    if use_color() { s.green().to_string() } else { s.to_string() }
+}
+fn col_yellow(s: &str) -> String {
+    if use_color() { s.yellow().to_string() } else { s.to_string() }
+}
+fn col_red(s: &str) -> String {
+    if use_color() { s.red().to_string() } else { s.to_string() }
+}
+fn col_bold(s: &str) -> String {
+    if use_color() { s.bold().to_string() } else { s.to_string() }
+}
+fn col_dim(s: &str) -> String {
+    if use_color() { s.dim().to_string() } else { s.to_string() }
+}
+fn col_cyan(s: &str) -> String {
+    if use_color() { s.cyan().to_string() } else { s.to_string() }
+}
+
+fn print_section(title: &str) {
+    println!("\n  {}", col_bold(&col_cyan(title)));
+    println!("  {}", col_dim(&"─".repeat(title.len())));
+}
+
+// ── Check type ───────────────────────────────────────────────────────────────
+
 /// Result of a single doctor check.
 struct Check {
     label: String,
@@ -39,15 +77,15 @@ impl Check {
     }
 
     fn print(&self) {
-        let icon = match self.status {
-            CheckStatus::Ok => "✓",
-            CheckStatus::Warn => "!",
-            CheckStatus::Fail => "✗",
+        let (icon, label_str) = match self.status {
+            CheckStatus::Ok => (col_green("✓"), self.label.clone()),
+            CheckStatus::Warn => (col_yellow("!"), col_yellow(&self.label)),
+            CheckStatus::Fail => (col_red("✗"), col_bold(&col_red(&self.label))),
         };
-        println!("  [{icon}] {}", self.label);
+        println!("    {icon}  {label_str}");
         if let Some(ref d) = self.detail {
             for line in d.lines() {
-                println!("      {line}");
+                println!("       {}", col_dim(line));
             }
         }
     }
@@ -61,58 +99,90 @@ impl Check {
     }
 }
 
+// ── Main execute ─────────────────────────────────────────────────────────────
+
 /// Run all doctor checks and print a summary. Returns `Ok(true)` if all
 /// checks pass (or only warnings), `Ok(false)` if any check fails.
 pub fn execute(config: &AboxConfig) -> Result<bool> {
-    println!("abox doctor — environment health check\n");
+    let version = env!("CARGO_PKG_VERSION");
+    println!(
+        "{}  {}",
+        col_bold(&col_cyan("abox doctor")),
+        col_dim(&format!("v{version} — environment health check"))
+    );
+    println!();
 
-    let mut checks: Vec<Check> = Vec::new();
-
-    // ── 1. KVM access ────────────────────────────────────────────────────────
-    checks.push(check_kvm());
-
-    // ── 2. VM artifacts ──────────────────────────────────────────────────────
     let vm_dir = config.state_dir.join("vm");
-    checks.push(check_vm_artifact(&vm_dir, "cloud-hypervisor", "VMM binary"));
-    checks.push(check_vm_artifact(&vm_dir, "virtiofsd", "virtiofs daemon"));
-    checks.push(check_virtiofsd_caps(&vm_dir));
-    checks.push(check_virtiofsd_uid_map(&vm_dir));
-    checks.push(check_vm_artifact(&vm_dir, "vmlinux", "guest kernel"));
-    checks.push(check_vm_artifact(&vm_dir, "rootfs.raw", "guest root filesystem"));
-    checks.push(check_rootfs_freshness(&vm_dir));
 
-    // ── 3. Config file ───────────────────────────────────────────────────────
-    checks.push(check_config_file(config));
+    // ── Section 1: Host ──────────────────────────────────────────────────────
+    print_section("Host");
+    let kvm = check_kvm();
+    kvm.print();
 
-    // ── 4. Policy file ───────────────────────────────────────────────────────
-    checks.push(check_policy_file(config));
-
-    // ── 5. Runtime dir socket-path length ────────────────────────────────────
-    checks.push(check_socket_path_length(config));
-
-    // ── 6. PATH: ~/.local/bin ────────────────────────────────────────────────
-    checks.push(check_local_bin_on_path(&vm_dir));
-
-    // ── Print all checks ─────────────────────────────────────────────────────
-    for check in &checks {
-        check.print();
+    // ── Section 2: VM Stack ──────────────────────────────────────────────────
+    print_section("VM Stack");
+    let vm_checks = [
+        check_vm_artifact(&vm_dir, "cloud-hypervisor", "VMM binary"),
+        check_vm_artifact(&vm_dir, "virtiofsd", "virtiofs daemon"),
+        check_virtiofsd_caps(&vm_dir),
+        check_virtiofsd_uid_map(&vm_dir),
+        check_vm_artifact(&vm_dir, "vmlinux", "guest kernel"),
+        check_vm_artifact(&vm_dir, "rootfs.raw", "guest root filesystem"),
+        check_rootfs_freshness(&vm_dir),
+    ];
+    for c in &vm_checks {
+        c.print();
     }
 
-    let failures = checks.iter().filter(|c| c.is_fail()).count();
-    let warnings = checks.iter().filter(|c| c.is_warn()).count();
+    // ── Section 3: Configuration ─────────────────────────────────────────────
+    print_section("Configuration");
+    let cfg_checks = [
+        check_config_file(config),
+        check_policy_file(config),
+        check_socket_path_length(config),
+    ];
+    for c in &cfg_checks {
+        c.print();
+    }
+
+    // ── Section 4: Environment ───────────────────────────────────────────────
+    print_section("Environment");
+    let env_check = check_local_bin_on_path(&vm_dir);
+    env_check.print();
+
+    // ── Summary ──────────────────────────────────────────────────────────────
+    let all_checks: Vec<&Check> = std::iter::once(&kvm)
+        .chain(vm_checks.iter())
+        .chain(cfg_checks.iter())
+        .chain(std::iter::once(&env_check))
+        .collect();
+
+    let failures = all_checks.iter().filter(|c| c.is_fail()).count();
+    let warnings = all_checks.iter().filter(|c| c.is_warn()).count();
 
     println!();
     if failures == 0 && warnings == 0 {
         println!(
-            "All checks passed. Run 'abox run --task hello -- /bin/sh -c \"echo hi\"' to verify."
+            "  {}  All checks passed. Run {} to verify.",
+            col_green("✓"),
+            col_bold("abox run --task hello -- echo hi")
         );
     } else if failures == 0 {
-        println!("{warnings} warning(s). abox should work but review the items above.");
+        println!(
+            "  {}  {} warning(s) — abox should work, but review the items above.",
+            col_yellow("!"),
+            warnings
+        );
     } else {
         println!(
-            "{failures} check(s) failed, {warnings} warning(s). Run 'abox init' to fix setup issues."
+            "  {}  {} failure(s), {} warning(s) — run {} to fix setup issues.",
+            col_red("✗"),
+            failures,
+            warnings,
+            col_bold("abox init")
         );
     }
+    println!();
 
     Ok(failures == 0)
 }
@@ -128,89 +198,16 @@ fn check_kvm() -> Check {
 
 fn check_vm_artifact(vm_dir: &Path, name: &str, description: &str) -> Check {
     let label = format!("VM artifact: {description} ({name})");
-    let path = vm_dir.join(name);
-    if path.exists() {
-        Check::ok_with(label, path.display().to_string())
+    if vm_dir.join(name).exists() {
+        Check::ok(label)
     } else {
         Check::fail(
             label,
             format!(
-                "Not found at {}\n\
-                 Run 'abox init' or 'just bootstrap-vm' to download VM assets.",
-                path.display()
+                "{name} not found in {}.\n\
+                 Run 'abox init' or 'just bootstrap-vm' to download VM artifacts.",
+                vm_dir.display()
             ),
-        )
-    }
-}
-
-fn check_config_file(config: &AboxConfig) -> Check {
-    let config_path =
-        AboxConfig::default_path().unwrap_or_else(|_| PathBuf::from("~/.abox/config.toml"));
-    if config_path.exists() {
-        Check::ok_with("Config file (~/.abox/config.toml)", config_path.display().to_string())
-    } else {
-        Check::warn(
-            "Config file (~/.abox/config.toml)",
-            format!(
-                "Not found — using built-in defaults (state_dir={}, runtime_dir={}).\n\
-                 Run 'abox init' to create a config file.",
-                config.state_dir.display(),
-                config.runtime_dir().display(),
-            ),
-        )
-    }
-}
-
-fn check_policy_file(config: &AboxConfig) -> Check {
-    let policy_path = config.proxy.policy_dir.join("default.toml");
-    if policy_path.exists() {
-        Check::ok_with("Policy file (default.toml)", policy_path.display().to_string())
-    } else {
-        Check::fail(
-            "Policy file (default.toml)",
-            format!(
-                "Not found at {}\n\
-                 abox will refuse to run sandboxes without a policy file.\n\
-                 Run 'abox init' to install the default policy.",
-                policy_path.display()
-            ),
-        )
-    }
-}
-
-fn check_socket_path_length(config: &AboxConfig) -> Check {
-    let runtime = config.runtime_dir();
-    // Longest suffix abox appends: "vfs-status-<task-id>.sock"
-    // Assume a generous 20-char task ID → 45 chars total suffix.
-    let worst_case = runtime.to_string_lossy().len() + 1 + 45;
-    if worst_case >= 108 {
-        Check::fail(
-            "Runtime dir socket path length",
-            format!(
-                "runtime_dir '{}' is too long ({} bytes base).\n\
-                 Linux caps Unix socket paths at 108 bytes; abox appends per-sandbox\n\
-                 suffixes like 'vfs-status-<task-id>.sock'.\n\
-                 Set a shorter runtime_dir in ~/.abox/config.toml, e.g.:\n\
-                 \n\
-                 \x20 runtime_dir = \"/tmp/abox-$USER\"",
-                runtime.display(),
-                runtime.to_string_lossy().len(),
-            ),
-        )
-    } else if worst_case >= 90 {
-        Check::warn(
-            "Runtime dir socket path length",
-            format!(
-                "runtime_dir '{}' is close to the 108-byte Unix socket limit\n\
-                 (worst-case path ~{worst_case} bytes). Consider shortening it if you\n\
-                 use long task IDs.",
-                runtime.display(),
-            ),
-        )
-    } else {
-        Check::ok_with(
-            "Runtime dir socket path length",
-            format!("{} (worst-case ~{worst_case} bytes, limit 108)", runtime.display()),
         )
     }
 }
@@ -221,15 +218,13 @@ fn check_virtiofsd_uid_map(vm_dir: &Path) -> Check {
     if !bin.exists() {
         return Check::warn(label, "virtiofsd not yet installed — run 'abox init' first.");
     }
-    let output = match std::process::Command::new(&bin).arg("--help").output() {
-        Ok(o) => o,
-        Err(e) => {
-            return Check::fail(label, format!("Failed to run virtiofsd --help: {e}"));
-        }
+    let out = std::process::Command::new(&bin).arg("--help").output();
+    let help_text = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned()
+            + &String::from_utf8_lossy(&o.stderr),
+        Err(e) => return Check::fail(label, format!("Failed to run virtiofsd --help: {e}")),
     };
-    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    if combined.contains("--uid-map") {
+    if help_text.contains("--uid-map") {
         Check::ok(label)
     } else {
         Check::fail(
@@ -244,14 +239,12 @@ fn check_virtiofsd_uid_map(vm_dir: &Path) -> Check {
         )
     }
 }
-
 fn check_virtiofsd_caps(vm_dir: &Path) -> Check {
     let label = "virtiofsd has cap_sys_admin+ep";
     let bin = vm_dir.join("virtiofsd");
     if !bin.exists() {
         return Check::warn(label, "virtiofsd not yet installed — run 'abox init' first.");
     }
-
     match crate::virtiofsd::diagnose_virtiofsd_caps(&bin) {
         crate::virtiofsd::VirtiofsdCapsStatus::Ready => {
             Check::ok_with(label, bin.display().to_string())
@@ -261,19 +254,15 @@ fn check_virtiofsd_caps(vm_dir: &Path) -> Check {
         }
     }
 }
-
 fn check_local_bin_on_path(vm_dir: &Path) -> Check {
     let local_bin: PathBuf =
         dirs::home_dir().map_or_else(|| PathBuf::from("~/.local/bin"), |h| h.join(".local/bin"));
-
     // Check whether cloud-hypervisor is reachable on PATH
     let ch_on_path = std::env::var("PATH")
         .unwrap_or_default()
         .split(':')
         .any(|p| Path::new(p).join("cloud-hypervisor").exists());
-
     let ch_in_vm_dir = vm_dir.join("cloud-hypervisor").exists();
-
     if ch_on_path {
         Check::ok("cloud-hypervisor reachable on PATH")
     } else if ch_in_vm_dir {
@@ -296,7 +285,6 @@ fn check_local_bin_on_path(vm_dir: &Path) -> Check {
         )
     }
 }
-
 fn check_rootfs_freshness(vm_dir: &Path) -> Check {
     let label = "Rootfs freshness";
     let inputs = vm_dir.join("rootfs.raw.inputs");
@@ -359,7 +347,6 @@ fn check_rootfs_freshness(vm_dir: &Path) -> Check {
         )
     }
 }
-
 fn sha256_file(path: &Path) -> String {
     use sha2::{Digest, Sha256};
     match std::fs::read(path) {
@@ -369,5 +356,76 @@ fn sha256_file(path: &Path) -> String {
             format!("{:x}", h.finalize())
         }
         Err(_) => "<read-error>".to_string(),
+    }
+}
+
+fn check_config_file(config: &AboxConfig) -> Check {
+    let config_path =
+        AboxConfig::default_path().unwrap_or_else(|_| PathBuf::from("~/.abox/config.toml"));
+    if config_path.exists() {
+        Check::ok_with("Config file (~/.abox/config.toml)", config_path.display().to_string())
+    } else {
+        Check::warn(
+            "Config file (~/.abox/config.toml)",
+            format!(
+                "Not found — using built-in defaults (state_dir={}, runtime_dir={}).\n\
+                 Run 'abox init' to create a config file.",
+                config.state_dir.display(),
+                config.runtime_dir().display(),
+            ),
+        )
+    }
+}
+
+fn check_policy_file(config: &AboxConfig) -> Check {
+    let policy_path = config.proxy.policy_dir.join("default.toml");
+    if policy_path.exists() {
+        Check::ok_with("Policy file (default.toml)", policy_path.display().to_string())
+    } else {
+        Check::fail(
+            "Policy file (default.toml)",
+            format!(
+                "Not found at {}\n\
+                 abox will refuse to run sandboxes without a policy file.\n\
+                 Run 'abox init' to install the default policy.",
+                policy_path.display()
+            ),
+        )
+    }
+}
+
+fn check_socket_path_length(config: &AboxConfig) -> Check {
+    let runtime = config.runtime_dir();
+    // Longest suffix abox appends: "vfs-status-<task-id>.sock"
+    // Assume a generous 20-char task ID → 45 chars total suffix.
+    let worst_case = runtime.to_string_lossy().len() + 1 + 45;
+    if worst_case >= 108 {
+        Check::fail(
+            "Runtime dir socket path length",
+            format!(
+                "runtime_dir '{}' is too long ({} bytes base).\n\
+                 Linux caps Unix socket paths at 108 bytes; abox appends per-sandbox\n\
+                 suffixes like 'vfs-status-<task-id>.sock'.\n\
+                 Set a shorter runtime_dir in ~/.abox/config.toml, e.g.:\n\
+                 \n\
+                 \x20 runtime_dir = \"/tmp/abox-$USER\"",
+                runtime.display(),
+                runtime.to_string_lossy().len(),
+            ),
+        )
+    } else if worst_case >= 90 {
+        Check::warn(
+            "Runtime dir socket path length",
+            format!(
+                "runtime_dir '{}' is getting long ({} bytes base, {} worst-case).\n\
+                 Linux caps Unix socket paths at 108 bytes. You're fine for now, but\n\
+                 consider a shorter path if you move state_dir.",
+                runtime.display(),
+                runtime.to_string_lossy().len(),
+                worst_case,
+            ),
+        )
+    } else {
+        Check::ok("Runtime dir socket path length")
     }
 }

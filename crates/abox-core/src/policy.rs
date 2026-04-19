@@ -400,12 +400,20 @@ fn strip_global_options(command: &str, args: &[String]) -> Result<Vec<String>, S
 
 /// Match a domain pattern against a domain.
 /// Supports exact match and wildcard prefix (e.g., "*.amazonaws.com").
+///
+/// The wildcard `*` matches exactly one or more DNS labels separated by dots.
+/// Crucially, the match requires a **dot boundary** so that `*.amazonaws.com`
+/// matches `s3.amazonaws.com` but NOT `evilamazonaws.com`.
 fn domain_matches(pattern: &str, domain: &str) -> bool {
     if pattern == domain {
         return true;
     }
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        return domain.ends_with(suffix) && domain.len() > suffix.len();
+        // Require a dot boundary: the domain must end with ".{suffix}" (not
+        // just any suffix-string). This prevents "*.amazonaws.com" from
+        // matching "evilamazonaws.com".
+        let dot_suffix = format!(".{suffix}");
+        return domain.ends_with(dot_suffix.as_str()) && domain.len() > dot_suffix.len();
     }
     false
 }
@@ -539,6 +547,13 @@ mod tests {
         assert!(!domain_matches("*.amazonaws.com", "amazonaws.com"));
         assert!(domain_matches("api.anthropic.com", "api.anthropic.com"));
         assert!(!domain_matches("api.anthropic.com", "evil.anthropic.com"));
+        // Regression: dot-boundary check — suffix-only match must NOT pass.
+        // Without the fix, "*.amazonaws.com" matched "evilamazonaws.com" because
+        // the domain ends with the string "amazonaws.com" even without a dot.
+        assert!(!domain_matches("*.amazonaws.com", "evilamazonaws.com"));
+        assert!(!domain_matches("*.anthropic.com", "evilanthropiccom"));
+        // Deeply nested subdomains should still match.
+        assert!(domain_matches("*.amazonaws.com", "a.b.c.amazonaws.com"));
     }
 
     // ─── Global-option bypass tests (S1) ────────────────────────────────────

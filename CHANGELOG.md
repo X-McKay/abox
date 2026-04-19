@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.3.0 — 2026-04-19
+
+### Features
+
+- feat(bakudo): control-plane realignment — `DispatchPlan` / `ExecutionProfile` data model,
+  `WorkerDispatchInput` union type, `AssistantJobRunner`, `MergeController` factory,
+  `WorktreeInspector`, `HostArtifactGenerator`, `InteractiveRenderLoop`, and `SessionRunSupport`
+  (Waves 0–UX; see `plans/integration/2026-04-19-implementation-progress.md` in bakudo)
+- feat(ux): polished `abox doctor` — ANSI color (NO_COLOR / TERM=dumb aware), section grouping,
+  version header, and semantic icons matching the OpenCode/Codex CLI quality bar
+- feat(ux): polished `abox init` — colored step indicators, dimmed action lines, and
+  a clean summary block with version header
+
+### Fixes
+
+- fix(security): wildcard domain matching now requires a dot boundary — `*.amazonaws.com`
+  no longer matches `evilamazonaws.com` (regression test added)
+
+### Documentation
+
+- docs(backlog): add seven tracked backlog items (P0–P2) for post-0.3.0 hardening
+- docs(tutorial): update for 0.3.0 CLI output format
+- docs(vm-setup): minor corrections and clarity improvements
+
 ## v0.2.0 — 2026-04-18
 
 ### Features

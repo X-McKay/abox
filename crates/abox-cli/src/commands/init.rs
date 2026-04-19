@@ -11,7 +11,32 @@
 //! All steps are idempotent — safe to re-run.
 
 use anyhow::{Context, Result};
+use crossterm::style::Stylize;
+use crossterm::tty::IsTty;
 use std::path::{Path, PathBuf};
+
+// ── Color helpers ────────────────────────────────────────────────────────────
+
+fn use_color() -> bool {
+    std::env::var("NO_COLOR").is_err()
+        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
+        && std::io::stdout().is_tty()
+}
+fn col_green(s: &str) -> String {
+    if use_color() { s.green().to_string() } else { s.to_string() }
+}
+fn col_yellow(s: &str) -> String {
+    if use_color() { s.yellow().to_string() } else { s.to_string() }
+}
+fn col_bold(s: &str) -> String {
+    if use_color() { s.bold().to_string() } else { s.to_string() }
+}
+fn col_dim(s: &str) -> String {
+    if use_color() { s.dim().to_string() } else { s.to_string() }
+}
+fn col_cyan(s: &str) -> String {
+    if use_color() { s.cyan().to_string() } else { s.to_string() }
+}
 
 #[derive(clap::Args)]
 pub struct InitArgs {
@@ -21,7 +46,13 @@ pub struct InitArgs {
 }
 
 pub fn execute(args: &InitArgs) -> Result<()> {
-    println!("abox init — first-run setup\n");
+    let version = env!("CARGO_PKG_VERSION");
+    println!(
+        "{}  {}",
+        col_bold(&col_cyan("abox init")),
+        col_dim(&format!("v{version} — first-run setup wizard"))
+    );
+    println!();
 
     // ── Step 1: KVM ──────────────────────────────────────────────────────────
     print_step(1, "Checking KVM access");
@@ -58,12 +89,15 @@ pub fn execute(args: &InitArgs) -> Result<()> {
 
     // ── Summary ──────────────────────────────────────────────────────────────
     println!();
-    println!("Setup complete. You're ready to run your first sandbox:");
+    println!("  {}  Setup complete. You're ready to run your first sandbox:", col_green("✓"));
     println!();
-    println!("  cd /path/to/your/git/repo");
-    println!("  abox run --task hello -- echo \"hello from inside the sandbox\"");
+    println!("  {}  cd /path/to/your/git/repo", col_dim("$"));
+    println!("  {}  abox run --task hello -- echo \"hello from inside the sandbox\"", col_dim("$"));
     println!();
-    println!("See 'abox doctor' at any time to re-check your environment.");
+    println!("  {}  Run {} at any time to re-check your environment.",
+        col_dim("tip"),
+        col_bold("abox doctor")
+    );
 
     Ok(())
 }
@@ -71,15 +105,15 @@ pub fn execute(args: &InitArgs) -> Result<()> {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn print_step(n: u8, label: &str) {
-    println!("[{n}] {label}...");
+    println!("\n  {}  {}", col_bold(&col_cyan(&format!("[{n}]"))), col_bold(label));
 }
 
 fn print_ok(msg: &str) {
-    println!("    ✓ {msg}");
+    println!("      {}  {}", col_green("✓"), msg);
 }
 
 fn print_action(msg: &str) {
-    println!("    → {msg}");
+    println!("      {}  {}", col_yellow("→"), col_dim(msg));
 }
 
 fn default_state_dir() -> PathBuf {

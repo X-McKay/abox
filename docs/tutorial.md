@@ -60,8 +60,7 @@ This runs [`scripts/bootstrap_vm.sh`](../scripts/bootstrap_vm.sh) under the hood
 
 1. Downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the `vmlinux` kernel, the Alpine 3.19 minirootfs, and the `socat` apk.
 2. Builds `abox-shim` for the static-musl target so it can run inside the minimal Alpine guest.
-3. Assembles a guest ext4 rootfs with bash, Node.js/npm, Python 3, the shim,
-   Claude/Codex CLIs, and a tiny guest init script.
+3. Assembles a 96 MiB ext4 rootfs with busybox + socat + the shim + a guest init script.
 4. Symlinks `cloud-hypervisor`, `ch-remote`, and `virtiofsd` into `~/.local/bin/` so `abox run` can find them on a normal `PATH`.
 
 Total time on a warm cache: ~5-10 seconds. First run with cold cache (~60 MB downloads): about 1 minute.
