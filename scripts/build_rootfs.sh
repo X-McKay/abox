@@ -103,14 +103,14 @@ tar -xzf "$APK_STATIC_APK" --warning=no-unknown-keyword -C "$STAGE" \
     sbin/apk.static 2>/dev/null
 APK_STATIC="$STAGE/sbin/apk.static"
 
-echo "  installing bash, nodejs, npm via apk.static..."
+echo "  installing bash, nodejs, npm, python3 via apk.static..."
 # Configure Alpine repositories so apk can resolve packages.
 mkdir -p "$STAGE/etc/apk/keys"
 cp "$STAGE"/usr/share/apk/keys/x86/*.pub "$STAGE/etc/apk/keys/" 2>/dev/null || true
 echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/main" > "$STAGE/etc/apk/repositories"
 echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> "$STAGE/etc/apk/repositories"
 fakeroot "$APK_STATIC" --root "$STAGE" --initdb --no-cache --no-scripts add \
-    bash nodejs npm su-exec ca-certificates gcompat 2>&1 | tail -10
+    bash nodejs npm python3 su-exec ca-certificates gcompat 2>&1 | tail -10
 # Clean up the static apk binary — not needed in the guest.
 rm -f "$APK_STATIC"
 
@@ -187,9 +187,10 @@ install -m 0755 "$GUEST_INIT" "$STAGE/sbin/init"
 echo "  creating ext4 image..."
 IMG="$ABOX_VM_DIR/rootfs.raw"
 rm -f "$IMG"
-# 512 MiB for miniroot + shim + socat + bash + nodejs + npm + CLI tools
-# 768 MiB for miniroot + shim + socat + bash + nodejs + npm + CLI tools
-# + ca-certificates trust store. The content is ~500 MiB; 768 leaves
+# 512 MiB for miniroot + shim + socat + bash + nodejs + npm + Python +
+# CLI tools
+# 768 MiB for miniroot + shim + socat + bash + nodejs + npm + Python +
+# CLI tools + ca-certificates trust store. The content is ~500 MiB; 768 leaves
 # headroom for runtime tmpfiles and guest mounts.
 dd if=/dev/zero of="$IMG" bs=1M count=768 status=none
 mkfs.ext4 -q -F -E root_owner=0:0 -d "$STAGE" "$IMG"

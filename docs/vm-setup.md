@@ -34,8 +34,8 @@ just bootstrap-vm  # downloads VM artifacts and builds the guest rootfs
 
 This downloads ~60 MB of pinned, checksummed artifacts to `~/.abox/vm/`,
 builds the abox guest shim for static musl, and assembles a minimal ext4
-rootfs (~10 MB used inside a 96 MiB sparse image) containing busybox +
-socat + the shim + a tiny guest init script. After it finishes you'll
+rootfs containing bash, Node.js/npm, Python 3, Claude/Codex CLIs, the
+shim, and a tiny guest init script. After it finishes you'll
 have:
 
 ```
