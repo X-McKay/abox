@@ -75,6 +75,7 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
     let vm_dir = config.state_dir.join("vm");
     checks.push(check_vm_artifact(&vm_dir, "cloud-hypervisor", "VMM binary"));
     checks.push(check_vm_artifact(&vm_dir, "virtiofsd", "virtiofs daemon"));
+    checks.push(check_virtiofsd_caps(&vm_dir));
     checks.push(check_virtiofsd_uid_map(&vm_dir));
     checks.push(check_vm_artifact(&vm_dir, "vmlinux", "guest kernel"));
     checks.push(check_vm_artifact(&vm_dir, "rootfs.raw", "guest root filesystem"));
@@ -241,6 +242,23 @@ fn check_virtiofsd_uid_map(vm_dir: &Path) -> Check {
                 bin.display()
             ),
         )
+    }
+}
+
+fn check_virtiofsd_caps(vm_dir: &Path) -> Check {
+    let label = "virtiofsd has cap_sys_admin+ep";
+    let bin = vm_dir.join("virtiofsd");
+    if !bin.exists() {
+        return Check::warn(label, "virtiofsd not yet installed — run 'abox init' first.");
+    }
+
+    match crate::virtiofsd::diagnose_virtiofsd_caps(&bin) {
+        crate::virtiofsd::VirtiofsdCapsStatus::Ready => {
+            Check::ok_with(label, bin.display().to_string())
+        }
+        crate::virtiofsd::VirtiofsdCapsStatus::Missing { condition, remediation } => {
+            Check::fail(label, format!("{condition}\n{remediation}"))
+        }
     }
 }
 

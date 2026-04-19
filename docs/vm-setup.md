@@ -53,6 +53,12 @@ discoverable on a typical PATH. If `~/.local/bin` is not already on
 your PATH, the script warns and prints the one-line `export` to add
 to your shell profile.
 
+Before the first sandbox boot, `virtiofsd` also needs the
+`cap_sys_admin+ep` file capability on the actual runtime binary
+(normally `~/.abox/vm/virtiofsd`). `abox init` and `abox doctor`
+verify this, and the bootstrap/install scripts print the exact
+`sudo setcap ...` command when it is still missing.
+
 To opt out (e.g., for a shared install you want to manage manually),
 pass `--no-symlink` and add `~/.abox/vm` to `PATH` yourself:
 
@@ -153,6 +159,15 @@ rustup target add x86_64-unknown-linux-musl
 ```
 
 …or re-run `bootstrap_vm.sh --yes` to let the script install it.
+
+**`virtiofsd` dies with `Permission denied` or `Error entering sandbox`**
+The runtime binary is missing the file capability needed for namespace
+sandboxing. Grant it once and re-run `abox doctor`:
+
+```bash
+sudo setcap 'cap_sys_admin+ep' ~/.abox/vm/virtiofsd
+abox doctor
+```
 
 **Phase 6 skipped in `just e2e-vm`**
 Run `just bootstrap-vm` first. It's idempotent — safe to re-run.

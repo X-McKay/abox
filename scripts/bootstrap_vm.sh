@@ -13,6 +13,28 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ABOX_VM_DIR="${ABOX_VM_DIR:-$HOME/.abox/vm}"
 
+print_virtiofsd_capability_note() {
+    local virtiofsd_bin="$1"
+    local quoted
+    printf -v quoted "%q" "$virtiofsd_bin"
+
+    if command -v getcap >/dev/null 2>&1; then
+        local caps
+        caps="$(getcap "$virtiofsd_bin" 2>/dev/null || true)"
+        if [[ "$caps" == *"cap_sys_admin=ep"* ]] || [[ "$caps" == *"cap_sys_admin+ep"* ]]; then
+            echo
+            echo "virtiofsd sandbox capability already present:"
+            echo "  $caps"
+            return
+        fi
+    fi
+
+    echo
+    echo "Before first sandbox boot, grant virtiofsd the required file capability:"
+    echo "  sudo setcap 'cap_sys_admin+ep' $quoted"
+    echo "Then run 'abox init' (or 'abox doctor') to verify the environment."
+}
+
 # ─── Argument parsing ────────────────────────────────────────────────────
 DO_SYMLINK=1
 ASSUME_YES="${BOOTSTRAP_YES:-0}"
@@ -110,6 +132,7 @@ if [[ -n "$FROM_BUNDLE" ]]; then
     echo
     echo "[1/1] Extracting VM assets from bundle..."
     tar xzf "$FROM_BUNDLE" -C "$ABOX_VM_DIR"
+    print_virtiofsd_capability_note "$ABOX_VM_DIR/virtiofsd"
     echo
     echo "Bootstrap complete (from bundle). Files in $ABOX_VM_DIR:"
     ls -lh "$ABOX_VM_DIR"
@@ -237,6 +260,7 @@ GUEST_INIT="$REPO_ROOT/guest/init.sh" \
 echo
 echo "Bootstrap complete. Files in $ABOX_VM_DIR:"
 ls -lh "$ABOX_VM_DIR"
+print_virtiofsd_capability_note "$ABOX_VM_DIR/virtiofsd"
 
 # ─── Install convenience symlinks into ~/.local/bin ──────────────────────
 if [[ "$DO_SYMLINK" == "1" ]]; then

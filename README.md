@@ -63,6 +63,11 @@ just bootstrap-vm     # downloads the VMM, kernel, builds the rootfs,
 abox doctor           # verify the environment before first use
 ```
 
+`virtiofsd` also needs `cap_sys_admin+ep` on the installed runtime binary
+before the first sandbox boot. `abox init` now checks that directly, and
+the bootstrap/install scripts print the exact `sudo setcap ...` command
+when it is still missing.
+
 `bootstrap-vm` is idempotent and uses checksummed cached downloads, so
 re-running it is fast (seconds, not minutes). Currently supports **x86_64**
 hosts only — aarch64 support is in progress. See
@@ -107,7 +112,8 @@ By default, abox stores all state under `~/.abox/` (worktrees, templates,
 logs, and the runtime socket directory). No root access required.
 
 Run `abox doctor` at any time to check your environment for common setup
-problems.
+problems, including the `virtiofsd` file capability required for its
+namespace sandbox.
 
 ### Usage
 

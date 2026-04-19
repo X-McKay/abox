@@ -3,6 +3,7 @@
 mod commands;
 mod kvm;
 mod tui;
+mod virtiofsd;
 
 use abox_core::adapters::cloud_hypervisor::CloudHypervisorAdapter;
 use abox_core::adapters::git2_workspace::Git2Workspace;

@@ -32,24 +32,28 @@ pub fn execute(args: &InitArgs) -> Result<()> {
     let vm_dir = default_state_dir().join("vm");
     ensure_vm_artifacts(&vm_dir, args.yes)?;
 
-    // ── Step 3: Root CA ──────────────────────────────────────────────────────
-    print_step(3, "Checking root CA");
+    // ── Step 3: virtiofsd sandbox capability ────────────────────────────────
+    print_step(3, "Checking virtiofsd sandbox permissions");
+    ensure_virtiofsd_caps(&vm_dir, !args.yes)?;
+
+    // ── Step 4: Root CA ──────────────────────────────────────────────────────
+    print_step(4, "Checking root CA");
     ensure_root_ca()?;
 
-    // ── Step 4: Config file ──────────────────────────────────────────────────
-    print_step(4, "Checking config file");
+    // ── Step 5: Config file ──────────────────────────────────────────────────
+    print_step(5, "Checking config file");
     let config_path = ensure_config_file(&vm_dir)?;
 
-    // ── Step 5: Policy file ──────────────────────────────────────────────────
-    print_step(5, "Checking policy file");
+    // ── Step 6: Policy file ──────────────────────────────────────────────────
+    print_step(6, "Checking policy file");
     ensure_policy_file()?;
 
-    // ── Step 6: Credential detection ─────────────────────────────────────────
-    print_step(6, "Detecting credentials");
+    // ── Step 7: Credential detection ─────────────────────────────────────────
+    print_step(7, "Detecting credentials");
     detect_credentials(&config_path, args.yes)?;
 
-    // ── Step 7: PATH ─────────────────────────────────────────────────────────
-    print_step(7, "Checking PATH");
+    // ── Step 8: PATH ─────────────────────────────────────────────────────────
+    print_step(8, "Checking PATH");
     check_path();
 
     // ── Summary ──────────────────────────────────────────────────────────────
@@ -139,6 +143,26 @@ fn ensure_vm_artifacts(vm_dir: &Path, yes: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn ensure_virtiofsd_caps(vm_dir: &Path, allow_sudo_prompt: bool) -> Result<()> {
+    let virtiofsd = vm_dir.join("virtiofsd");
+    match crate::virtiofsd::ensure_virtiofsd_caps(&virtiofsd, allow_sudo_prompt) {
+        crate::virtiofsd::EnsureVirtiofsdCapsOutcome::AlreadyPresent => {
+            print_ok(&format!(
+                "virtiofsd sandbox capability already present: {}",
+                virtiofsd.display()
+            ));
+            Ok(())
+        }
+        crate::virtiofsd::EnsureVirtiofsdCapsOutcome::Applied => {
+            print_action(&format!("Applied cap_sys_admin+ep to {}", virtiofsd.display()));
+            Ok(())
+        }
+        crate::virtiofsd::EnsureVirtiofsdCapsOutcome::NeedsManual { condition, remediation } => {
+            anyhow::bail!("{condition}\n\n{remediation}")
+        }
+    }
 }
 
 /// Try to locate bootstrap_vm.sh. Checks:

@@ -100,6 +100,12 @@ echo "Installed abox binary to $INSTALL_DIR/abox"
 tar xzf "$TMP_DIR/abox-vm-assets-$ARCH.tar.gz" -C "$VM_DIR"
 echo "Extracted VM assets to $VM_DIR"
 
+if command -v getcap >/dev/null 2>&1; then
+    CAPS="$(getcap "$VM_DIR/virtiofsd" 2>/dev/null || true)"
+else
+    CAPS=""
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────
 echo
 echo "abox $VERSION installed successfully."
@@ -108,15 +114,25 @@ echo "  Binary:    $INSTALL_DIR/abox"
 echo "  VM assets: $VM_DIR"
 echo
 
+if [[ "$CAPS" == *"cap_sys_admin=ep"* ]] || [[ "$CAPS" == *"cap_sys_admin+ep"* ]]; then
+    echo "virtiofsd sandbox capability already present:"
+    echo "  $CAPS"
+else
+    printf -v QUOTED_VIRTIOFSD "%q" "$VM_DIR/virtiofsd"
+    echo "Before first sandbox boot, grant virtiofsd the required file capability:"
+    echo "  sudo setcap 'cap_sys_admin+ep' $QUOTED_VIRTIOFSD"
+    echo
+fi
+
 # Check if install dir is on PATH.
 case ":$PATH:" in
     *":$INSTALL_DIR:"*)
-        echo "Run 'abox --help' to get started."
+        echo "Run 'abox init' and then 'abox doctor' to finish setup."
         ;;
     *)
         echo "Add abox to your PATH:"
         echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
         echo
-        echo "Then run 'abox --help' to get started."
+        echo "Then run 'abox init' and 'abox doctor' to finish setup."
         ;;
 esac
