@@ -1,5 +1,6 @@
 pub mod attach;
 pub mod ca;
+pub mod capabilities;
 pub mod divergence;
 pub mod doctor;
 pub mod init;

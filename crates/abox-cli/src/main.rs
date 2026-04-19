@@ -28,8 +28,12 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
+    /// Print the capability envelope bakudo probes on dispatch and exit.
+    #[arg(long)]
+    capabilities: bool,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -80,42 +84,48 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    let Cli { repo, config, capabilities, command } = Cli::parse();
+
+    // `--capabilities` must run before any config or orchestrator load so a
+    // host with no abox config can still be probed by bakudo.
+    if capabilities {
+        return commands::capabilities::execute();
+    }
 
     // `abox init` must run before AboxConfig::load so it remains reachable
     // when the config file is missing OR malformed. The whole point of
     // `init` is to create (or fix) the config file, so it can't require a
     // loadable one as a precondition.
-    if let Commands::Init(ref args) = cli.command {
+    if let Some(Commands::Init(args)) = command.as_ref() {
         return commands::init::execute(args);
     }
 
-    let config_path = cli.config.unwrap_or_else(|| AboxConfig::default_path().unwrap_or_default());
+    let config_path = config.unwrap_or_else(|| AboxConfig::default_path().unwrap_or_default());
     let config = AboxConfig::load(&config_path)?;
     config.ensure_dirs()?;
 
     // Doctor does not need the orchestrator and must run before the policy
     // check so it works even when setup is incomplete.
-    if let Commands::Doctor = cli.command {
+    if let Some(Commands::Doctor) = command.as_ref() {
         let ok = commands::doctor::execute(&config)?;
         return if ok { Ok(()) } else { std::process::exit(1) };
     }
 
     // Template List and Delete do not need the orchestrator.
     // Template Create does — it falls through to the orchestrator block below.
-    if let Commands::Template(ref args) = cli.command {
+    if let Some(Commands::Template(args)) = command.as_ref() {
         if commands::template::execute_without_orchestrator(args, &config)? {
             return Ok(());
         }
     }
 
     // CA command does not need the orchestrator
-    if let Commands::Ca(ref cmd) = cli.command {
+    if let Some(Commands::Ca(cmd)) = command.as_ref() {
         return commands::ca::execute(cmd);
     }
 
     // TUI command
-    if let Commands::Tui = cli.command {
+    if let Some(Commands::Tui) = command.as_ref() {
         let mut state = tui::dashboard::DashboardState::new();
         return tui::dashboard::run_dashboard(&mut state);
     }
@@ -141,7 +151,7 @@ async fn main() -> Result<()> {
     let policy = std::sync::Arc::new(policy);
 
     // Build the orchestrator
-    let repo_path = cli.repo.canonicalize()?;
+    let repo_path = repo.canonicalize()?;
     let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
     let vm_manager = CloudHypervisorAdapter::new(config.runtime_dir(), config.state_dir.clone())?;
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm_manager);
@@ -152,7 +162,10 @@ async fn main() -> Result<()> {
     // CA's on-disk state — a corrupt or read-only `~/.abox/ca/` would block
     // commands that have nothing to do with the proxy. Defer the load into
     // the Run branch.
-    match cli.command {
+    let command = command
+        .ok_or_else(|| anyhow::anyhow!("no subcommand provided (try `abox --help` for options)"))?;
+
+    match command {
         Commands::Run(args) => {
             let ca_dir = abox_core::ca::RootCa::default_dir()?;
             let root_ca = std::sync::Arc::new(
