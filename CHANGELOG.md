@@ -4,10 +4,11 @@
 
 ### Features
 
-- feat(bakudo): control-plane realignment — `DispatchPlan` / `ExecutionProfile` data model,
-  `WorkerDispatchInput` union type, `AssistantJobRunner`, `MergeController` factory,
-  `WorktreeInspector`, `HostArtifactGenerator`, `InteractiveRenderLoop`, and `SessionRunSupport`
-  (Waves 0–UX; see `plans/integration/2026-04-19-implementation-progress.md` in bakudo)
+- feat(cli): add top-level `abox --capabilities`, a machine-readable Phase 0
+  capability envelope that bypasses config / policy / runtime-dir loading so
+  bakudo and other harnesses can probe abox before first-run setup
+- feat(rootfs): ship Python 3 in the guest image alongside bash, Node.js/npm,
+  `su-exec`, the system CA bundle, and pinned Claude Code / Codex CLIs
 - feat(ux): polished `abox doctor` — ANSI color (NO_COLOR / TERM=dumb aware), section grouping,
   version header, and semantic icons matching the OpenCode/Codex CLI quality bar
 - feat(ux): polished `abox init` — colored step indicators, dimmed action lines, and
@@ -15,14 +16,19 @@
 
 ### Fixes
 
+- fix(setup): `abox init` / `abox doctor` now verify that the installed
+  `virtiofsd` supports namespace sandboxing and surface the exact
+  `setcap 'cap_sys_admin+ep' ...` remediation when it does not
 - fix(security): wildcard domain matching now requires a dot boundary — `*.amazonaws.com`
-  no longer matches `evilamazonaws.com` (regression test added)
+  no longer matches `evilamazonaws.com` for either egress-policy evaluation
+  or TLS-bypass passthrough (regression tests added)
 
 ### Documentation
 
 - docs(backlog): add seven tracked backlog items (P0–P2) for post-0.3.0 hardening
-- docs(tutorial): update for 0.3.0 CLI output format
-- docs(vm-setup): minor corrections and clarity improvements
+- docs: refresh README, tutorial, and VM setup guide for the current 768 MiB
+  guest image, shipped toolchain, MITM credential-injection flow, release
+  installer guidance, and `virtiofsd` capability checks
 
 ## v0.2.0 — 2026-04-18
 
@@ -229,5 +235,4 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Merge vm-e2e-hardening: VM end-to-end MVP + hardening pass (27c4465)
 - Merge branch 'develop': core abox + fixes + e2e foundation (bb41a49)
 - Initial commit (bb9dda5)
-
 

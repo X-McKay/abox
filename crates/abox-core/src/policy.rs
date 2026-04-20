@@ -404,7 +404,7 @@ fn strip_global_options(command: &str, args: &[String]) -> Result<Vec<String>, S
 /// The wildcard `*` matches exactly one or more DNS labels separated by dots.
 /// Crucially, the match requires a **dot boundary** so that `*.amazonaws.com`
 /// matches `s3.amazonaws.com` but NOT `evilamazonaws.com`.
-fn domain_matches(pattern: &str, domain: &str) -> bool {
+pub(crate) fn domain_matches(pattern: &str, domain: &str) -> bool {
     if pattern == domain {
         return true;
     }
@@ -695,6 +695,7 @@ mod tests {
         let engine = PolicyEngine::from_policy_file(policy).unwrap();
         assert!(engine.is_tls_bypassed("api.pinned.io"));
         assert!(!engine.is_tls_bypassed("pinned.io"));
+        assert!(!engine.is_tls_bypassed("evilpinned.io"));
     }
 
     #[test]

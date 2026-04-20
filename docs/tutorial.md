@@ -60,7 +60,7 @@ This runs [`scripts/bootstrap_vm.sh`](../scripts/bootstrap_vm.sh) under the hood
 
 1. Downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the `vmlinux` kernel, the Alpine 3.19 minirootfs, and the `socat` apk.
 2. Builds `abox-shim` for the static-musl target so it can run inside the minimal Alpine guest.
-3. Assembles a 96 MiB ext4 rootfs with busybox + socat + the shim + a guest init script.
+3. Assembles a 768 MiB sparse ext4 rootfs containing bash, Node.js/npm, Python 3, `su-exec`, the system CA bundle, the shim, pinned Claude Code / Codex CLIs, and a guest init script.
 4. Symlinks `cloud-hypervisor`, `ch-remote`, and `virtiofsd` into `~/.local/bin/` so `abox run` can find them on a normal `PATH`.
 
 Total time on a warm cache: ~5-10 seconds. First run with cold cache (~60 MB downloads): about 1 minute.
@@ -78,8 +78,9 @@ If the `x86_64-unknown-linux-musl` rust target isn't installed, `abox init` will
 After downloading the VM artifacts, `abox init` will automatically:
 1. Write `~/.abox/config.toml` with the correct paths pre-filled.
 2. Install `policies/default.toml` to `~/.abox/policies/default.toml`.
+3. Verify that the installed `virtiofsd` supports namespace sandboxing and print the exact `setcap` remediation if `cap_sys_admin+ep` is still missing.
 
-The default policy allows `git status / log / diff / push origin / pull / clone / add / commit`, denies `--force` flags, and denies `aws iam` and `aws ec2`. Egress (HTTPS) is currently a passthrough — see [`docs/plans/2026-04-08-credential-injection.md`](plans/2026-04-08-credential-injection.md) for the planned upgrade.
+The default policy allows common `git`, `gh`, and `aws` operations, denies dangerous mutations such as `git push --force`, and default-denies unknown HTTPS egress. Matching HTTPS requests go through the MITM proxy, which injects host-side credentials for Anthropic, OpenAI/Codex, GitHub, and Google APIs. Domains listed in `bypass_tls` remain plain TCP passthrough for cert-pinned clients.
 
 To verify your environment is ready, run:
 

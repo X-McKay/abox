@@ -36,9 +36,8 @@ When running multiple autonomous agents on a single codebase, you face three pro
 
 ### Installation
 
-> **Note:** abox is currently pre-release. The recommended install path is
-> from source (below). A one-command installer will be available once the
-> first release is published.
+> **Note:** `v0.2.0` is released, but source install remains the recommended
+> path while the installer and release packaging continue to harden.
 
 **From source** (recommended):
 
@@ -63,6 +62,10 @@ just bootstrap-vm     # downloads the VMM, kernel, builds the rootfs,
 abox doctor           # verify the environment before first use
 ```
 
+The guest rootfs is a 768 MiB sparse Alpine image that includes bash,
+Node.js/npm, Python 3, `su-exec`, the system CA bundle, `abox-shim`, and
+pinned Claude Code / Codex CLIs.
+
 `virtiofsd` also needs `cap_sys_admin+ep` on the installed runtime binary
 before the first sandbox boot. `abox init` now checks that directly, and
 the bootstrap/install scripts print the exact `sudo setcap ...` command
@@ -73,7 +76,7 @@ re-running it is fast (seconds, not minutes). Currently supports **x86_64**
 hosts only — aarch64 support is in progress. See
 [`docs/vm-setup.md`](docs/vm-setup.md) for the full setup walkthrough.
 
-**One-command install** (once a release is published):
+**From release artifacts** (optional):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/X-McKay/abox/main/scripts/install.sh | bash
@@ -117,47 +120,55 @@ namespace sandbox.
 
 ### Usage
 
-1. **Start an agent sandbox:**
+1. **Probe the machine-readable capability envelope:**
+   ```bash
+   abox --capabilities
+   ```
+   Prints a JSON envelope describing supported protocol versions, task
+   kinds, and execution engines. This bypasses config/policy loading so
+   external harnesses can probe abox before first-run setup.
+
+2. **Start an agent sandbox:**
    ```bash
    abox run --task fix-auth --base main -- claude
    ```
 
-2. **Start with runtime controls:**
+3. **Start with runtime controls:**
    ```bash
    abox run --task fix-auth --timeout 300 --ephemeral -- claude
    # --timeout N: kill after N seconds (exit code 124)
    # --ephemeral: auto-remove sandbox after exit
    ```
 
-3. **Fast start from a template (snapshot restore, ~100ms):**
+4. **Fast start from a template (snapshot restore, ~100ms):**
    ```bash
    abox template create --name base --from running-sandbox
    abox run --template base --task fix-auth -- claude
    ```
 
-4. **List running sandboxes:**
+5. **List running sandboxes:**
    ```bash
    abox list
    ```
 
-5. **Check divergence across agents:**
+6. **Check divergence across agents:**
    ```bash
    abox divergence
    ```
 
-6. **Merge a completed task:**
+7. **Merge a completed task:**
    ```bash
    abox merge fix-auth
    ```
 
-7. **Manage the CA (for HTTPS credential injection):**
+8. **Manage the CA (for HTTPS credential injection):**
    ```bash
    abox ca show      # fingerprint + expiry
    abox ca rotate    # regenerate CA + rebuild rootfs
    abox ca path      # print CA directory
    ```
 
-8. **Configure credential forwarding (for Claude Code, Codex, etc.):**
+9. **Configure credential forwarding (for Claude Code, Codex, etc.):**
    ```bash
    # Edit ~/.abox/config.toml and add:
    # [guest]

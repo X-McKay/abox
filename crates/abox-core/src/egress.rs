@@ -5,7 +5,7 @@
 //! spawned by [`crate::sandbox::SandboxOrchestrator::run_sandbox()`].
 
 use crate::ca::RootCa;
-use crate::policy::PolicyEngine;
+use crate::policy::{domain_matches, PolicyEngine};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -334,17 +334,7 @@ pub fn build_server_config(
 
 /// Check if a domain should bypass TLS termination (passthrough).
 pub fn is_tls_bypassed(domain: &str, bypass_list: &[String]) -> bool {
-    for pattern in bypass_list {
-        if pattern == domain {
-            return true;
-        }
-        if let Some(suffix) = pattern.strip_prefix("*.") {
-            if domain.ends_with(suffix) && domain.len() > suffix.len() {
-                return true;
-            }
-        }
-    }
-    false
+    bypass_list.iter().any(|pattern| domain_matches(pattern, domain))
 }
 
 /// Create an empty HTTP response body.
@@ -373,6 +363,7 @@ mod tests {
         let bypass = vec!["*.pinned.io".to_string()];
         assert!(is_tls_bypassed("api.pinned.io", &bypass));
         assert!(!is_tls_bypassed("pinned.io", &bypass));
+        assert!(!is_tls_bypassed("evilpinned.io", &bypass));
     }
 
     #[test]

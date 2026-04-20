@@ -22,6 +22,7 @@ automatically and writes a ready-to-use config file:
 git clone https://github.com/X-McKay/abox.git
 cd abox
 cargo build --release
+export PATH="$PWD/target/release:$PATH"
 abox init          # guided setup: bootstraps VM stack + writes config
 abox doctor        # optional: verify everything looks correct
 ```
@@ -33,9 +34,10 @@ just bootstrap-vm  # downloads VM artifacts and builds the guest rootfs
 ```
 
 This downloads ~60 MB of pinned, checksummed artifacts to `~/.abox/vm/`,
-builds the abox guest shim for static musl, and assembles a minimal ext4
-rootfs (~10 MB used inside a 96 MiB sparse image) containing busybox +
-socat + the shim + a tiny guest init script. After it finishes you'll
+builds the abox guest shim for static musl, and assembles a sparse ext4
+rootfs (768 MiB image, roughly 500 MiB populated) containing bash,
+Node.js/npm, Python 3, `su-exec`, the system CA bundle, pinned Claude
+Code / Codex CLIs, the shim, and a tiny guest init script. After it finishes you'll
 have:
 
 ```
@@ -44,7 +46,7 @@ have:
   ch-remote          # the VMM control client
   virtiofsd          # filesystem sharing daemon
   vmlinux            # guest kernel
-  rootfs.raw         # guest root filesystem (96 MiB sparse)
+  rootfs.raw         # guest root filesystem (768 MiB sparse)
 ```
 
 By default, `bootstrap_vm.sh` symlinks `cloud-hypervisor`,
@@ -52,6 +54,12 @@ By default, `bootstrap_vm.sh` symlinks `cloud-hypervisor`,
 discoverable on a typical PATH. If `~/.local/bin` is not already on
 your PATH, the script warns and prints the one-line `export` to add
 to your shell profile.
+
+Before the first sandbox boot, `virtiofsd` also needs the
+`cap_sys_admin+ep` file capability on the installed runtime binary
+(normally `~/.abox/vm/virtiofsd`). `abox init` and `abox doctor`
+verify this directly, and the bootstrap / install scripts print the
+exact `sudo setcap ...` command when it is still missing.
 
 To opt out (e.g., for a shared install you want to manage manually),
 pass `--no-symlink` and add `~/.abox/vm` to `PATH` yourself:
@@ -153,6 +161,15 @@ rustup target add x86_64-unknown-linux-musl
 ```
 
 …or re-run `bootstrap_vm.sh --yes` to let the script install it.
+
+**`virtiofsd` dies with `Permission denied` or `Error entering sandbox`**
+The runtime binary is missing the file capability needed for its
+namespace sandbox. Grant it once and re-run `abox doctor`:
+
+```bash
+sudo setcap 'cap_sys_admin+ep' ~/.abox/vm/virtiofsd
+abox doctor
+```
 
 **Phase 6 skipped in `just e2e-vm`**
 Run `just bootstrap-vm` first. It's idempotent — safe to re-run.
