@@ -21,22 +21,46 @@ fn use_color() -> bool {
 }
 
 fn col_green(s: &str) -> String {
-    if use_color() { s.green().to_string() } else { s.to_string() }
+    if use_color() {
+        s.green().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_yellow(s: &str) -> String {
-    if use_color() { s.yellow().to_string() } else { s.to_string() }
+    if use_color() {
+        s.yellow().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_red(s: &str) -> String {
-    if use_color() { s.red().to_string() } else { s.to_string() }
+    if use_color() {
+        s.red().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_bold(s: &str) -> String {
-    if use_color() { s.bold().to_string() } else { s.to_string() }
+    if use_color() {
+        s.bold().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_dim(s: &str) -> String {
-    if use_color() { s.dim().to_string() } else { s.to_string() }
+    if use_color() {
+        s.dim().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_cyan(s: &str) -> String {
-    if use_color() { s.cyan().to_string() } else { s.to_string() }
+    if use_color() {
+        s.cyan().to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 fn print_section(title: &str) {
@@ -136,11 +160,8 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
 
     // ── Section 3: Configuration ─────────────────────────────────────────────
     print_section("Configuration");
-    let cfg_checks = [
-        check_config_file(config),
-        check_policy_file(config),
-        check_socket_path_length(config),
-    ];
+    let cfg_checks =
+        [check_config_file(config), check_policy_file(config), check_socket_path_length(config)];
     for c in &cfg_checks {
         c.print();
     }
@@ -220,8 +241,9 @@ fn check_virtiofsd_uid_map(vm_dir: &Path) -> Check {
     }
     let out = std::process::Command::new(&bin).arg("--help").output();
     let help_text = match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned()
-            + &String::from_utf8_lossy(&o.stderr),
+        Ok(o) => {
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)
+        }
         Err(e) => return Check::fail(label, format!("Failed to run virtiofsd --help: {e}")),
     };
     if help_text.contains("--uid-map") {

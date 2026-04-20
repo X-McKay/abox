@@ -23,19 +23,39 @@ fn use_color() -> bool {
         && std::io::stdout().is_tty()
 }
 fn col_green(s: &str) -> String {
-    if use_color() { s.green().to_string() } else { s.to_string() }
+    if use_color() {
+        s.green().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_yellow(s: &str) -> String {
-    if use_color() { s.yellow().to_string() } else { s.to_string() }
+    if use_color() {
+        s.yellow().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_bold(s: &str) -> String {
-    if use_color() { s.bold().to_string() } else { s.to_string() }
+    if use_color() {
+        s.bold().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_dim(s: &str) -> String {
-    if use_color() { s.dim().to_string() } else { s.to_string() }
+    if use_color() {
+        s.dim().to_string()
+    } else {
+        s.to_string()
+    }
 }
 fn col_cyan(s: &str) -> String {
-    if use_color() { s.cyan().to_string() } else { s.to_string() }
+    if use_color() {
+        s.cyan().to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 #[derive(clap::Args)]
@@ -94,7 +114,8 @@ pub fn execute(args: &InitArgs) -> Result<()> {
     println!("  {}  cd /path/to/your/git/repo", col_dim("$"));
     println!("  {}  abox run --task hello -- echo \"hello from inside the sandbox\"", col_dim("$"));
     println!();
-    println!("  {}  Run {} at any time to re-check your environment.",
+    println!(
+        "  {}  Run {} at any time to re-check your environment.",
         col_dim("tip"),
         col_bold("abox doctor")
     );
