@@ -243,8 +243,10 @@ impl WorkspacePort for Git2Workspace {
             tracing::info!(sandbox_id, base_branch, "Merged branch successfully");
             Ok(vec![])
         } else {
+            let stdout = String::from_utf8_lossy(&merge_output.stdout);
             let stderr = String::from_utf8_lossy(&merge_output.stderr);
-            let conflicts: Vec<String> = stderr
+            let combined_output = format!("{stdout}\n{stderr}");
+            let conflicts: Vec<String> = combined_output
                 .lines()
                 .filter(|l| l.contains("CONFLICT"))
                 .map(ToString::to_string)
@@ -255,6 +257,13 @@ impl WorkspacePort for Git2Workspace {
                 .args(["merge", "--abort"])
                 .current_dir(&self.repo_path)
                 .output();
+
+            if conflicts.is_empty() {
+                anyhow::bail!(
+                    "git merge failed for {branch_name} into {base_branch}: {}",
+                    combined_output.trim()
+                );
+            }
 
             Ok(conflicts)
         }
@@ -283,6 +292,7 @@ fn resolve_default_branch(repo: &Repository) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::WorkspaceError;
     use tempfile::TempDir;
 
     /// Helper: create a temporary git repo with an initial commit on `main`.
@@ -296,6 +306,18 @@ mod tests {
         let mut init_opts = git2::RepositoryInitOptions::new();
         init_opts.initial_head("main");
         let repo = Repository::init_opts(&repo_path, &init_opts).unwrap();
+
+        // Shell-based merges need a repo-local committer identity in test envs.
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
 
         // Create an initial commit so `main` exists as a real ref
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
@@ -311,6 +333,20 @@ mod tests {
         repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[]).unwrap();
 
         (tmp, repo_path)
+    }
+
+    fn commit_file(repo_path: &Path, file_name: &str, contents: &str, message: &str) {
+        std::fs::write(repo_path.join(file_name), contents).unwrap();
+
+        let repo = Repository::open(repo_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(file_name)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head]).unwrap();
     }
 
     #[test]
@@ -390,5 +426,44 @@ mod tests {
         assert!(divergence
             .iter()
             .any(|e| e.file_path == "new_file.txt" && e.status == FileStatus::Added));
+    }
+
+    #[test]
+    fn test_merge_conflict_returns_conflicts_and_aborts_merge() {
+        let (tmp, repo_path) = setup_test_repo();
+        let wt_base = tmp.path().join("worktrees");
+
+        let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+        let wt_path = ws.create_worktree("task-1", "main").unwrap();
+
+        commit_file(&wt_path, "README.md", "# Agent change\n", "Agent edits README");
+        commit_file(&repo_path, "README.md", "# Main change\n", "Main edits README");
+
+        let conflicts = ws.merge_branch("task-1", "main").unwrap();
+
+        assert!(!conflicts.is_empty(), "expected merge conflict details");
+        assert!(conflicts.iter().any(|line| line.contains("README.md")));
+        assert_eq!(
+            std::fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "# Main change\n"
+        );
+        assert!(!repo_path.join(".git").join("MERGE_HEAD").exists(), "merge should be aborted");
+    }
+
+    #[test]
+    fn test_merge_non_conflict_failure_is_error() {
+        let (tmp, repo_path) = setup_test_repo();
+        let wt_base = tmp.path().join("worktrees");
+
+        let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+
+        let err = ws.merge_branch("missing-task", "main").unwrap_err();
+
+        assert!(err.downcast_ref::<WorkspaceError>().is_none());
+        assert!(format!("{err:#}").contains("git merge failed for agent/missing-task into main"));
+        assert!(
+            !repo_path.join(".git").join("MERGE_HEAD").exists(),
+            "failed merge should not leave state behind"
+        );
     }
 }
