@@ -66,10 +66,15 @@ pub struct ProxyBridge {
     policy: Arc<PolicyEngine>,
     audit: Arc<dyn AuditSink>,
     attribution: SandboxAttribution,
-    /// Optional: translate guest CWD prefix to a host path.
-    /// When set, a guest CWD starting with `guest_prefix` has that prefix
-    /// replaced with `host_prefix`. Used so that `/workspace` in the VM maps
-    /// to the actual git worktree on the host.
+    /// Optional: map a guest path prefix to the host worktree root.
+    ///
+    /// In per-VM mode (`SandboxAttribution::Fixed`), this is treated as a
+    /// hard boundary: only guest CWDs rooted at `guest_prefix` are accepted,
+    /// the translated host path is canonicalized, and the final result must
+    /// remain inside `host_prefix`.
+    ///
+    /// In shared-daemon mode (`SandboxAttribution::FromRequest`), the bridge
+    /// does not enforce this boundary and the request CWD is passed through.
     cwd_map: Option<(String, PathBuf)>,
 }
 
@@ -84,8 +89,8 @@ impl ProxyBridge {
         Self { socket_path, policy, audit, attribution, cwd_map: None }
     }
 
-    /// Set a CWD translation: requests whose `cwd` starts with `guest_prefix`
-    /// will have that prefix replaced by `host_root` when executing on the host.
+    /// Set the guest-prefix to host-worktree mapping used for per-VM CWD
+    /// boundary enforcement.
     pub fn with_cwd_map(mut self, guest_prefix: impl Into<String>, host_root: PathBuf) -> Self {
         self.cwd_map = Some((guest_prefix.into(), host_root));
         self
@@ -148,26 +153,32 @@ async fn handle(
     }
     let mut request: ProxyRequest = serde_json::from_str(line.trim())?;
 
-    // Translate guest CWD to host path if a cwd_map was configured.
-    // Use component-aware matching to avoid treating `/workspacefoo` as
-    // a subdirectory of `/workspace`.
-    if let Some((guest_prefix, host_root)) = cwd_map {
-        let prefix = guest_prefix.as_str();
-        let trailing = format!("{prefix}/");
-        if request.cwd == prefix || request.cwd.starts_with(&trailing) {
-            let suffix = request.cwd.trim_start_matches(prefix).trim_start_matches('/');
-            let host_cwd =
-                if suffix.is_empty() { host_root.clone() } else { host_root.join(suffix) };
-            request.cwd = host_cwd.display().to_string();
-        }
-    }
-
     let sandbox_id = match attribution {
         SandboxAttribution::Fixed(id) => id.clone(),
         SandboxAttribution::FromRequest => {
             request.sandbox_id.clone().unwrap_or_else(|| "unknown".to_string())
         }
     };
+
+    let resolved_cwd = match resolve_request_cwd(&request.cwd, attribution, cwd_map) {
+        Ok(path) => path,
+        Err(reason) => {
+            audit.log_cli(&sandbox_id, &request.command, &request.args, "denied", 126);
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                command = %request.command,
+                cwd = %request.cwd,
+                reason = %reason,
+                "request denied before execution"
+            );
+            let json = serde_json::to_string(&ProxyResponse::denied(&reason))?;
+            writer.write_all(json.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.shutdown().await?;
+            return Ok(());
+        }
+    };
+    request.cwd = resolved_cwd.display().to_string();
 
     tracing::debug!(
         sandbox_id = %sandbox_id,
@@ -242,6 +253,44 @@ async fn exec(request: &ProxyRequest, forward_ssh: bool) -> Result<ProxyResponse
 
 fn resolve_cwd(guest_cwd: &str) -> PathBuf {
     PathBuf::from(guest_cwd)
+}
+
+fn resolve_request_cwd(
+    guest_cwd: &str,
+    attribution: &SandboxAttribution,
+    cwd_map: Option<&(String, PathBuf)>,
+) -> std::result::Result<PathBuf, String> {
+    match attribution {
+        SandboxAttribution::FromRequest => Ok(resolve_cwd(guest_cwd)),
+        SandboxAttribution::Fixed(_) => {
+            let (guest_prefix, host_root) = cwd_map.ok_or_else(|| {
+                "per-VM proxy bridge is missing its worktree boundary map".to_string()
+            })?;
+            let prefix = guest_prefix.as_str();
+            let trailing = format!("{prefix}/");
+            if guest_cwd != prefix && !guest_cwd.starts_with(&trailing) {
+                return Err(format!(
+                    "cwd '{guest_cwd}' is outside the sandbox worktree; expected '{prefix}' or a subdirectory"
+                ));
+            }
+
+            let canonical_root = host_root.canonicalize().map_err(|e| {
+                format!("sandbox worktree root '{}' is not accessible: {e}", host_root.display())
+            })?;
+            let suffix = guest_cwd.trim_start_matches(prefix).trim_start_matches('/');
+            let translated =
+                if suffix.is_empty() { canonical_root.clone() } else { canonical_root.join(suffix) };
+            let canonical_cwd = translated.canonicalize().map_err(|e| {
+                format!("cwd '{guest_cwd}' could not be resolved inside the sandbox worktree: {e}")
+            })?;
+
+            if canonical_cwd == canonical_root || canonical_cwd.starts_with(&canonical_root) {
+                Ok(canonical_cwd)
+            } else {
+                Err(format!("cwd '{guest_cwd}' escapes the sandbox worktree"))
+            }
+        }
+    }
 }
 
 /// A no-op audit sink that emits each request through `tracing` only.
@@ -395,17 +444,93 @@ mod tests {
         }
     }
 
+    fn fixed_cwd_map(root: &std::path::Path) -> (String, PathBuf) {
+        ("/workspace".to_string(), root.to_path_buf())
+    }
+
+    #[test]
+    fn fixed_cwd_resolves_workspace_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let resolved = resolve_request_cwd(
+            "/workspace",
+            &SandboxAttribution::Fixed("task-a".into()),
+            Some(&fixed_cwd_map(tmp.path())),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn fixed_cwd_resolves_nested_workspace_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let nested = tmp.path().join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let resolved = resolve_request_cwd(
+            "/workspace/src",
+            &SandboxAttribution::Fixed("task-a".into()),
+            Some(&fixed_cwd_map(tmp.path())),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, nested.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn fixed_cwd_denies_unmapped_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = resolve_request_cwd(
+            "/tmp",
+            &SandboxAttribution::Fixed("task-a".into()),
+            Some(&fixed_cwd_map(tmp.path())),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("outside the sandbox worktree"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn fixed_cwd_denies_symlink_escape() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::os::unix::fs::symlink(&outside, worktree.join("escape")).unwrap();
+
+        let err = resolve_request_cwd(
+            "/workspace/escape",
+            &SandboxAttribution::Fixed("task-a".into()),
+            Some(&fixed_cwd_map(&worktree)),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("escapes the sandbox worktree"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn guest_init_locks_proxy_socket_to_abox_user() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        assert!(init_sh.contains("chown 1000:1000 /run/abox-proxy.sock"));
+        assert!(init_sh.contains("chmod 0600 /run/abox-proxy.sock"));
+        assert!(!init_sh.contains("chmod 666 /run/abox-proxy.sock"));
+    }
+
     #[tokio::test]
     async fn fixed_attribution_overrides_request_field() {
         let tmp = tempfile::TempDir::new().unwrap();
         let socket = tmp.path().join("bridge.sock");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
         let sink = CountingSink::new();
         let bridge = ProxyBridge::new(
             socket.clone(),
             allow_all_engine(),
             sink.clone() as Arc<dyn AuditSink>,
             SandboxAttribution::Fixed("authoritative-id".into()),
-        );
+        )
+        .with_cwd_map("/workspace", worktree.clone());
         let server = tokio::spawn(bridge.run());
 
         // Wait for the socket to appear.
@@ -422,7 +547,7 @@ mod tests {
         let req = ProxyRequest {
             command: "true".into(),
             args: vec![],
-            cwd: "/tmp".into(),
+            cwd: "/workspace".into(),
             sandbox_id: Some("client-claimed-id".into()),
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -443,6 +568,56 @@ mod tests {
         assert_eq!(calls[0].0, "authoritative-id"); // NOT "client-claimed-id"
         assert_eq!(calls[0].1, "true");
         assert_eq!(calls[0].2, "allowed");
+    }
+
+    #[tokio::test]
+    async fn fixed_attribution_denies_cwd_outside_worktree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let socket = tmp.path().join("bridge.sock");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let sink = CountingSink::new();
+        let bridge = ProxyBridge::new(
+            socket.clone(),
+            allow_all_engine(),
+            sink.clone() as Arc<dyn AuditSink>,
+            SandboxAttribution::Fixed("authoritative-id".into()),
+        )
+        .with_cwd_map("/workspace", worktree);
+        let server = tokio::spawn(bridge.run());
+
+        for _ in 0..40 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let req = ProxyRequest {
+            command: "true".into(),
+            args: vec![],
+            cwd: "/tmp".into(),
+            sandbox_id: Some("client-claimed-id".into()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut stream, json.as_bytes()).await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut stream, b"\n").await.unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut stream).await.unwrap();
+
+        let mut buf = String::new();
+        tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut buf).await.unwrap();
+        let response: ProxyResponse = serde_json::from_str(buf.trim()).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        server.abort();
+
+        assert_eq!(response.exit_code, 126);
+        assert!(response.stderr.contains("outside the sandbox worktree"));
+
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].2, "denied");
     }
 
     #[tokio::test]
