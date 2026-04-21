@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.1 — 2026-04-21
+
+### Fixes
+
+- fix(rootfs): fail closed guest scratch and dockerize builder (8b6520a)
+
+
 ## v0.3.0 — 2026-04-20
 
 ### Features
