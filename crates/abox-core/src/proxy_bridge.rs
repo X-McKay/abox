@@ -278,8 +278,11 @@ fn resolve_request_cwd(
                 format!("sandbox worktree root '{}' is not accessible: {e}", host_root.display())
             })?;
             let suffix = guest_cwd.trim_start_matches(prefix).trim_start_matches('/');
-            let translated =
-                if suffix.is_empty() { canonical_root.clone() } else { canonical_root.join(suffix) };
+            let translated = if suffix.is_empty() {
+                canonical_root.clone()
+            } else {
+                canonical_root.join(suffix)
+            };
             let canonical_cwd = translated.canonicalize().map_err(|e| {
                 format!("cwd '{guest_cwd}' could not be resolved inside the sandbox worktree: {e}")
             })?;
