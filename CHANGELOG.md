@@ -6,6 +6,10 @@
 
 - fix(rootfs): fail closed guest scratch and dockerize builder (8b6520a)
 
+### Testing
+
+- test(smoke): avoid stale worktree collisions across repeated release checks
+
 
 ## v0.3.0 — 2026-04-20
 
@@ -263,4 +267,3 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Merge vm-e2e-hardening: VM end-to-end MVP + hardening pass (27c4465)
 - Merge branch 'develop': core abox + fixes + e2e foundation (bb41a49)
 - Initial commit (bb9dda5)
-

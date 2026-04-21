@@ -32,25 +32,60 @@ FILTER="${1:-all}"
 PASS=0
 FAIL=0
 SKIP=0
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+SMOKE_TASK_PREFIX="smoke-$RUN_ID"
+SCRATCH="/tmp/abox-agent-smoke-$RUN_ID"
+WORKTREE_BASE="${HOME}/.abox/worktrees"
 LOGDIR=$(mktemp -d)
-trap 'rm -rf "$LOGDIR" /tmp/abox-agent-smoke' EXIT
+TASK_IDS=()
+
+cleanup() {
+    local idx task_id
+    for ((idx=${#TASK_IDS[@]} - 1; idx >= 0; idx--)); do
+        task_id="${TASK_IDS[$idx]}"
+        "$ABOX" --repo "$SCRATCH" stop "$task_id" --clean >/dev/null 2>&1 || true
+    done
+    rm -rf "$LOGDIR" "$SCRATCH"
+}
+trap cleanup EXIT INT TERM
 
 pass() { ((PASS++)) || true; echo "  ✓ $1"; }
 fail() { ((FAIL++)) || true; echo "  ✗ $1: $2"; }
 skip() { ((SKIP++)) || true; echo "  ○ $1: skipped ($2)"; }
 
+sweep_stale_smoke_state() {
+    # Smoke runs should finish in minutes. Sweep only very old test-owned
+    # residue so we do not race concurrent runs or touch user sandboxes.
+    find "$WORKTREE_BASE" -maxdepth 1 -type d -mmin +240 \
+        \( -name 'smoke-*' \
+        -o -name 't1-smoke' \
+        -o -name 't2-tool' \
+        -o -name 't3-write' \
+        -o -name 't4-policy' \
+        -o -name 'c1-smoke-*' \
+        -o -name 'c2-tool-*' \
+        -o -name 'c3-uid' \) \
+        -exec rm -rf {} + 2>/dev/null || true
+    find /tmp -maxdepth 1 -type d -name 'abox-agent-smoke*' -mmin +240 \
+        -exec rm -rf {} + 2>/dev/null || true
+}
+
 # Run an abox sandbox, capturing combined output. Guest stdout/stderr and
-# host logs all end up in the log file; we parse from there.
+# host logs all end up in the log file; we parse from there. Each smoke run
+# gets a unique task ID so stale residue from interrupted runs cannot collide
+# with a future release validation.
 run_sandbox() {
     local name="$1"; shift
     local log="$LOGDIR/$name.log"
-    timeout "${TIMEOUT:-90}" "$ABOX" --repo "$SCRATCH" run --task "$name" --ephemeral -- "$@" \
+    local task_id="${SMOKE_TASK_PREFIX}-$name"
+    TASK_IDS+=("$task_id")
+    timeout "${TIMEOUT:-90}" "$ABOX" --repo "$SCRATCH" run --task "$task_id" --ephemeral -- "$@" \
         >"$log" 2>&1 || true
     echo "$log"
 }
 
 # ─── Scratch repo ───────────────────────────────────────────────────────
-SCRATCH="/tmp/abox-agent-smoke"
+sweep_stale_smoke_state
 rm -rf "$SCRATCH"
 mkdir -p "$SCRATCH"
 (
@@ -71,6 +106,7 @@ echo
 echo "━━━ abox agent smoke tests ━━━"
 echo "  repo:   $SCRATCH"
 echo "  abox:   $($ABOX --version 2>/dev/null || echo 'dev build')"
+echo "  run id: $RUN_ID"
 echo "  logs:   $LOGDIR"
 echo
 
