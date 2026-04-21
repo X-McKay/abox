@@ -44,10 +44,13 @@ final `exec` of the agent command drops privileges.
 
 Mechanism:
 
-1. **Rootfs.** `scripts/build_rootfs.sh` creates the `abox` user via
-   `fakeroot chroot "$STAGE" adduser -D -u 1000 -G abox -h /home/abox
-   -s /bin/bash abox`, pre-populates `/home/abox/.claude/` owned by
-   `abox:abox` with mode `0700`.
+1. **Rootfs.** `scripts/build_rootfs.sh` runs inside a Dockerized Alpine
+   builder as real root, installs the guest packages into the staged
+   miniroot with `apk --root`, creates the `abox` user via
+   `chroot "$STAGE" adduser -D -u 1000 -G abox -h /home/abox -s /bin/bash
+   abox`, and pre-populates `/home/abox/.claude/` owned by `abox:abox`
+   with mode `0700`. The container writes only the final ext4 image and
+   its stamp back into `~/.abox/vm/`; the source repo is mounted read-only.
 
 2. **Virtiofsd uid/gid remapping.** The workspace virtiofsd instance in
    `crates/abox-core/src/adapters/cloud_hypervisor.rs` is launched with
@@ -58,10 +61,23 @@ Mechanism:
    `/abox-status/` virtiofsd instances are left in default passthrough —
    only root touches them inside the guest.
 
-3. **Runner script (`crates/abox-core/src/boot_meta.rs`).** The generated
+3. **Guest scratch tmpfs (`guest/init.sh`).** Before invoking the runner,
+   PID 1 mounts a dedicated tmpfs at `/run/abox-tmp` with
+   `mode=0700,uid=1000,gid=1000,nodev,nosuid`, then repairs ownership and
+   permissions defensively. This gives the unprivileged agent a VM-local
+   `TMPDIR` that is separate from both `/workspace` (host-backed) and
+   `/home/abox` (credentials/config). `noexec` is intentionally not set:
+   npm, Python packaging, shells, and similar toolchains sometimes execute
+   temp helpers, and breaking that would push users back toward less
+   isolated paths. Mount failure is treated as a boot-time error rather
+   than falling back to some other location; the sandbox powers off and
+   reports a non-zero exit so scratch regressions are visible immediately.
+
+4. **Runner script (`crates/abox-core/src/boot_meta.rs`).** The generated
    `runner.sh` begins with a `getent passwd abox` pre-flight check,
-   stages credentials as root (`cp`, `chmod`, then `chown abox:abox`),
-   and ends with:
+   exports `TMPDIR=/run/abox-tmp` after applying caller-supplied
+   environment variables, stages credentials as root (`cp`, `chmod`, then
+   `chown abox:abox`), and ends with:
 
        exec su-exec abox:abox env HOME=/home/abox USER=abox <user-command>
 
@@ -75,7 +91,7 @@ Mechanism:
    `EX_UNAVAILABLE`) and a clear remediation message if the rootfs is
    missing the `abox` user.
 
-4. **Credential stub path — tilde expansion symmetric with `host`.** The
+5. **Credential stub path — tilde expansion symmetric with `host`.** The
    `host` field in `[[guest.credential_files]]` already expands `~` against
    the host user's home. The `guest` field gains the same convention: a
    `~/` prefix expands against the guest agent's home (compiled-in
@@ -97,7 +113,7 @@ Mechanism:
    usefulness. `templates/config.example.toml` is updated in lockstep so
    commented-out snippets show the new form.
 
-5. **Onboarding hygiene checks.** Two `abox doctor` additions and one
+6. **Onboarding hygiene checks.** Two `abox doctor` additions and one
    `abox run` warning lift common "silent failure" classes into clear,
    pre-boot signals:
    - `virtiofsd --uid-map` capability check (required for the uid
@@ -124,6 +140,8 @@ Mechanism:
   flags work out of the box.
 - Matches how other microVM sandboxes (Firecracker jailer, kata-containers)
   structure guest execution: privileged init → unprivileged payload.
+- Guest tools get a private scratch area by default, so temp files no
+  longer need to spill into `/workspace` or the agent home directory.
 - No change to the host-side CA, MITM proxy, policy engine, shim, or
   abox CLI surface. The privilege drop is invisible to the agent.
 

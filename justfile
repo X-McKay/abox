@@ -44,8 +44,9 @@ build-shim:
     cargo build --release --target x86_64-unknown-linux-musl -p abox-shim
 
 # Check whether the installed guest rootfs image is stale — i.e. whether
-# guest/init.sh has changed on disk since the rootfs was last built. Does
-# NOT rebuild; just reports and exits 1 if stale.
+# guest/init.sh, the shim, or the rootfs builder inputs have changed on
+# disk since the rootfs was last built. Does NOT rebuild; just reports and
+# exits 1 if stale.
 check-rootfs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -55,15 +56,30 @@ check-rootfs:
         exit 0
     fi
     RECORDED_INIT=$(grep '^init_sh=' "$STAMP" | cut -d= -f2)
+    RECORDED_SHIM=$(grep '^shim=' "$STAMP" | cut -d= -f2)
+    RECORDED_BUILD=$(grep '^build_rootfs_sh=' "$STAMP" | cut -d= -f2)
+    RECORDED_DOCKERFILE=$(grep '^rootfs_builder_dockerfile=' "$STAMP" | cut -d= -f2)
     CURRENT_INIT=$(sha256sum guest/init.sh | cut -d' ' -f1)
-    if [ "$RECORDED_INIT" != "$CURRENT_INIT" ]; then
-        echo "⚠  rootfs is STALE: guest/init.sh has changed since last rebuild"
-        echo "   recorded: $RECORDED_INIT"
-        echo "   current:  $CURRENT_INIT"
+    CURRENT_SHIM=$(sha256sum target/x86_64-unknown-linux-musl/release/abox-shim | cut -d' ' -f1)
+    CURRENT_BUILD=$(sha256sum scripts/build_rootfs.sh | cut -d' ' -f1)
+    CURRENT_DOCKERFILE=$(sha256sum scripts/rootfs-builder.Dockerfile | cut -d' ' -f1)
+    if [ "$RECORDED_INIT" != "$CURRENT_INIT" ] || \
+       [ "$RECORDED_SHIM" != "$CURRENT_SHIM" ] || \
+       [ "$RECORDED_BUILD" != "$CURRENT_BUILD" ] || \
+       [ "$RECORDED_DOCKERFILE" != "$CURRENT_DOCKERFILE" ]; then
+        echo "⚠  rootfs is STALE: guest/init.sh, the shim, or the rootfs builder changed since last rebuild"
+        echo "   init_sh:                 recorded: $RECORDED_INIT"
+        echo "                            current:  $CURRENT_INIT"
+        echo "   shim:                    recorded: $RECORDED_SHIM"
+        echo "                            current:  $CURRENT_SHIM"
+        echo "   build_rootfs.sh:         recorded: $RECORDED_BUILD"
+        echo "                            current:  $CURRENT_BUILD"
+        echo "   rootfs-builder.Dockerfile recorded: $RECORDED_DOCKERFILE"
+        echo "                            current:  $CURRENT_DOCKERFILE"
         echo "   rebuild the rootfs to update"
         exit 1
     fi
-    echo "✓ rootfs matches current guest/init.sh"
+    echo "✓ rootfs matches current guest/init.sh, shim, and builder inputs"
 
 # ─── Quality ─────────────────────────────────────────────────────────────────
 

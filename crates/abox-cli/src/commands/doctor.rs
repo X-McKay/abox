@@ -321,23 +321,42 @@ fn check_rootfs_freshness(vm_dir: &Path) -> Check {
         return Check::warn(label, "Could not locate running binary; skipping check.");
     };
     let mut dir = exe.parent();
-    let (mut init_sh, mut shim_bin): (Option<PathBuf>, Option<PathBuf>) = (None, None);
+    let (mut init_sh, mut shim_bin, mut build_rootfs_sh, mut rootfs_builder_dockerfile): (
+        Option<PathBuf>,
+        Option<PathBuf>,
+        Option<PathBuf>,
+        Option<PathBuf>,
+    ) = (None, None, None, None);
     for _ in 0..6 {
         let Some(d) = dir else { break };
         let c1 = d.join("guest/init.sh");
         let c2 = d.join("target/x86_64-unknown-linux-musl/release/abox-shim");
+        let c3 = d.join("scripts/build_rootfs.sh");
+        let c4 = d.join("scripts/rootfs-builder.Dockerfile");
         if c1.exists() && init_sh.is_none() {
             init_sh = Some(c1);
         }
         if c2.exists() && shim_bin.is_none() {
             shim_bin = Some(c2);
         }
-        if init_sh.is_some() && shim_bin.is_some() {
+        if c3.exists() && build_rootfs_sh.is_none() {
+            build_rootfs_sh = Some(c3);
+        }
+        if c4.exists() && rootfs_builder_dockerfile.is_none() {
+            rootfs_builder_dockerfile = Some(c4);
+        }
+        if init_sh.is_some()
+            && shim_bin.is_some()
+            && build_rootfs_sh.is_some()
+            && rootfs_builder_dockerfile.is_some()
+        {
             break;
         }
         dir = d.parent();
     }
-    let (Some(init_sh), Some(shim_bin)) = (init_sh, shim_bin) else {
+    let (Some(init_sh), Some(shim_bin), Some(build_rootfs_sh), Some(rootfs_builder_dockerfile)) =
+        (init_sh, shim_bin, build_rootfs_sh, rootfs_builder_dockerfile)
+    else {
         return Check::warn(
             label,
             "No source tree next to the binary — skipping freshness check.\n\
@@ -346,25 +365,40 @@ fn check_rootfs_freshness(vm_dir: &Path) -> Check {
     };
     let init_hash = sha256_file(&init_sh);
     let shim_hash = sha256_file(&shim_bin);
+    let build_rootfs_hash = sha256_file(&build_rootfs_sh);
+    let rootfs_builder_dockerfile_hash = sha256_file(&rootfs_builder_dockerfile);
     let recorded = std::fs::read_to_string(&inputs).unwrap_or_default();
     let recorded_init =
         recorded.lines().find_map(|l| l.strip_prefix("init_sh=")).unwrap_or("<missing>");
     let recorded_shim =
         recorded.lines().find_map(|l| l.strip_prefix("shim=")).unwrap_or("<missing>");
-    if init_hash == recorded_init && shim_hash == recorded_shim {
+    let recorded_build_rootfs =
+        recorded.lines().find_map(|l| l.strip_prefix("build_rootfs_sh=")).unwrap_or("<missing>");
+    let recorded_rootfs_builder_dockerfile = recorded
+        .lines()
+        .find_map(|l| l.strip_prefix("rootfs_builder_dockerfile="))
+        .unwrap_or("<missing>");
+    if init_hash == recorded_init
+        && shim_hash == recorded_shim
+        && build_rootfs_hash == recorded_build_rootfs
+        && rootfs_builder_dockerfile_hash == recorded_rootfs_builder_dockerfile
+    {
         Check::ok(label)
     } else {
         Check::fail(
             label,
             format!(
-                "rootfs.raw is stale — guest/init.sh or the shim has changed since the\n\
+                "rootfs.raw is stale — guest/init.sh, the shim, or the rootfs builder\n\
+                 has changed since the\n\
                  rootfs was built. Run:\n\
                  \n\
                  \x20 just rebuild-rootfs\n\
                  \n\
                  Mismatches:\n\
                  \x20 init_sh:  recorded={recorded_init}  live={init_hash}\n\
-                 \x20 shim:     recorded={recorded_shim}  live={shim_hash}"
+                 \x20 shim:     recorded={recorded_shim}  live={shim_hash}\n\
+                 \x20 build:    recorded={recorded_build_rootfs}  live={build_rootfs_hash}\n\
+                 \x20 docker:   recorded={recorded_rootfs_builder_dockerfile}  live={rootfs_builder_dockerfile_hash}"
             ),
         )
     }

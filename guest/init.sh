@@ -17,6 +17,21 @@ set -e
 # empty PATH, which causes BusyBox applets in /bin to be invisible.
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 
+ABOX_UID=1000
+ABOX_GID=1000
+ABOX_TMPDIR=/run/abox-tmp
+
+boot_fail() {
+    code="$1"
+    message="$2"
+    echo "ERROR: $message" >&2
+    mkdir -p /abox-status
+    mount -t virtiofs aboxstatus /abox-status 2>/dev/null || true
+    echo "$code" > /abox-status/exit-code 2>/dev/null || true
+    sync 2>/dev/null || true
+    exec poweroff -f
+}
+
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sys /sys 2>/dev/null || true
 mount -t devtmpfs dev /dev 2>/dev/null || true
@@ -25,7 +40,20 @@ mount -t devtmpfs dev /dev 2>/dev/null || true
 # the HTTPS egress proxy bridge on TCP port 18443).
 ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
 
-mkdir -p /run /workspace /abox-meta
+mkdir -p /run "$ABOX_TMPDIR" /workspace /abox-meta
+
+# Dedicated guest scratch area for the unprivileged agent user.
+# This is VM-local only: not virtiofs-backed, not under /home/abox, and
+# removed with sandbox teardown. Keep it executable — Node/Python/package
+# tooling occasionally runs temp helpers, and `noexec` would break those
+# workflows and push callers back toward host-backed paths.
+if ! grep -Fqs " $ABOX_TMPDIR tmpfs " /proc/mounts; then
+    mount -t tmpfs -o mode=0700,uid="$ABOX_UID",gid="$ABOX_GID",nodev,nosuid \
+        tmpfs "$ABOX_TMPDIR" 2>/dev/null || \
+        boot_fail 70 "failed to mount tmpfs scratch at $ABOX_TMPDIR"
+fi
+chown "$ABOX_UID:$ABOX_GID" "$ABOX_TMPDIR" 2>/dev/null || true
+chmod 0700 "$ABOX_TMPDIR" 2>/dev/null || true
 
 # Workspace share
 mount -t virtiofs workspace /workspace 2>/dev/null || \

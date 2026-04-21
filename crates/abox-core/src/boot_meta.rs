@@ -15,6 +15,10 @@ use std::path::Path;
 /// target of `~/` expansion in guest paths. See ADR-004.
 pub const GUEST_AGENT_HOME: &str = "/home/abox";
 
+/// Dedicated VM-local scratch directory for the unprivileged guest agent.
+/// Created by `guest/init.sh` before the runner drops privileges.
+pub const GUEST_AGENT_TMPDIR: &str = "/run/abox-tmp";
+
 /// Expand a guest-side path against [`GUEST_AGENT_HOME`].
 ///
 /// Rules:
@@ -103,6 +107,11 @@ impl BootMeta {
             s.push_str(&sh_escape(v));
             s.push_str("'\n");
         }
+        // Keep guest temp usage on the VM-local scratch mount even if callers
+        // try to point TMPDIR somewhere host-backed like /workspace.
+        s.push_str("export TMPDIR='");
+        s.push_str(GUEST_AGENT_TMPDIR);
+        s.push_str("'\n");
         // Fix ownership of agent home if it doesn't belong to the abox user
         // (uid 1000). Skipped on template-restored VMs where ownership is
         // already correct, avoiding a redundant recursive chown on every boot.
@@ -203,8 +212,22 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("export PATH='/usr/local/bin:/usr/bin:/bin:/sbin'\n"));
         assert!(script.contains("export ABOX_SANDBOX_ID='task-a'\n"));
+        assert!(script.contains("export TMPDIR='/run/abox-tmp'\n"));
         assert!(script
             .contains("su-exec abox:abox env HOME=/home/abox USER=abox '/bin/echo' 'hello'\n"));
+    }
+
+    #[test]
+    fn test_runner_script_forces_vm_local_tmpdir_after_user_env() {
+        let meta = BootMeta {
+            sandbox_id: "tmpdir-test".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![("TMPDIR".into(), "/workspace".into())],
+            credential_files: vec![],
+        };
+
+        let script = meta.runner_script();
+        assert!(script.contains("export TMPDIR='/workspace'\nexport TMPDIR='/run/abox-tmp'\n"));
     }
 
     #[test]
@@ -417,5 +440,17 @@ mod tests {
                 "error message should cite offending entry {bad:?}, got: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn guest_init_mounts_private_tmpdir() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        assert!(init_sh.contains("ABOX_TMPDIR=/run/abox-tmp"));
+        assert!(init_sh.contains(
+            "mount -t tmpfs -o mode=0700,uid=\"$ABOX_UID\",gid=\"$ABOX_GID\",nodev,nosuid"
+        ));
+        assert!(init_sh.contains("boot_fail 70 \"failed to mount tmpfs scratch at $ABOX_TMPDIR\""));
+        assert!(init_sh.contains("chown \"$ABOX_UID:$ABOX_GID\" \"$ABOX_TMPDIR\""));
+        assert!(init_sh.contains("chmod 0700 \"$ABOX_TMPDIR\""));
     }
 }

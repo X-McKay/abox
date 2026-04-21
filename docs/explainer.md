@@ -275,7 +275,7 @@ The stub is written into the guest filesystem at boot with placeholder values. T
 
 ## 10. The bootstrap script: `bootstrap_vm.sh`
 
-**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles an ext4 rootfs containing busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. The rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). CLI versions are pinned in `build_rootfs.sh` for reproducible builds. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
+**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles an ext4 rootfs containing busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. The rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). Rootfs assembly now runs inside a cached Dockerized Alpine builder so file ownership and modes in the image match a real root-owned guest filesystem. CLI versions are pinned in `build_rootfs.sh` for reproducible builds. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
 
 **Why it's bash and not Rust:** Bootstrapping is a one-time operation per machine. Bash is universal, easy to read, and avoids the chicken-and-egg problem of "you need cargo to build the bootstrap, but the bootstrap installs cargo's musl target". The `vendor/` cache and SHA256 checksums make it idempotent and recoverable from network blips. The 200 lines are ~50% comments and pinned-version constants — the actual logic is small.
 
@@ -288,15 +288,20 @@ The stub is written into the guest filesystem at boot with placeholder values. T
 | virtiofsd v1.10.0 (extracted from Ubuntu .deb) | yes (twice — deb and binary) |
 | vmlinux (CH-built kernel) | yes |
 | alpine-minirootfs-3.19.9.tar.gz | yes |
-| socat-1.8.0.0-r0.apk | yes |
-
 If any of these get re-published or corrupted in transit, the bootstrap fails fast with a clear "expected vs actual" message and asks you to delete the cached file under `vendor/`.
 
-**Why it doesn't need sudo:** Every step runs in user space:
+**Why it uses Docker for source builds:** The guest rootfs must preserve root-owned files and canonical Alpine permissions (`/bin`, `/etc`, `/usr`, `/tmp`, etc.). A purely rootless `fakeroot` path was not authoritative because statically linked tools like `apk.static` bypassed `fakeroot`'s ownership shims. The current build runs the staging work inside a real-root Alpine container, mounts the source repo read-only, writes only `rootfs.raw` and its inputs stamp back to `~/.abox/vm/`, and then `chown`s those outputs back to the host user.
+- Downloads still land in `~/.abox/vm/`.
+- The deb extraction uses `dpkg-deb -x` (no install).
+- The shim builds with cargo.
+- The rootfs is still assembled in a `mktemp -d` staging dir and packed into an ext4 image with `mkfs.ext4 -d` (which writes a populated filesystem from a directory tree, no loop mount needed).
+- Symlinks still land in `~/.local/bin`.
+
+**Why it doesn't need host sudo:** Every host-side step stays in user space:
 - Downloads land in `~/.abox/vm/`.
 - The deb extraction uses `dpkg-deb -x` (no install).
 - The shim builds with cargo.
-- The rootfs is assembled in a `mktemp -d` staging dir and packed into an ext4 image with `mkfs.ext4 -d` (which writes a populated filesystem from a directory tree, no loop mount needed).
+- The privileged rootfs staging happens inside Docker, not on the host.
 - Symlinks land in `~/.local/bin`.
 
 **What would break without it:** Users would have to install Cloud Hypervisor manually (it's not packaged in most distros), find a kernel that boots without an initramfs, build virtiofsd from source, and assemble a rootfs by hand. That's a 2-hour task at best and a "give up" task at worst.

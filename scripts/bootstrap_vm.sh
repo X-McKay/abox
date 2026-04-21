@@ -2,12 +2,14 @@
 # bootstrap_vm.sh — one-command setup for abox VM execution.
 #
 # Downloads cloud-hypervisor, virtiofsd, a kernel, and an Alpine miniroot.
-# Builds the abox-shim for static musl. Assembles a guest rootfs image.
+# Builds the abox-shim for static musl. Assembles a guest rootfs image
+# through a Dockerized Alpine builder so guest ownership metadata is correct.
 # Writes everything to ~/.abox/vm/. Run 'abox init' afterwards to generate
 # a working config.toml.
 #
 # This script is idempotent and uses checksummed cached downloads under vendor/.
-# It does NOT require sudo, docker, chroot, or root.
+# Source bootstraps require Docker for the rootfs build step. `--from-bundle`
+# restores prebuilt VM assets without Docker.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -173,12 +175,6 @@ readonly ALPINE_MINOR="v3.19"
 readonly ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_MINOR}/releases/${ARCH}/alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
 readonly ALPINE_SHA="6b4444630d3c349edb99847da31591a91d529b4bf8235a4990d4cb2cab45b8e5"
 
-# socat Alpine package (not yet extracted — used in rootfs assembly phase)
-# Source: https://dl-cdn.alpinelinux.org/alpine/v3.19/main/$ARCH/
-readonly SOCAT_VERSION="1.8.0.0-r0"
-readonly SOCAT_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/main/${ARCH}/socat-${SOCAT_VERSION}.apk"
-readonly SOCAT_SHA="ddf3be46f3a319737817246b238089dc58f39f32b0f515358c40e9e6e363eee6"
-
 # ---------------------------------------------------------------------------
 
 echo "abox VM bootstrap"
@@ -209,10 +205,9 @@ fi
 rm -f "$ABOX_VM_DIR/virtiofsd.deb"
 chmod +x "$ABOX_VM_DIR/virtiofsd"
 
-echo "[3/5] Downloading guest kernel + Alpine miniroot + socat package..."
+echo "[3/5] Downloading guest kernel + Alpine miniroot..."
 download_to "$VMLINUX_URL"  "$ABOX_VM_DIR/vmlinux"                    "$VMLINUX_SHA"
 download_to "$ALPINE_URL"   "$ABOX_VM_DIR/alpine-minirootfs.tar.gz"   "$ALPINE_SHA"
-download_to "$SOCAT_URL"    "$ABOX_VM_DIR/socat.apk"                  "$SOCAT_SHA"
 
 # ─── Phase 4: Build abox-shim for static musl ────────────────────────────
 echo "[4/5] Building abox-shim for static musl ($RUST_TARGET)..."
