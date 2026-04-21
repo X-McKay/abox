@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.3.0 — 2026-04-20
+
+### Features
+
+- feat(rootfs): add python3 to guest image (73088d1)
+- feat(cli): add --capabilities top-level flag with config bypass (7d942f3)
+
+### Fixes
+
+- fix(workspace): surface non-conflict merge failures (ea51594)
+- fix(proxy): confine per-vm bridge cwd to worktree (2bcbdf1)
+- fix(release): finish wildcard matching and refresh v0.3.0 docs (540139f)
+- fix(setup): verify virtiofsd sandbox capability (aa32be7)
+
+### Chores
+
+- chore: format proxy bridge cwd translation (18b9543)
+- chore(cli): reformat doctor and init output helpers (acd514b)
+- chore(release): bump version to 0.3.0 (fff8566)
+
+
 ## v0.3.0 — 2026-04-19
 
 ### Features
