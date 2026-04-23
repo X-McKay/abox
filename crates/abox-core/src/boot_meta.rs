@@ -5,6 +5,7 @@
 //! the guest init reads them. This avoids kernel-cmdline length limits and
 //! quoting issues, and never touches the user's worktree.
 
+use crate::util::validate_env_key;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
@@ -80,6 +81,14 @@ impl BootMeta {
     /// The script runs as root (inherited from init.sh), stages credentials,
     /// fixes ownership, then drops privileges via `su-exec` before exec-ing
     /// the agent. See ADR-004.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any environment variable key in `self.env` fails
+    /// [`validate_env_key`]. Keys must be validated at the CLI boundary
+    /// (in `run.rs`) before being stored in `BootMeta`. This panic is a
+    /// defence-in-depth guard against keys reaching this function via any
+    /// call path that bypasses the CLI.
     pub fn runner_script(&self) -> String {
         let mut s = String::from("#!/bin/sh\n");
         s.push_str("set -e\n");
@@ -101,6 +110,16 @@ impl BootMeta {
         s.push_str(&sh_escape(&self.sandbox_id));
         s.push_str("'\n");
         for (k, v) in &self.env {
+            // Defence-in-depth: panic rather than emit a malformed export
+            // statement. The CLI boundary (run.rs) must have already rejected
+            // invalid keys; this guard catches any call path that bypasses it.
+            validate_env_key(k).unwrap_or_else(|e| {
+                panic!(
+                    "BUG: invalid env key {:?} reached runner_script(); \
+                     validate at the CLI boundary before constructing BootMeta: {e}",
+                    k
+                )
+            });
             s.push_str("export ");
             s.push_str(k);
             s.push_str("='");
