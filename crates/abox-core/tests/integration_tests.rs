@@ -267,6 +267,8 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "{value}".to_string(),
+                allow_methods: vec![],
+                allow_path_prefixes: vec![],
             },
             EgressRule {
                 domain: "api.openai.com".to_string(),
@@ -275,6 +277,8 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "Bearer {value}".to_string(),
+                allow_methods: vec![],
+                allow_path_prefixes: vec![],
             },
             EgressRule {
                 domain: "*.amazonaws.com".to_string(),
@@ -283,6 +287,8 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "AWS4-HMAC-SHA256 {value}".to_string(),
+                allow_methods: vec![],
+                allow_path_prefixes: vec![],
             },
         ],
         default_cli_action: "deny".to_string(),

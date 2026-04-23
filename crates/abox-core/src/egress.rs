@@ -230,6 +230,37 @@ async fn handle_mitm_with_injection(
         let rule_owned = rule_owned.clone();
         let inject_header_name = inject_header_name.clone();
         async move {
+            // ── Granular per-request policy check ────────────────────────────
+            // Now that TLS has been terminated and the inner HTTP request is
+            // parsed, enforce any method and path-prefix restrictions declared
+            // on the matched egress rule. This is the second gate: the first
+            // gate (domain matching) ran at CONNECT time before TLS setup.
+            //
+            // If the rule has no allow_methods / allow_path_prefixes (the
+            // common case for existing policies), evaluate_request() is a
+            // no-op and returns Ok(()) immediately — no performance impact.
+            if let Some(r) = rule_owned.as_ref() {
+                let method = req.method().as_str();
+                let path = req.uri().path();
+                if let Err(reason) = r.evaluate_request(method, path) {
+                    tracing::warn!(
+                        domain = %r.domain,
+                        method = %method,
+                        path = %path,
+                        reason = %reason,
+                        "Inner request denied by method/path policy"
+                    );
+                    // Return a 403 to the guest. We cannot use `?` here
+                    // because the service_fn must return hyper::Error, not
+                    // anyhow::Error. Construct the response directly.
+                    let body = full_body("Blocked by egress method/path policy");
+                    return Ok(Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(body)
+                        .unwrap());
+                }
+            }
+
             // Credential injection: if a rule matches and a credential
             // resolves, insert-or-replace the target header. This matches
             // the original proxy contract: the proxy's job is to *provide*

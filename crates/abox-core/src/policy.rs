@@ -40,6 +40,28 @@ pub struct CliPolicy {
 }
 
 /// An HTTP egress proxy rule.
+///
+/// Domain-level matching is performed at `CONNECT` time (before TLS
+/// termination). Method and path-prefix matching is performed *after* TLS
+/// termination, once the inner HTTP request is parsed by the MITM proxy.
+///
+/// # Granular request restrictions
+///
+/// Two optional fields narrow the scope of what a domain-matched rule
+/// actually permits:
+///
+/// - **`allow_methods`**: If non-empty, only the listed HTTP methods are
+///   forwarded. Any other method is denied with 403. Methods are
+///   case-insensitive (normalised to uppercase). Example:
+///   `allow_methods = ["GET", "POST"]`.
+///
+/// - **`allow_path_prefixes`**: If non-empty, the request path must start
+///   with at least one of the listed prefixes. Requests to unlisted paths
+///   are denied with 403. Example:
+///   `allow_path_prefixes = ["/v1/messages", "/v1/models"]`.
+///
+/// Both fields default to empty (no restriction beyond domain matching),
+/// preserving full backward compatibility with existing policy files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EgressRule {
     /// Domain pattern (e.g., "api.anthropic.com", "*.amazonaws.com").
@@ -64,6 +86,25 @@ pub struct EgressRule {
     /// Default: just the raw value.
     #[serde(default = "default_header_template")]
     pub header_template: String,
+
+    /// If non-empty, only these HTTP methods are permitted for this rule.
+    ///
+    /// Values are normalised to uppercase before comparison. An empty list
+    /// means all methods are allowed (backward-compatible default).
+    ///
+    /// Example: `allow_methods = ["GET", "POST"]`
+    #[serde(default)]
+    pub allow_methods: Vec<String>,
+
+    /// If non-empty, the request path must start with one of these prefixes.
+    ///
+    /// Prefix matching is case-sensitive and applied to the decoded URI path
+    /// (query string and fragment are not included). An empty list means all
+    /// paths are allowed (backward-compatible default).
+    ///
+    /// Example: `allow_path_prefixes = ["/v1/messages", "/v1/models"]`
+    #[serde(default)]
+    pub allow_path_prefixes: Vec<String>,
 }
 
 impl EgressRule {
@@ -86,6 +127,47 @@ impl EgressRule {
             }
         }
         None
+    }
+
+    /// Evaluate whether a concrete HTTP method and path are permitted by this
+    /// rule's granular restrictions.
+    ///
+    /// Returns `Ok(())` if the request is allowed, or `Err(reason)` if it is
+    /// denied by a method or path-prefix restriction.
+    ///
+    /// This is called *after* domain matching and TLS termination, once the
+    /// inner HTTP request is available to the MITM proxy.
+    pub fn evaluate_request(&self, method: &str, path: &str) -> Result<(), String> {
+        // Method check: if the allow-list is non-empty, the method must appear.
+        if !self.allow_methods.is_empty() {
+            let method_upper = method.to_uppercase();
+            let allowed = self
+                .allow_methods
+                .iter()
+                .any(|m| m.to_uppercase() == method_upper);
+            if !allowed {
+                return Err(format!(
+                    "HTTP method {method:?} is not permitted for domain {:?}; \
+                     allowed methods: {:?}",
+                    self.domain, self.allow_methods
+                ));
+            }
+        }
+
+        // Path-prefix check: if the allow-list is non-empty, the path must
+        // start with at least one listed prefix.
+        if !self.allow_path_prefixes.is_empty() {
+            let allowed = self.allow_path_prefixes.iter().any(|p| path.starts_with(p.as_str()));
+            if !allowed {
+                return Err(format!(
+                    "Request path {path:?} is not permitted for domain {:?}; \
+                     allowed path prefixes: {:?}",
+                    self.domain, self.allow_path_prefixes
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -214,6 +296,32 @@ impl PolicyEngine {
                     domain = rule.domain,
                 );
             }
+
+            // Validate that allow_methods entries look like real HTTP method
+            // tokens (RFC 9110 §9.1: method = token). Reject obviously wrong
+            // values early so operators get a clear error at startup rather
+            // than a silent pass-through at request time.
+            for method in &rule.allow_methods {
+                if method.is_empty() || method.chars().any(|c| !c.is_ascii_alphabetic()) {
+                    anyhow::bail!(
+                        "Egress rule #{idx} ({domain}): allow_methods entry {method:?} is not a \
+                         valid HTTP method token. Use uppercase ASCII letters only \
+                         (e.g. \"GET\", \"POST\").",
+                        domain = rule.domain,
+                    );
+                }
+            }
+
+            // Validate that allow_path_prefixes entries start with '/'.
+            for prefix in &rule.allow_path_prefixes {
+                if !prefix.starts_with('/') {
+                    anyhow::bail!(
+                        "Egress rule #{idx} ({domain}): allow_path_prefixes entry {prefix:?} must \
+                         start with '/' (e.g. \"/v1/messages\").",
+                        domain = rule.domain,
+                    );
+                }
+            }
         }
 
         Ok(Self {
@@ -312,7 +420,15 @@ impl PolicyEngine {
         &self.bypass_tls
     }
 
-    /// Evaluate an HTTP egress request.
+    /// Evaluate an HTTP egress request by domain only.
+    ///
+    /// This is the **CONNECT-time** check: it runs before TLS termination,
+    /// so only the target domain is known. It returns the matching rule (for
+    /// credential injection setup) or denies the tunnel entirely.
+    ///
+    /// For full per-request enforcement (method + path), call
+    /// [`PolicyEngine::evaluate_egress_request`] on each inner HTTP request
+    /// after TLS termination.
     ///
     /// # Arguments
     /// * `domain` - The target domain (e.g., "api.anthropic.com").
@@ -329,6 +445,48 @@ impl PolicyEngine {
             Ok(None)
         } else {
             Err(Decision::Deny(format!("No egress rule for domain '{domain}'")))
+        }
+    }
+
+    /// Evaluate a concrete inner HTTP request against the matched egress rule.
+    ///
+    /// This is the **post-TLS-termination** check. It is called by the MITM
+    /// proxy for each HTTP request that flows over an already-established
+    /// tunnel, after the domain has been approved by [`evaluate_egress`].
+    ///
+    /// It enforces the optional `allow_methods` and `allow_path_prefixes`
+    /// restrictions on the matched rule. If the rule has no such restrictions
+    /// (the common case for existing policies), this function always returns
+    /// `Decision::Allow`.
+    ///
+    /// # Arguments
+    /// * `domain` - The target domain (used to look up the rule).
+    /// * `method` - The HTTP method of the inner request (e.g., "POST").
+    /// * `path`   - The URI path of the inner request (e.g., "/v1/messages").
+    ///
+    /// Returns `Decision::Allow` if permitted, or `Decision::Deny(reason)`
+    /// if blocked by a method or path-prefix restriction.
+    pub fn evaluate_egress_request(
+        &self,
+        domain: &str,
+        method: &str,
+        path: &str,
+    ) -> Decision {
+        // Find the matching rule (same logic as evaluate_egress).
+        let rule = self.egress_rules.iter().find(|r| domain_matches(&r.domain, domain));
+
+        let Some(rule) = rule else {
+            // No rule found: if default is allow, permit; otherwise deny.
+            return if self.default_egress_action == "allow" {
+                Decision::Allow
+            } else {
+                Decision::Deny(format!("No egress rule for domain '{domain}'"))
+            };
+        };
+
+        match rule.evaluate_request(method, path) {
+            Ok(()) => Decision::Allow,
+            Err(reason) => Decision::Deny(reason),
         }
     }
 }
@@ -458,6 +616,8 @@ mod tests {
                 credential_file: None,
                 json_path: None,
                 header_template: "{value}".to_string(),
+                allow_methods: vec![],
+                allow_path_prefixes: vec![],
             }],
             default_cli_action: "deny".to_string(),
             default_egress_action: "deny".to_string(),
@@ -762,6 +922,8 @@ mod tests {
             credential_file: Some(tmp.path().display().to_string()),
             json_path: Some("claudeAiOauth.accessToken".into()),
             header_template: "Bearer {value}".into(),
+            allow_methods: vec![],
+            allow_path_prefixes: vec![],
         };
         assert_eq!(rule.resolve_credential(), Some("real-token-xyz".to_string()));
     }
@@ -783,6 +945,8 @@ mod tests {
             credential_file: Some("/nonexistent".into()),
             json_path: Some("a.b".into()),
             header_template: "{value}".into(),
+            allow_methods: vec![],
+            allow_path_prefixes: vec![],
         };
         assert_eq!(rule.resolve_credential(), Some("env-value".to_string()));
         unsafe {
@@ -799,6 +963,8 @@ mod tests {
             credential_file: Some("/definitely/does/not/exist.json".into()),
             json_path: Some("a".into()),
             header_template: "{value}".into(),
+            allow_methods: vec![],
+            allow_path_prefixes: vec![],
         };
         assert_eq!(rule.resolve_credential(), None);
     }
@@ -814,6 +980,8 @@ mod tests {
                 credential_file: Some("/some/file.json".into()),
                 json_path: None,
                 header_template: "Bearer {value}".into(),
+                allow_methods: vec![],
+                allow_path_prefixes: vec![],
             }],
             default_cli_action: "deny".into(),
             default_egress_action: "deny".into(),
@@ -859,5 +1027,211 @@ mod tests {
     #[test]
     fn test_expand_tilde_no_tilde() {
         assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+    }
+
+    // ─── Granular egress: method + path-prefix tests ───────────────────────
+
+    fn make_rule_with_restrictions(
+        methods: Vec<&str>,
+        prefixes: Vec<&str>,
+    ) -> EgressRule {
+        EgressRule {
+            domain: "api.example.com".into(),
+            inject_header: "Authorization".into(),
+            env_var: Some("TEST_KEY".into()),
+            credential_file: None,
+            json_path: None,
+            header_template: "{value}".into(),
+            allow_methods: methods.into_iter().map(String::from).collect(),
+            allow_path_prefixes: prefixes.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn evaluate_request_no_restrictions_always_allows() {
+        let rule = make_rule_with_restrictions(vec![], vec![]);
+        assert!(rule.evaluate_request("GET", "/anything").is_ok());
+        assert!(rule.evaluate_request("DELETE", "/admin/users").is_ok());
+    }
+
+    #[test]
+    fn evaluate_request_method_restriction_allows_listed() {
+        let rule = make_rule_with_restrictions(vec!["GET", "POST"], vec![]);
+        assert!(rule.evaluate_request("GET", "/v1/data").is_ok());
+        assert!(rule.evaluate_request("POST", "/v1/data").is_ok());
+    }
+
+    #[test]
+    fn evaluate_request_method_restriction_denies_unlisted() {
+        let rule = make_rule_with_restrictions(vec!["GET", "POST"], vec![]);
+        let err = rule.evaluate_request("DELETE", "/v1/data").unwrap_err();
+        assert!(err.contains("DELETE"), "error should name the method: {err}");
+        assert!(err.contains("api.example.com"), "error should name the domain: {err}");
+    }
+
+    #[test]
+    fn evaluate_request_method_check_is_case_insensitive() {
+        let rule = make_rule_with_restrictions(vec!["GET"], vec![]);
+        // Lowercase method from client should still match uppercase allow-list.
+        assert!(rule.evaluate_request("get", "/v1/data").is_ok());
+        assert!(rule.evaluate_request("Get", "/v1/data").is_ok());
+    }
+
+    #[test]
+    fn evaluate_request_path_restriction_allows_matching_prefix() {
+        let rule = make_rule_with_restrictions(vec![], vec!["/v1/messages", "/v1/models"]);
+        assert!(rule.evaluate_request("POST", "/v1/messages").is_ok());
+        assert!(rule.evaluate_request("GET", "/v1/models/list").is_ok());
+    }
+
+    #[test]
+    fn evaluate_request_path_restriction_denies_non_matching_prefix() {
+        let rule = make_rule_with_restrictions(vec![], vec!["/v1/messages"]);
+        let err = rule.evaluate_request("POST", "/v1/admin/delete-all").unwrap_err();
+        assert!(err.contains("/v1/admin/delete-all"), "error should name the path: {err}");
+        assert!(err.contains("api.example.com"), "error should name the domain: {err}");
+    }
+
+    #[test]
+    fn evaluate_request_both_restrictions_must_pass() {
+        let rule = make_rule_with_restrictions(vec!["POST"], vec!["/v1/messages"]);
+        // Both correct.
+        assert!(rule.evaluate_request("POST", "/v1/messages").is_ok());
+        // Wrong method, correct path.
+        assert!(rule.evaluate_request("GET", "/v1/messages").is_err());
+        // Correct method, wrong path.
+        assert!(rule.evaluate_request("POST", "/v1/admin").is_err());
+    }
+
+    #[test]
+    fn evaluate_egress_request_engine_no_restrictions() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        // test_policy has no method/path restrictions on api.anthropic.com.
+        assert_eq!(
+            engine.evaluate_egress_request("api.anthropic.com", "DELETE", "/v1/anything"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn evaluate_egress_request_engine_with_method_restriction() {
+        let mut policy = test_policy();
+        policy.egress[0].allow_methods = vec!["POST".into()];
+        let engine = PolicyEngine::from_policy_file(policy).unwrap();
+
+        assert_eq!(
+            engine.evaluate_egress_request("api.anthropic.com", "POST", "/v1/messages"),
+            Decision::Allow
+        );
+        assert!(matches!(
+            engine.evaluate_egress_request("api.anthropic.com", "GET", "/v1/messages"),
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn evaluate_egress_request_engine_with_path_restriction() {
+        let mut policy = test_policy();
+        policy.egress[0].allow_path_prefixes = vec!["/v1/messages".into(), "/v1/models".into()];
+        let engine = PolicyEngine::from_policy_file(policy).unwrap();
+
+        assert_eq!(
+            engine.evaluate_egress_request("api.anthropic.com", "POST", "/v1/messages"),
+            Decision::Allow
+        );
+        assert!(matches!(
+            engine.evaluate_egress_request("api.anthropic.com", "POST", "/v1/admin"),
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn evaluate_egress_request_unknown_domain_denied() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        assert!(matches!(
+            engine.evaluate_egress_request("evil.example.com", "GET", "/"),
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn policy_load_rejects_invalid_method_token() {
+        let policy = PolicyFile {
+            cli: vec![],
+            egress: vec![EgressRule {
+                domain: "api.example.com".into(),
+                inject_header: "Authorization".into(),
+                env_var: Some("KEY".into()),
+                credential_file: None,
+                json_path: None,
+                header_template: "{value}".into(),
+                allow_methods: vec!["GET POST".into()], // space is invalid
+                allow_path_prefixes: vec![],
+            }],
+            default_cli_action: "deny".into(),
+            default_egress_action: "deny".into(),
+            bypass_tls: vec![],
+        };
+        let result = PolicyEngine::from_policy_file(policy);
+        let Err(err) = result else {
+            panic!("expected policy load to fail for invalid method token")
+        };
+        assert!(err.to_string().contains("allow_methods"), "{err}");
+    }
+
+    #[test]
+    fn policy_load_rejects_path_prefix_without_leading_slash() {
+        let policy = PolicyFile {
+            cli: vec![],
+            egress: vec![EgressRule {
+                domain: "api.example.com".into(),
+                inject_header: "Authorization".into(),
+                env_var: Some("KEY".into()),
+                credential_file: None,
+                json_path: None,
+                header_template: "{value}".into(),
+                allow_methods: vec![],
+                allow_path_prefixes: vec!["v1/messages".into()], // missing leading /
+            }],
+            default_cli_action: "deny".into(),
+            default_egress_action: "deny".into(),
+            bypass_tls: vec![],
+        };
+        let result = PolicyEngine::from_policy_file(policy);
+        let Err(err) = result else {
+            panic!("expected policy load to fail for path prefix without leading slash")
+        };
+        assert!(err.to_string().contains("allow_path_prefixes"), "{err}");
+    }
+
+    #[test]
+    fn policy_load_accepts_toml_with_method_and_path_restrictions() {
+        let toml_str = r#"
+            default_cli_action = "deny"
+            default_egress_action = "deny"
+
+            [[egress]]
+            domain = "api.anthropic.com"
+            inject_header = "Authorization"
+            env_var = "ANTHROPIC_API_KEY"
+            header_template = "Bearer {value}"
+            allow_methods = ["POST"]
+            allow_path_prefixes = ["/v1/messages", "/v1/models"]
+        "#;
+        let policy: PolicyFile = toml::from_str(toml_str).unwrap();
+        let engine = PolicyEngine::from_policy_file(policy).unwrap();
+
+        assert_eq!(
+            engine.evaluate_egress_request("api.anthropic.com", "POST", "/v1/messages"),
+            Decision::Allow
+        );
+        assert!(matches!(
+            engine.evaluate_egress_request("api.anthropic.com", "GET", "/v1/messages"),
+            Decision::Deny(_)
+        ));
+        assert!(matches!(
+            engine.evaluate_egress_request("api.anthropic.com", "POST", "/admin"),
+            Decision::Deny(_)
+        ));
     }
 }

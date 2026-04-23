@@ -92,6 +92,14 @@ bypass_tls = []
 
 # ── HTTP Egress Rules ────────────────────────────────────────────────────
 # Each rule matches a domain and injects a credential header.
+#
+# Optional granular restrictions (both default to empty = unrestricted):
+#
+#   allow_methods = ["GET", "POST"]          # only these HTTP methods
+#   allow_path_prefixes = ["/v1/messages"]   # only paths starting with these
+#
+# Method/path checks run *after* TLS termination on each inner HTTP request.
+# Leaving both empty (the default) preserves the previous domain-only behaviour.
 
 [[egress]]
 domain = "api.anthropic.com"
@@ -99,6 +107,10 @@ inject_header = "Authorization"
 credential_file = "~/.claude/.credentials.json"
 json_path = "claudeAiOauth.accessToken"
 header_template = "Bearer {value}"
+# Restrict to the inference and model-listing endpoints only.
+# Prevents the sandbox from reaching admin or billing paths.
+allow_methods = ["POST", "GET"]
+allow_path_prefixes = ["/v1/messages", "/v1/models"]
 
 [[egress]]
 domain = "api.openai.com"
