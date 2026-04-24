@@ -3,8 +3,9 @@
 //! Creates a git worktree, boots a MicroVM, mounts the worktree via virtiofs,
 //! and starts the specified agent inside the VM.
 
+use super::validate_task_arg_for_runtime_dir;
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
-use abox_core::util::{validate_env_key, validate_task_id};
+use abox_core::util::validate_env_key;
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
@@ -17,7 +18,8 @@ pub struct RunArgs {
     ///
     /// Must contain only ASCII letters, digits, hyphens, underscores, and
     /// dots. Must not start or end with a dot, contain consecutive dots, or
-    /// exceed 64 characters.
+    /// exceed 64 characters. On very deep `runtime_dir` layouts, the effective
+    /// limit may be lower because abox embeds the task ID in Unix socket paths.
     #[arg(long)]
     pub task: String,
 
@@ -98,20 +100,17 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     // ── Input validation (trust boundary) ────────────────────────────────
     // Validate the task ID before it is used as a branch name, worktree
     // directory, socket path, log file name, or PID file name.
-    validate_task_id(&args.task)
+    validate_task_arg_for_runtime_dir(&args.task, &orchestrator.runtime_dir())
         .map_err(|e| anyhow::anyhow!("--task {:?}: {e}", args.task))?;
+
+    // Parse and validate every --env KEY=VALUE argument. Fail fast on the
+    // first invalid key so the user gets a clear error before any VM work.
+    let env_vars: Vec<(String, String)> =
+        args.env_vars.iter().map(|s| parse_env_var(s)).collect::<Result<Vec<_>>>()?;
 
     if args.detach {
         return spawn_detached(&args, orchestrator);
     }
-
-    // Parse and validate every --env KEY=VALUE argument. Fail fast on the
-    // first invalid key so the user gets a clear error before any VM work.
-    let env_vars: Vec<(String, String)> = args
-        .env_vars
-        .iter()
-        .map(|s| parse_env_var(s))
-        .collect::<Result<Vec<_>>>()?;
 
     let params = CreateSandboxParams {
         task_id: args.task.clone(),

@@ -185,6 +185,13 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     /// 2. Start virtiofsd + Cloud Hypervisor VM
     /// 3. The VM boots, mounts the worktree at /workspace, and runs the agent
     pub async fn create_sandbox(&self, params: CreateSandboxParams) -> Result<SandboxStatus> {
+        crate::util::validate_task_id_for_runtime_dir(&params.task_id, &self.config.runtime_dir())
+            .map_err(anyhow::Error::msg)?;
+        for (key, _) in &params.env_vars {
+            crate::util::validate_env_key(key)
+                .map_err(|e| anyhow::anyhow!("invalid environment variable key {key:?}: {e}"))?;
+        }
+
         // Step 1: Create the git worktree
         let t_worktree = std::time::Instant::now();
         let worktree_path = self

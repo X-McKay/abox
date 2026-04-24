@@ -4,6 +4,7 @@
 //! Safe to run at any time; makes no changes to the system.
 
 use abox_core::config::AboxConfig;
+use abox_core::util::{max_task_id_len_for_runtime_dir, TASK_ID_MAX_LEN};
 use anyhow::Result;
 use std::path::Path;
 use std::path::PathBuf;
@@ -452,16 +453,15 @@ fn check_policy_file(config: &AboxConfig) -> Check {
 
 fn check_socket_path_length(config: &AboxConfig) -> Check {
     let runtime = config.runtime_dir();
-    // Longest suffix abox appends: "vfs-status-<task-id>.sock"
-    // Assume a generous 20-char task ID → 45 chars total suffix.
-    let worst_case = runtime.to_string_lossy().len() + 1 + 45;
-    if worst_case >= 108 {
+    let supported_len = max_task_id_len_for_runtime_dir(&runtime);
+    if supported_len == 0 {
         Check::fail(
             "Runtime dir socket path length",
             format!(
                 "runtime_dir '{}' is too long ({} bytes base).\n\
-                 Linux caps Unix socket paths at 108 bytes; abox appends per-sandbox\n\
-                 suffixes like 'vfs-status-<task-id>.sock'.\n\
+                 Linux caps Unix socket paths at 108 bytes, and abox appends per-sandbox\n\
+                 suffixes like 'vfs-status-<task-id>.sock' and 'vsock-<task-id>.sock_5000'.\n\
+                 No task ID would fit with this runtime_dir.\n\
                  Set a shorter runtime_dir in ~/.abox/config.toml, e.g.:\n\
                  \n\
                  \x20 runtime_dir = \"/tmp/abox-$USER\"",
@@ -469,16 +469,17 @@ fn check_socket_path_length(config: &AboxConfig) -> Check {
                 runtime.to_string_lossy().len(),
             ),
         )
-    } else if worst_case >= 90 {
+    } else if supported_len < TASK_ID_MAX_LEN {
         Check::warn(
             "Runtime dir socket path length",
             format!(
-                "runtime_dir '{}' is getting long ({} bytes base, {} worst-case).\n\
-                 Linux caps Unix socket paths at 108 bytes. You're fine for now, but\n\
-                 consider a shorter path if you move state_dir.",
+                "runtime_dir '{}' supports task IDs up to {} characters.\n\
+                 abox accepts task IDs up to {} characters in general, but longer ones\n\
+                 would overflow the runtime socket path budget for this config.\n\
+                 Consider a shorter runtime_dir if you want the full task-ID budget.",
                 runtime.display(),
-                runtime.to_string_lossy().len(),
-                worst_case,
+                supported_len,
+                TASK_ID_MAX_LEN,
             ),
         )
     } else {

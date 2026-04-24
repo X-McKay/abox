@@ -115,9 +115,8 @@ impl BootMeta {
             // invalid keys; this guard catches any call path that bypasses it.
             validate_env_key(k).unwrap_or_else(|e| {
                 panic!(
-                    "BUG: invalid env key {:?} reached runner_script(); \
-                     validate at the CLI boundary before constructing BootMeta: {e}",
-                    k
+                    "BUG: invalid env key {k:?} reached runner_script(); \
+                     validate at the CLI boundary before constructing BootMeta: {e}"
                 )
             });
             s.push_str("export ");

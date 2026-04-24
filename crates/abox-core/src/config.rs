@@ -352,17 +352,14 @@ mod tests {
 
     #[test]
     fn test_runtime_dir_default_is_short() {
-        // The default runtime dir must be short enough that even a moderately
-        // long task ID won't push the longest socket suffix past 108 bytes.
+        // The default runtime dir should preserve the full advertised task-ID
+        // budget for a typical home-directory install.
         let config =
             AboxConfig { state_dir: PathBuf::from("/home/username/.abox"), ..Default::default() };
         let runtime = config.runtime_dir();
-        // Longest known suffix: "vfs-status-<task-id>.sock" (25 chars + task id)
-        // With a 20-char task id that's 45 chars. runtime + '/' + suffix must be < 108.
-        let worst_case = runtime.to_string_lossy().len() + 1 + 45;
         assert!(
-            worst_case < 108,
-            "default runtime_dir produces socket paths that may exceed SUN_LEN: {worst_case} bytes"
+            crate::util::max_task_id_len_for_runtime_dir(&runtime) >= crate::util::TASK_ID_MAX_LEN,
+            "default runtime_dir should preserve the full task-ID budget: {runtime:?}"
         );
     }
 }

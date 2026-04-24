@@ -1,14 +1,29 @@
 //! Shared utility functions used across `abox` crates.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Maximum allowed length for a task ID.
 ///
-/// Chosen to keep the longest virtiofsd socket path (which embeds the task ID)
-/// well within the 108-byte Unix socket path limit even for deeply nested
-/// runtime directories. See `CloudHypervisorAdapter::LONGEST_SOCKET_SUFFIX`.
+/// This is a general sanity cap for user-facing sandbox IDs. The exact
+/// effective maximum also depends on `runtime_dir`, because abox embeds the
+/// task ID into several Unix socket paths and Linux caps those at 108 bytes.
+/// Use [`validate_task_id_for_runtime_dir`] when the runtime directory is
+/// known and you need the full safety check.
 pub const TASK_ID_MAX_LEN: usize = 64;
+
+/// Maximum length of a Unix-domain socket path on Linux (`SUN_LEN`).
+pub const UNIX_SOCKET_PATH_MAX_LEN: usize = 108;
+
+const RUNTIME_SOCKET_NAME_PARTS: &[(&str, &str)] = &[
+    ("ch-api-", ".sock"),
+    ("vsock-", ".sock"),
+    ("vfs-", ".sock"),
+    ("vfs-meta-", ".sock"),
+    ("vfs-status-", ".sock"),
+    ("vsock-", ".sock_5000"),
+    ("vsock-", ".sock_5001"),
+];
 
 /// Format a byte count into a human-readable string (KiB, MiB, GiB).
 pub fn format_size(bytes: u64) -> String {
@@ -58,12 +73,11 @@ pub async fn wait_for_socket(
 ///   ambiguity).
 /// - Does not contain consecutive dots (`..`) which would create an ambiguous
 ///   git ref.
-/// - Does not exceed [`TASK_ID_MAX_LEN`] characters (to keep socket paths
-///   within the 108-byte Unix limit).
+/// - Does not exceed [`TASK_ID_MAX_LEN`] characters.
 ///
-/// This function is the **single enforcement point** for task ID safety.
-/// Call it at the CLI boundary (in `run.rs`) before the ID is forwarded to
-/// any internal subsystem (workspace adapter, VM adapter, runtime paths).
+/// This validates the **syntax** of a task ID. To also verify that the ID fits
+/// inside the runtime socket paths for a particular `runtime_dir`, use
+/// [`validate_task_id_for_runtime_dir`].
 pub fn validate_task_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("task ID must not be empty".to_string());
@@ -80,23 +94,72 @@ pub fn validate_task_id(id: &str) -> Result<(), String> {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => {}
             _ => {
                 return Err(format!(
-                    "task ID contains invalid character {:?} at position {i}; \
-                     only ASCII letters, digits, hyphens, underscores, and dots are allowed",
-                    c
+                    "task ID contains invalid character {c:?} at position {i}; \
+                     only ASCII letters, digits, hyphens, underscores, and dots are allowed"
                 ));
             }
         }
     }
     if id.starts_with('.') || id.ends_with('.') {
-        return Err(
-            "task ID must not start or end with a dot ('.')".to_string()
-        );
+        return Err("task ID must not start or end with a dot ('.')".to_string());
     }
     if id.contains("..") {
-        return Err(
-            "task ID must not contain consecutive dots ('..')".to_string()
-        );
+        return Err("task ID must not contain consecutive dots ('..')".to_string());
     }
+    Ok(())
+}
+
+/// Return the maximum task ID length supported by a specific runtime dir.
+///
+/// abox embeds the sandbox ID in several runtime socket names, with the
+/// longest currently being `vfs-status-<id>.sock` and `vsock-<id>.sock_5000`.
+/// This helper computes how many characters remain for `<id>` once the
+/// runtime dir, path separator, and longest static suffix are accounted for.
+pub fn max_task_id_len_for_runtime_dir(runtime_dir: &Path) -> usize {
+    let runtime_len = runtime_dir.as_os_str().len();
+    let longest_overhead = RUNTIME_SOCKET_NAME_PARTS
+        .iter()
+        .map(|(prefix, suffix)| prefix.len() + suffix.len())
+        .max()
+        .unwrap_or(0);
+
+    UNIX_SOCKET_PATH_MAX_LEN
+        .saturating_sub(runtime_len.saturating_add(1).saturating_add(longest_overhead))
+}
+
+fn runtime_socket_paths(task_id: &str, runtime_dir: &Path) -> Vec<PathBuf> {
+    RUNTIME_SOCKET_NAME_PARTS
+        .iter()
+        .map(|(prefix, suffix)| runtime_dir.join(format!("{prefix}{task_id}{suffix}")))
+        .collect()
+}
+
+/// Validate a task ID against both the syntax rules and the current runtime dir.
+///
+/// This is the complete task-ID safety check used before abox creates
+/// worktrees, runtime sockets, detached-console logs, or per-sandbox bridges.
+pub fn validate_task_id_for_runtime_dir(id: &str, runtime_dir: &Path) -> Result<(), String> {
+    validate_task_id(id)?;
+
+    let longest_path = runtime_socket_paths(id, runtime_dir)
+        .into_iter()
+        .max_by_key(|path| path.as_os_str().len())
+        .expect("runtime socket path list must not be empty");
+    let longest_len = longest_path.as_os_str().len();
+
+    if longest_len > UNIX_SOCKET_PATH_MAX_LEN {
+        return Err(format!(
+            "task ID is too long for runtime_dir '{}': socket path '{}' would be {} bytes \
+             (limit is {}). Use a shorter task ID or a shorter runtime_dir. \
+             This runtime_dir supports task IDs up to {} characters.",
+            runtime_dir.display(),
+            longest_path.display(),
+            longest_len,
+            UNIX_SOCKET_PATH_MAX_LEN,
+            max_task_id_len_for_runtime_dir(runtime_dir)
+        ));
+    }
+
     Ok(())
 }
 
@@ -117,17 +180,15 @@ pub fn validate_env_key(key: &str) -> Result<(), String> {
     let first = chars.next().unwrap();
     if !first.is_ascii_alphabetic() && first != '_' {
         return Err(format!(
-            "environment variable key {:?} is invalid: must start with an ASCII letter or \
-             underscore (got {:?})",
-            key, first
+            "environment variable key {key:?} is invalid: must start with an ASCII letter or \
+             underscore (got {first:?})"
         ));
     }
     for (i, c) in key.char_indices().skip(1) {
         if !c.is_ascii_alphanumeric() && c != '_' {
             return Err(format!(
-                "environment variable key {:?} contains invalid character {:?} at position {i}; \
-                 only ASCII letters, digits, and underscores are allowed",
-                key, c
+                "environment variable key {key:?} contains invalid character {c:?} at position {i}; \
+                 only ASCII letters, digits, and underscores are allowed"
             ));
         }
     }
@@ -233,11 +294,7 @@ mod tests {
     #[test]
     fn validate_task_id_rejects_shell_metacharacters() {
         for bad in &["task;evil", "task$(cmd)", "task`cmd`", "task&bg", "task|pipe"] {
-            assert!(
-                validate_task_id(bad).is_err(),
-                "expected rejection of {:?}",
-                bad
-            );
+            assert!(validate_task_id(bad).is_err(), "expected rejection of {bad:?}");
         }
     }
 
@@ -262,6 +319,33 @@ mod tests {
     #[test]
     fn validate_task_id_rejects_path_traversal() {
         assert!(validate_task_id("../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_task_id_for_runtime_dir_accepts_default_layout_at_max_length() {
+        let runtime = Path::new("/home/username/.abox/r");
+        let id = "a".repeat(TASK_ID_MAX_LEN);
+        assert!(validate_task_id_for_runtime_dir(&id, runtime).is_ok());
+    }
+
+    #[test]
+    fn validate_task_id_for_runtime_dir_rejects_when_socket_path_would_overflow() {
+        let runtime = PathBuf::from("/tmp").join("x".repeat(80));
+        let err =
+            validate_task_id_for_runtime_dir(&"a".repeat(TASK_ID_MAX_LEN), &runtime).unwrap_err();
+        assert!(err.contains("too long for runtime_dir"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_task_id_for_runtime_dir_accepts_shorter_id_on_deep_runtime_dir() {
+        let runtime = PathBuf::from("/tmp").join("x".repeat(80));
+        assert!(validate_task_id_for_runtime_dir("short", &runtime).is_ok());
+    }
+
+    #[test]
+    fn max_task_id_len_for_runtime_dir_matches_default_budget() {
+        let runtime = Path::new("/home/username/.abox/r");
+        assert!(max_task_id_len_for_runtime_dir(runtime) >= TASK_ID_MAX_LEN);
     }
 
     // ── validate_env_key tests ────────────────────────────────────────────
@@ -301,18 +385,9 @@ mod tests {
     #[test]
     fn validate_env_key_rejects_shell_injection_payload() {
         // A crafted key that would break `export <key>='value'` syntax.
-        let payloads = [
-            "FOO=bar; malicious",
-            "FOO'\nmalicious",
-            "FOO$(cmd)",
-            "FOO`cmd`",
-        ];
+        let payloads = ["FOO=bar; malicious", "FOO'\nmalicious", "FOO$(cmd)", "FOO`cmd`"];
         for key in &payloads {
-            assert!(
-                validate_env_key(key).is_err(),
-                "expected rejection of env key {:?}",
-                key
-            );
+            assert!(validate_env_key(key).is_err(), "expected rejection of env key {key:?}");
         }
     }
 }
