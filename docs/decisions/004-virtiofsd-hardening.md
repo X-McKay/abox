@@ -64,8 +64,10 @@ An AppArmor profile is provided at `apparmor/usr.bin.virtiofsd`. It confines
   `/proc/*/mem`, etc.).
 
 The profile uses variables (`@{ABOX_RUNTIME_DIR}`, `@{ABOX_STATE_DIR}`) that
-operators must adjust to match their deployment. Installation instructions are
-in the profile header.
+operators may adjust to match their deployment. The shipped profile includes
+defaults for the common per-user layout (`~/.abox` state with runtime sockets
+under `~/.abox/r`) and a system-style `/var/lib/abox` + `/run/abox`
+deployment. Installation instructions are in the profile header.
 
 AppArmor provides defence-in-depth: even if `--sandbox=namespace` is bypassed
 (e.g. on a kernel without unprivileged user namespaces), the MAC policy still

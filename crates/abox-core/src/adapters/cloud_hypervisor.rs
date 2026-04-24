@@ -309,10 +309,8 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &meta_args {
             meta_cmd.arg(a);
         }
-        let meta_virtiofsd_child = meta_cmd
-            .kill_on_drop(true)
-            .spawn()
-            .context("Failed to start meta virtiofsd")?;
+        let meta_virtiofsd_child =
+            meta_cmd.kill_on_drop(true).spawn().context("Failed to start meta virtiofsd")?;
 
         // Status virtiofsd (read-write; for exit-code reporting).
         // Uses auxiliary_virtiofsd_args which adds --sandbox=namespace for
@@ -322,10 +320,8 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &status_args {
             status_cmd.arg(a);
         }
-        let status_virtiofsd_child = status_cmd
-            .kill_on_drop(true)
-            .spawn()
-            .context("Failed to start status virtiofsd")?;
+        let status_virtiofsd_child =
+            status_cmd.kill_on_drop(true).spawn().context("Failed to start status virtiofsd")?;
 
         // Wait for all three sockets concurrently instead of sequentially.
         let (ws_res, meta_res, status_res) = tokio::join!(

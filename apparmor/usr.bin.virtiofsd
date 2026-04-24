@@ -21,16 +21,20 @@
 #
 # NOTE: This profile uses variables for the shared-dir and socket paths.
 # In production, these should be set to the actual runtime directory used
-# by abox (default: /run/abox or ~/.abox/run). Adjust @{ABOX_RUNTIME_DIR}
-# and @{ABOX_STATE_DIR} below to match your deployment.
+# by abox. By default abox uses <state_dir>/r for runtime sockets, which is
+# usually ~/.abox/r for per-user installs. Adjust @{ABOX_RUNTIME_DIR} and
+# @{ABOX_STATE_DIR} below to match your deployment.
+
+# Pull in @{HOME} and the standard distro path variables used below.
+#include <tunables/global>
 
 # Adjust these variables to match your abox runtime and state directories.
-@{ABOX_RUNTIME_DIR}=/run/abox /tmp/abox-*
 @{ABOX_STATE_DIR}=@{HOME}/.abox /var/lib/abox
+@{ABOX_RUNTIME_DIR}=@{ABOX_STATE_DIR}/r /run/abox /tmp/abox-*
 
 # The profile name matches the resolved binary path. If virtiofsd is
 # installed at a non-standard location (e.g. ~/.abox/vm/virtiofsd),
-# add that path as an additional profile name or use a hat.
+# add that path as an additional profile stanza.
 profile virtiofsd /usr/bin/virtiofsd {
   #include <abstractions/base>
 
