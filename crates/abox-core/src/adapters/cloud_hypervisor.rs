@@ -31,12 +31,39 @@ fn workspace_virtiofsd_args(
         format!("--socket-path={}", socket_path.display()),
         format!("--shared-dir={}", shared_dir.display()),
         "--cache=never".to_string(),
-        // --sandbox=namespace required for --uid-map/--gid-map (user-namespace based remapping).
+        // --sandbox=namespace confines virtiofsd via Linux user namespaces
+        // (required for --uid-map/--gid-map and for security isolation).
         // Requires unprivileged user namespaces on the host (default on Linux 5.x+).
         "--sandbox=namespace".to_string(),
         "--thread-pool-size=4".to_string(),
         format!("--uid-map=:1000:{uid}:1:"),
         format!("--gid-map=:1000:{gid}:1:"),
+        // Suppress verbose FUSE-level debug output; only warnings and errors
+        // are operationally relevant and reducing log volume limits the
+        // information available to an attacker who gains log access.
+        "--log-level=warn".to_string(),
+    ]
+}
+
+/// Build the virtiofsd argument list for the read-only meta and status shares.
+///
+/// These shares do not require UID/GID remapping (they are accessed by the
+/// guest init process as root before privilege drop), but they still benefit
+/// from `--sandbox=namespace` for process-level isolation: virtiofsd is
+/// confined to its own user/mount/PID namespace, limiting the blast radius
+/// of a virtiofsd vulnerability to the shared directory contents rather than
+/// the full host filesystem.
+fn auxiliary_virtiofsd_args(
+    socket_path: &std::path::Path,
+    shared_dir: &std::path::Path,
+) -> Vec<String> {
+    vec![
+        format!("--socket-path={}", socket_path.display()),
+        format!("--shared-dir={}", shared_dir.display()),
+        "--cache=never".to_string(),
+        // Namespace sandbox for process isolation (same rationale as workspace).
+        "--sandbox=namespace".to_string(),
+        "--log-level=warn".to_string(),
     ]
 }
 
@@ -275,19 +302,27 @@ impl VmPort for CloudHypervisorAdapter {
         )?;
 
         // Meta virtiofsd (read-only in practice; serves boot metadata).
-        let meta_virtiofsd_child = Command::new(self.resolve_binary("virtiofsd")?)
-            .arg(format!("--socket-path={}", meta_socket.display()))
-            .arg(format!("--shared-dir={}", meta_dir.display()))
-            .arg("--cache=never")
+        // Uses auxiliary_virtiofsd_args which adds --sandbox=namespace for
+        // process-level isolation and --log-level=warn to reduce log noise.
+        let meta_args = auxiliary_virtiofsd_args(&meta_socket, &meta_dir);
+        let mut meta_cmd = Command::new(self.resolve_binary("virtiofsd")?);
+        for a in &meta_args {
+            meta_cmd.arg(a);
+        }
+        let meta_virtiofsd_child = meta_cmd
             .kill_on_drop(true)
             .spawn()
             .context("Failed to start meta virtiofsd")?;
 
         // Status virtiofsd (read-write; for exit-code reporting).
-        let status_virtiofsd_child = Command::new(self.resolve_binary("virtiofsd")?)
-            .arg(format!("--socket-path={}", status_socket.display()))
-            .arg(format!("--shared-dir={}", status_dir.display()))
-            .arg("--cache=never")
+        // Uses auxiliary_virtiofsd_args which adds --sandbox=namespace for
+        // process-level isolation and --log-level=warn to reduce log noise.
+        let status_args = auxiliary_virtiofsd_args(&status_socket, &status_dir);
+        let mut status_cmd = Command::new(self.resolve_binary("virtiofsd")?);
+        for a in &status_args {
+            status_cmd.arg(a);
+        }
+        let status_virtiofsd_child = status_cmd
             .kill_on_drop(true)
             .spawn()
             .context("Failed to start status virtiofsd")?;
@@ -590,5 +625,66 @@ mod tests {
         let args = super::workspace_virtiofsd_args(sock, dir, 2000, 3000);
         assert!(args.iter().any(|a| a == "--uid-map=:1000:2000:1:"));
         assert!(args.iter().any(|a| a == "--gid-map=:1000:3000:1:"));
+    }
+
+    #[test]
+    fn workspace_virtiofsd_args_include_log_level_warn() {
+        let sock = std::path::Path::new("/tmp/vfs-workspace.sock");
+        let dir = std::path::Path::new("/tmp/wt");
+        let args = super::workspace_virtiofsd_args(sock, dir, 1000, 1000);
+        assert!(
+            args.iter().any(|a| a == "--log-level=warn"),
+            "workspace virtiofsd must include --log-level=warn; got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn auxiliary_virtiofsd_args_include_sandbox_namespace() {
+        let sock = std::path::Path::new("/tmp/vfs-meta.sock");
+        let dir = std::path::Path::new("/tmp/meta");
+        let args = super::auxiliary_virtiofsd_args(sock, dir);
+        assert!(
+            args.iter().any(|a| a == "--sandbox=namespace"),
+            "auxiliary virtiofsd must include --sandbox=namespace; got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn auxiliary_virtiofsd_args_include_log_level_warn() {
+        let sock = std::path::Path::new("/tmp/vfs-status.sock");
+        let dir = std::path::Path::new("/tmp/status");
+        let args = super::auxiliary_virtiofsd_args(sock, dir);
+        assert!(
+            args.iter().any(|a| a == "--log-level=warn"),
+            "auxiliary virtiofsd must include --log-level=warn; got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn auxiliary_virtiofsd_args_include_cache_never() {
+        let sock = std::path::Path::new("/tmp/vfs-meta.sock");
+        let dir = std::path::Path::new("/tmp/meta");
+        let args = super::auxiliary_virtiofsd_args(sock, dir);
+        assert!(
+            args.iter().any(|a| a == "--cache=never"),
+            "auxiliary virtiofsd must include --cache=never; got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn auxiliary_virtiofsd_args_no_uid_gid_map() {
+        // The meta and status shares do not remap UIDs — the guest init
+        // process reads them as root before privilege drop.
+        let sock = std::path::Path::new("/tmp/vfs-meta.sock");
+        let dir = std::path::Path::new("/tmp/meta");
+        let args = super::auxiliary_virtiofsd_args(sock, dir);
+        assert!(
+            !args.iter().any(|a| a.starts_with("--uid-map")),
+            "auxiliary virtiofsd must NOT include --uid-map; got: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("--gid-map")),
+            "auxiliary virtiofsd must NOT include --gid-map; got: {args:?}"
+        );
     }
 }
