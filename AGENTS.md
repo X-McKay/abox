@@ -127,7 +127,7 @@ Tests are organized into four tiers by their requirements:
 
 **Before a release:** Run `just pre-release`. It detects host capabilities, runs all applicable tiers, compares benchmarks against the previous release, and writes attestation stamps. `release.sh` verifies these stamps before tagging.
 
-**During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just tier-vm` after VM/guest changes.
+**During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just tier-vm` after VM/guest changes. If you changed `guest/init.sh` or `scripts/build_rootfs.sh`, run `just rebuild-rootfs` before the VM-backed checks so they exercise the current guest image rather than a stale rootfs.
 
 ## Files You Should NOT Modify Without Good Reason
 

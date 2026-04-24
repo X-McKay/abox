@@ -43,6 +43,22 @@ build-release:
 build-shim:
     cargo build --release --target x86_64-unknown-linux-musl -p abox-shim
 
+# Rebuild the guest rootfs from the current init.sh + musl shim.
+# Requires `just bootstrap-vm` to have populated ~/.abox/vm first.
+rebuild-rootfs: build-shim
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ABOX_VM_DIR="${ABOX_VM_DIR:-$HOME/.abox/vm}"
+    SHIM_BIN="$PWD/target/x86_64-unknown-linux-musl/release/abox-shim"
+    GUEST_INIT="$PWD/guest/init.sh"
+    if [ ! -f "$ABOX_VM_DIR/alpine-minirootfs.tar.gz" ]; then
+        echo "ERROR: Alpine minirootfs not found at $ABOX_VM_DIR/alpine-minirootfs.tar.gz" >&2
+        echo "Run 'just bootstrap-vm' first." >&2
+        exit 1
+    fi
+    ABOX_VM_DIR="$ABOX_VM_DIR" SHIM_BIN="$SHIM_BIN" GUEST_INIT="$GUEST_INIT" \
+        ./scripts/build_rootfs.sh
+
 # Check whether the installed guest rootfs image is stale — i.e. whether
 # guest/init.sh, the shim, or the rootfs builder inputs have changed on
 # disk since the rootfs was last built. Does NOT rebuild; just reports and

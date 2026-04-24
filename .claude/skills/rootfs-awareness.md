@@ -34,7 +34,9 @@ If `check-rootfs` warns:
 just rebuild-rootfs
 ```
 
-This runs `scripts/build_rootfs.sh` which uses `fakeroot` to assemble the ext4 image without sudo. The rebuild takes 1–3 minutes depending on network for Alpine packages.
+This rebuilds the static-musl shim, then runs `scripts/build_rootfs.sh` in the
+repo's Dockerized Alpine builder to assemble the ext4 image. The rebuild takes
+1–3 minutes depending on Docker image/package cache state and network access.
 
 Verify success with a quick smoke run:
 
@@ -53,7 +55,7 @@ The rebuilt rootfs is a host artifact, not committed. But the changes that cause
 
 - `bash: command not found`, `sync: command not found`: Alpine package staging bug. Re-run `just rebuild-rootfs`; inspect `scripts/build_rootfs.sh` apk extraction.
 - `claude: command not found` inside the guest: npm install in build_rootfs.sh failed silently. Check network; re-run with `-x`.
-- `fakeroot: command not found` on host: install `fakeroot` (`apt install fakeroot` / `dnf install fakeroot`).
+- `docker: command not found` or builder startup fails: install Docker and ensure the daemon is running; `build_rootfs.sh` shells out to a Dockerized Alpine builder.
 - `rootfs.raw not found`: bootstrap has not run. `just bootstrap-vm` first, then `just rebuild-rootfs`.
 
 ## Related
