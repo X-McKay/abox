@@ -168,17 +168,16 @@ namespace sandbox.
    abox ca path      # print CA directory
    ```
 
-9. **Configure credential forwarding (for Claude Code, Codex, etc.):**
+9. **Enable managed auth providers (Claude Code, Codex):**
    ```bash
    # Edit ~/.abox/config.toml and add:
-   # [guest]
-   # [[guest.credential_files]]
-   # host = "~/.claude/.credentials.json"
-   # guest = "~/.claude/.credentials.json"
-   # [guest.credential_files.stub.claudeAiOauth]
-   # accessToken = "abox-proxy-managed"
-   # ...
-   # See docs/explainer.md Section 8 for full details.
+   # [auth.providers.claude]
+   # enabled = true
+   #
+   # [auth.providers.codex]
+   # enabled = true
+   #
+   # See docs/explainer.md Section 8 and docs/credential-scoping.md.
    ```
 
 ## Development

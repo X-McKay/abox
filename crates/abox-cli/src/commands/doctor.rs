@@ -3,7 +3,9 @@
 //! Prints a checklist of every prerequisite abox needs to run sandboxes.
 //! Safe to run at any time; makes no changes to the system.
 
-use abox_core::config::AboxConfig;
+use abox_core::config::{
+    default_claude_host_credential_file, default_codex_host_credential_file, AboxConfig,
+};
 use abox_core::util::{max_task_id_len_for_runtime_dir, TASK_ID_MAX_LEN};
 use anyhow::Result;
 use std::path::Path;
@@ -17,7 +19,7 @@ use crossterm::tty::IsTty;
 /// Returns true when stdout is a TTY and NO_COLOR / TERM=dumb are not set.
 fn use_color() -> bool {
     std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
+        && std::env::var("TERM").map_or(true, |t| t != "dumb")
         && std::io::stdout().is_tty()
 }
 
@@ -167,7 +169,27 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
         c.print();
     }
 
-    // ── Section 4: Environment ───────────────────────────────────────────────
+    // ── Section 4: Managed Auth ──────────────────────────────────────────────
+    print_section("Managed Auth");
+    let auth_checks = [
+        check_managed_provider(
+            "Claude Code",
+            "auth.providers.claude",
+            config.auth.claude_enabled(),
+            &default_claude_host_credential_file(),
+        ),
+        check_managed_provider(
+            "Codex",
+            "auth.providers.codex",
+            config.auth.codex_enabled(),
+            &default_codex_host_credential_file(),
+        ),
+    ];
+    for c in &auth_checks {
+        c.print();
+    }
+
+    // ── Section 5: Environment ───────────────────────────────────────────────
     print_section("Environment");
     let env_check = check_local_bin_on_path(&vm_dir);
     env_check.print();
@@ -176,6 +198,7 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
     let all_checks: Vec<&Check> = std::iter::once(&kvm)
         .chain(vm_checks.iter())
         .chain(cfg_checks.iter())
+        .chain(auth_checks.iter())
         .chain(std::iter::once(&env_check))
         .collect();
 
@@ -448,6 +471,39 @@ fn check_policy_file(config: &AboxConfig) -> Check {
                 policy_path.display()
             ),
         )
+    }
+}
+
+fn check_managed_provider(
+    provider_name: &str,
+    config_key: &str,
+    enabled: bool,
+    host_credential_file: &str,
+) -> Check {
+    let label = format!("Managed auth: {provider_name}");
+    let expanded = abox_core::policy::expand_tilde(host_credential_file);
+    let exists = Path::new(&expanded).exists();
+
+    match (enabled, exists) {
+        (true, true) => Check::ok_with(label, format!("enabled ({expanded})")),
+        (true, false) => Check::warn(
+            label,
+            format!(
+                "Enabled in config, but host credentials were not found at {expanded}.\n\
+                 Log in to {provider_name} on the host, or disable {config_key} in ~/.abox/config.toml."
+            ),
+        ),
+        (false, true) => Check::ok_with(
+            label,
+            format!("available on host at {expanded}, currently disabled in config"),
+        ),
+        (false, false) => Check::warn(
+            label,
+            "Not detected on the host and not enabled in config.\n\
+             abox can still launch arbitrary sandbox commands, but the default managed agent \
+             workflow needs at least one of Claude Code or Codex."
+                .to_string(),
+        ),
     }
 }
 

@@ -4,6 +4,7 @@
 //! and starts the specified agent inside the VM.
 
 use super::validate_task_arg_for_runtime_dir;
+use abox_core::config::AboxConfig;
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
 use abox_core::util::validate_env_key;
 use abox_core::vm::VmPort;
@@ -91,6 +92,56 @@ fn parse_env_var(s: &str) -> Result<(String, String)> {
     Ok((key, value))
 }
 
+fn selected_managed_agent(command: &[String]) -> Option<&str> {
+    command.first().map(String::as_str).and_then(|cmd| match cmd {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        _ => None,
+    })
+}
+
+fn ensure_managed_agent_ready(command: &[String], config: &AboxConfig) -> Result<()> {
+    let Some(agent) = selected_managed_agent(command) else {
+        return Ok(());
+    };
+
+    let (enabled, host_credential_file, provider_label) = match agent {
+        "claude" => (
+            config.auth.providers.claude.enabled,
+            config.auth.providers.claude.host_credential_file(),
+            "Claude Code",
+        ),
+        "codex" => (
+            config.auth.providers.codex.enabled,
+            config.auth.providers.codex.host_credential_file(),
+            "Codex",
+        ),
+        _ => return Ok(()),
+    };
+
+    let expanded = abox_core::policy::expand_tilde(&host_credential_file);
+    let config_path = AboxConfig::default_path()
+        .map_or_else(|_| "~/.abox/config.toml".to_string(), |p| p.display().to_string());
+
+    if !enabled {
+        anyhow::bail!(
+            "{provider_label} is not enabled for managed auth.\n\n\
+             Enable it under [auth.providers.{agent}] in {config_path}, then re-run `abox init` \
+             or edit the config manually."
+        );
+    }
+
+    if !std::path::Path::new(&expanded).exists() {
+        anyhow::bail!(
+            "{provider_label} is enabled, but host credentials were not found at {expanded}.\n\n\
+             Log in to {provider_label} on the host, or disable [auth.providers.{agent}] in \
+             {config_path} if you do not want abox to manage it."
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
@@ -107,6 +158,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     // first invalid key so the user gets a clear error before any VM work.
     let env_vars: Vec<(String, String)> =
         args.env_vars.iter().map(|s| parse_env_var(s)).collect::<Result<Vec<_>>>()?;
+
+    ensure_managed_agent_ready(&args.command, orchestrator.config())?;
 
     if args.detach {
         return spawn_detached(&args, orchestrator);
@@ -202,7 +255,10 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_env_var, strip_detach_flag};
+    use super::{
+        ensure_managed_agent_ready, parse_env_var, selected_managed_agent, strip_detach_flag,
+    };
+    use abox_core::config::AboxConfig;
 
     #[test]
     fn test_strip_detach_in_middle() {
@@ -279,5 +335,49 @@ mod tests {
     #[test]
     fn parse_env_var_rejects_empty_key() {
         assert!(parse_env_var("=value").is_err());
+    }
+
+    #[test]
+    fn selected_managed_agent_identifies_supported_agents() {
+        assert_eq!(selected_managed_agent(&["claude".into()]), Some("claude"));
+        assert_eq!(selected_managed_agent(&["codex".into(), "--quiet".into()]), Some("codex"));
+        assert_eq!(selected_managed_agent(&["echo".into(), "hi".into()]), None);
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_allows_arbitrary_commands() {
+        let config = AboxConfig::default();
+        assert!(ensure_managed_agent_ready(&["echo".into(), "hi".into()], &config).is_ok());
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_rejects_disabled_provider() {
+        let config = AboxConfig::default();
+        let err = ensure_managed_agent_ready(&["claude".into()], &config).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Claude Code is not enabled"));
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_rejects_missing_host_credentials() {
+        let mut config = AboxConfig::default();
+        config.auth.providers.claude.enabled = true;
+        config.auth.providers.claude.host_credential_file =
+            Some("/definitely/missing/abox-claude-auth.json".into());
+
+        let err = ensure_managed_agent_ready(&["claude".into()], &config).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("host credentials were not found"));
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_accepts_present_host_credentials() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut config = AboxConfig::default();
+        config.auth.providers.codex.enabled = true;
+        config.auth.providers.codex.host_credential_file =
+            Some(tmp.path().to_string_lossy().to_string());
+
+        assert!(ensure_managed_agent_ready(&["codex".into()], &config).is_ok());
     }
 }

@@ -62,7 +62,7 @@ The whole thing fits in one diagram:
 
 The agent runs **inside** a microVM. The two narrow channels between the agent and the outside world are:
 
-1. **The shim/bridge path** for command-line tools (`git`, `gh`, `aws`). The shim is a static-musl binary masquerading as `git` etc. inside the guest. It serializes the command, sends it over a Unix socket → `socat` → `vsock` → host bridge, the bridge consults the policy engine, runs the command on the host with real credentials, and sends back the output.
+1. **The shim/bridge path** for command-line tools (`git`, `gh`, and other intercepted CLIs). The shim is a static-musl binary masquerading as `git` etc. inside the guest. It serializes the command, sends it over a Unix socket → `socat` → `vsock` → host bridge, the bridge consults the policy engine, runs the command on the host with real credentials, and sends back the output.
 
 2. **The egress proxy path** for HTTPS API calls (Anthropic, OpenAI, GitHub, etc.). Today this is a passthrough; future work will turn it into a TLS-terminating MITM that injects API-key headers from host environment variables. See [`docs/plans/2026-04-08-credential-injection.md`](plans/2026-04-08-credential-injection.md).
 
@@ -139,7 +139,7 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 **What it is:** A small (~1 MB), static, musl-compiled Rust binary, no async runtime, no third-party deps beyond `serde` and `abox-protocol`. Lives at `/usr/local/bin/abox-shim` inside the guest.
 
-**Why it's a symlink:** During rootfs build, `build_rootfs.sh` creates symlinks `/usr/local/bin/git → abox-shim`, `/usr/local/bin/gh → abox-shim`, `/usr/local/bin/aws → abox-shim`. When the agent runs `git push`, the kernel resolves `git` to `abox-shim`, exec's it, and `abox-shim` reads `argv[0]` to figure out which command was invoked.
+**Why it's a symlink:** During rootfs build, `build_rootfs.sh` creates shim symlinks such as `/usr/local/bin/git → abox-shim` and `/usr/local/bin/gh → abox-shim`. When the agent runs `git push`, the kernel resolves `git` to `abox-shim`, exec's it, and `abox-shim` reads `argv[0]` to figure out which command was invoked.
 
 **What happens when the agent types `git push origin main`:**
 
@@ -187,7 +187,7 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 **Why the bridge runs in the orchestrator and not in `abox-proxyd`:** Two reasons. First, the orchestrator owns the VM lifecycle, so it can bind the per-VM socket *before* CH boots — eliminating any race window. Second, attribution: the per-VM socket guarantees provenance, so the orchestrator's bridge uses `SandboxAttribution::Fixed` and the audit log is unambiguous. The standalone `abox-proxyd` still works for users who want a system daemon, but it uses `SandboxAttribution::FromRequest` and falls back to `"unknown"` for legacy clients.
 
-**What would break without the policy engine:** The agent would have direct host shell access. Any prompt-injection attack could end with `rm -rf ~`. The policy engine is the chokepoint that says "the agent can run `git push origin <branch>` but not `git push --force` and not `aws iam delete-user`".
+**What would break without the policy engine:** The agent would have direct host shell access. Any prompt-injection attack could end with `rm -rf ~`. The policy engine is the chokepoint that says "the agent can run `git push origin <branch>` but not `git push --force` and not `gh repo delete`".
 
 ---
 
@@ -204,46 +204,55 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 5. The proxy reads the plaintext HTTP request, injects the credential header (e.g., `x-api-key: <value>` for Anthropic, `Authorization: Bearer <value>` for OpenAI), then opens a new TLS connection to the real upstream using system root certificates.
 6. The modified request is forwarded upstream and the response is relayed back to the client.
 
-**The credential mapping** is defined in `policies/default.toml`. Credentials can come from a host environment variable or from a JSON credential file on the host:
+**The credential mapping** is defined in `policies/default.toml`. For the
+default managed providers, credentials come from host-side JSON files or host
+environment variables:
 
 ```toml
-# API key from host environment variable
+# Claude Code OAuth token from a JSON credential file on the host
 [[egress]]
 domain = "api.anthropic.com"
-inject_header = "x-api-key"
-env_var = "ANTHROPIC_API_KEY"
-header_template = "{value}"
-
-# OAuth token from a JSON credential file on the host
-[[egress]]
-domain = "api.claude.ai"
 inject_header = "Authorization"
 credential_file = "~/.claude/.credentials.json"
 json_path = "claudeAiOauth.accessToken"
 header_template = "Bearer {value}"
+
+# OpenAI-compatible HTTP auth from a host environment variable
+[[egress]]
+domain = "api.openai.com"
+inject_header = "Authorization"
+env_var = "OPENAI_API_KEY"
+header_template = "Bearer {value}"
 ```
 
-The `env_var` and `credential_file` fields are both read from the **host**, not the guest. The `json_path` field is a dot-separated path into the JSON credential file (e.g., `claudeAiOauth.accessToken`). The `header_template` supports `{value}` substitution.
+The `env_var` and `credential_file` fields are both read from the **host**, not
+the guest. The `json_path` field is a dot-separated path into the JSON
+credential file (e.g., `claudeAiOauth.accessToken`). The `header_template`
+supports `{value}` substitution.
 
-**Stub credential files:** Some tools (e.g., Claude Code) check for a local credential file before making any network calls and refuse to start if the file is absent. To satisfy this check without placing real credentials in the VM, configure a `stub` in `~/.abox/config.toml`:
+**Managed provider stubs:** Some tools (e.g., Claude Code and Codex) check for a
+local credential file before making any network calls and refuse to start if
+the file is absent. To satisfy that check without placing real credentials in
+the VM, enable the managed provider in `~/.abox/config.toml`:
 
 ```toml
-[guest]
-[[guest.credential_files]]
-host = "~/.claude/.credentials.json"
-guest = "~/.claude/.credentials.json"
+[auth.providers.claude]
+enabled = true
 
-[guest.credential_files.stub.claudeAiOauth]
-accessToken = "abox-proxy-managed"
-expiresAt = 9999999999999
-refreshToken = "abox-proxy-managed"
+[auth.providers.codex]
+enabled = true
 ```
 
-The stub is written into the guest filesystem at boot with placeholder values. The real token is injected by the proxy at the network layer; the stub value never reaches the upstream API.
+abox writes the provider's stub into the guest filesystem at boot with
+placeholder values. The real token is injected by the proxy at the network
+layer; the stub value never reaches the upstream API.
 
 **Node.js CA trust:** Node.js does not use the system trust store by default. The orchestrator injects `NODE_EXTRA_CA_CERTS` pointing to the abox root CA so that Node.js-based tools (Claude Code, Codex CLI) trust the MITM certificate automatically.
 
-**What this means for you:** Set API keys as host environment variables (`export ANTHROPIC_API_KEY=sk-...`) for key-based APIs. For OAuth-based tools, configure `credential_file` in the egress policy and a `stub` in the guest config. The proxy injects the real credentials; the agent never sees them.
+**What this means for you:** enable managed providers for Claude Code and/or
+Codex, keep their real auth files on the host, and let abox stage the stubs
+automatically. GitHub stays host-side through managed `git` / `gh` execution.
+The proxy injects the real credentials; the agent never sees them.
 
 **CA management:** The root CA is generated on first use and lives at `~/.abox/ca/`. Use `abox ca show` to inspect it, `abox ca rotate` to regenerate (triggers a rootfs rebuild), and `abox ca path` to find it.
 
@@ -371,7 +380,7 @@ abox run --task fix-auth -- claude
 8. `echo $N > /abox-status/exit-code; sync`
 9. `kill $SOCAT_PID; poweroff -f`
 
-**Stage 8: Each guest `git`/`gh`/`aws` invocation** (while the agent is running) goes through the shim → vsock → bridge → policy → exec → audit → response cycle described in section 7. Console output goes through the kernel's serial driver → `--console file=...` → console tailer → orchestrator's stdout.
+**Stage 8: Each guest intercepted CLI invocation** (while the agent is running) goes through the shim → vsock → bridge → policy → exec → audit → response cycle described in section 7. Console output goes through the kernel's serial driver → `--console file=...` → console tailer → orchestrator's stdout.
 
 **Stage 9: VM exit.** Cloud Hypervisor's `--cmdline` had `quiet`, but the kernel still prints the poweroff message. `ch_child.try_wait()` in the orchestrator's poll loop sees the process is gone, calls `cleanup_vm_files(id, vm, remove_status_dir=false)` — this cleans the sockets but **leaves the status dir** so `run_sandbox` can read the exit code. The polling loop's `info()` returns Err, the loop breaks.
 

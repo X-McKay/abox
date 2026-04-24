@@ -55,33 +55,18 @@ command = "gh"
 forward_ssh_agent = false
 
 allow = [
-    "^pr\\s+(create|list|view|checkout|diff|merge)",
-    "^issue\\s+(create|list|view)",
+    "^pr\\s+(create|list|view|diff)",
+    "^issue\\s+(list|view)",
     "^repo\\s+view",
     "^auth\\s+status",
 ]
 
 deny = [
+    "^pr\\s+checkout",
+    "^pr\\s+merge",
+    "^issue\\s+create",
     "^repo\\s+delete",
     "^auth\\s+login",
-]
-
-# ── AWS CLI ──────────────────────────────────────────────────────────────
-[[cli]]
-command = "aws"
-forward_ssh_agent = false
-
-allow = [
-    "^s3\\s+(ls|cp|sync|mv|rm)",
-    "^sts\\s+get-caller-identity",
-    "^logs\\s+(describe|get|filter)",
-]
-
-deny = [
-    "^iam\\s+",
-    "^ec2\\s+(run-instances|terminate)",
-    "^organizations\\s+",
-    "^sts\\s+assume-role",
 ]
 
 # ── TLS Bypass List ─────────────────────────────────────────────────────
@@ -122,16 +107,4 @@ domain = "auth.openai.com"
 inject_header = "Authorization"
 credential_file = "~/.codex/auth.json"
 json_path = "tokens.access_token"
-header_template = "Bearer {value}"
-
-[[egress]]
-domain = "*.googleapis.com"
-inject_header = "Authorization"
-env_var = "GOOGLE_API_KEY"
-header_template = "Bearer {value}"
-
-[[egress]]
-domain = "api.github.com"
-inject_header = "Authorization"
-env_var = "GITHUB_TOKEN"
 header_template = "Bearer {value}"

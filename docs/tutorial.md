@@ -80,7 +80,7 @@ After downloading the VM artifacts, `abox init` will automatically:
 2. Install `policies/default.toml` to `~/.abox/policies/default.toml`.
 3. Verify that the installed `virtiofsd` supports namespace sandboxing and print the exact `setcap` remediation if `cap_sys_admin+ep` is still missing.
 
-The default policy allows common `git`, `gh`, and `aws` operations, denies dangerous mutations such as `git push --force`, and default-denies unknown HTTPS egress. Matching HTTPS requests go through the MITM proxy, which injects host-side credentials for Anthropic, OpenAI/Codex, GitHub, and Google APIs. Domains listed in `bypass_tls` remain plain TCP passthrough for cert-pinned clients.
+The default policy allows common `git` and constrained `gh` operations, denies dangerous mutations such as `git push --force`, and default-denies unknown HTTPS egress. Matching HTTPS requests go through the MITM proxy, which injects host-side credentials for Anthropic and OpenAI/Codex. GitHub stays on the host through managed `git` / `gh` execution. Domains listed in `bypass_tls` remain plain TCP passthrough for cert-pinned clients.
 
 To verify your environment is ready, run:
 
