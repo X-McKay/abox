@@ -453,4 +453,38 @@ mod tests {
         assert!(init_sh.contains("chown \"$ABOX_UID:$ABOX_GID\" \"$ABOX_TMPDIR\""));
         assert!(init_sh.contains("chmod 0700 \"$ABOX_TMPDIR\""));
     }
+
+    #[test]
+    fn guest_init_mounts_workspace_with_nodev_nosuid() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        // The workspace virtiofs share must be mounted with nodev and nosuid to
+        // prevent the agent from creating device nodes or using setuid binaries
+        // on the host-backed share.
+        assert!(
+            init_sh.contains("mount -t virtiofs -o nodev,nosuid workspace /workspace"),
+            "workspace mount must include nodev,nosuid; init.sh:\n{init_sh}"
+        );
+    }
+
+    #[test]
+    fn guest_init_mounts_aboxmeta_read_only() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        // The aboxmeta share must be mounted read-only to prevent a compromised
+        // guest process from modifying runner.sh or staged credentials after boot.
+        // nodev and nosuid are also required.
+        assert!(
+            init_sh.contains("mount -t virtiofs -o ro,nodev,nosuid aboxmeta /abox-meta"),
+            "aboxmeta mount must include ro,nodev,nosuid; init.sh:\n{init_sh}"
+        );
+    }
+
+    #[test]
+    fn guest_init_mounts_aboxstatus_with_nodev_nosuid() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        // The status share must be mounted with nodev and nosuid.
+        assert!(
+            init_sh.contains("mount -t virtiofs -o nodev,nosuid aboxstatus /abox-status"),
+            "aboxstatus mount must include nodev,nosuid; init.sh:\n{init_sh}"
+        );
+    }
 }

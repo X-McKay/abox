@@ -4,7 +4,7 @@
 # Responsibilities:
 #   1. Mount /proc, /sys, /dev
 #   2. Mount /workspace from virtiofs (the git worktree)
-#   3. Mount /abox-meta from virtiofs (boot metadata, read-mostly)
+#   3. Mount /abox-meta from virtiofs (boot metadata, read-only, nodev, nosuid)
 #   4. Mount /abox-status from virtiofs (read-write; for exit-code reporting)
 #   5. Bridge /run/abox-proxy.sock <-> vsock host:5000 via socat
 #   6. Exec the agent command via /abox-meta/runner.sh
@@ -55,12 +55,26 @@ fi
 chown "$ABOX_UID:$ABOX_GID" "$ABOX_TMPDIR" 2>/dev/null || true
 chmod 0700 "$ABOX_TMPDIR" 2>/dev/null || true
 
-# Workspace share
-mount -t virtiofs workspace /workspace 2>/dev/null || \
-    echo "WARNING: failed to mount workspace virtiofs"
-# Boot metadata share
-mount -t virtiofs aboxmeta /abox-meta 2>/dev/null || \
-    echo "WARNING: failed to mount aboxmeta virtiofs"
+# Workspace share — nodev and nosuid prevent the agent from creating
+# device nodes or using setuid binaries on the host-backed virtiofs share.
+# The workspace is a git worktree; no device files or setuid binaries should
+# ever legitimately appear there. Adding these flags limits the blast radius
+# of a compromised or malicious agent that writes into the worktree.
+mount -t virtiofs -o nodev,nosuid workspace /workspace 2>/dev/null || \
+    boot_fail 71 "failed to mount workspace virtiofs"
+
+# Boot metadata share — mounted read-only at the guest kernel level.
+# The host stages runner.sh and credentials here before boot; the guest
+# should never need to write back to this share. Enforcing ro at the
+# mount layer means even a root process inside the guest cannot modify
+# runner.sh or staged credentials after boot, preventing a TOCTOU attack
+# where a compromised guest process races to overwrite runner.sh between
+# the host staging it and init.sh executing it.
+# nodev and nosuid are also set: the meta share contains only plain files
+# (JSON, shell scripts, PEM certificates) and should never contain devices
+# or setuid binaries.
+mount -t virtiofs -o ro,nodev,nosuid aboxmeta /abox-meta 2>/dev/null || \
+    boot_fail 72 "failed to mount aboxmeta virtiofs"
 
 # ── Inject the host-generated abox MITM CA into the guest trust store ──
 # The rootfs ships with only the Mozilla CA set; the per-user abox CA is
@@ -137,8 +151,9 @@ else
 fi
 
 # Status share (writable) for reporting the agent's exit code back to host.
+# nodev and nosuid are set: this share contains only the exit-code file.
 mkdir -p /abox-status
-mount -t virtiofs aboxstatus /abox-status 2>/dev/null || \
+mount -t virtiofs -o nodev,nosuid aboxstatus /abox-status 2>/dev/null || \
     echo "WARNING: failed to mount aboxstatus virtiofs"
 
 if [ -f /abox-meta/runner.sh ]; then
