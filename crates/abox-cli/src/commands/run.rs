@@ -4,6 +4,7 @@
 //! and starts the specified agent inside the VM.
 
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
+use abox_core::util::{validate_env_key, validate_task_id};
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
@@ -13,6 +14,10 @@ use clap::Args;
 pub struct RunArgs {
     /// Unique task identifier (e.g., "fix-auth"). Used as the sandbox name,
     /// branch name suffix, and worktree directory name.
+    ///
+    /// Must contain only ASCII letters, digits, hyphens, underscores, and
+    /// dots. Must not start or end with a dot, contain consecutive dots, or
+    /// exceed 64 characters.
     #[arg(long)]
     pub task: String,
 
@@ -36,7 +41,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub user: Option<String>,
 
-    /// Environment variables to set (KEY=VALUE). Can be repeated.
+    /// Environment variables to set inside the sandbox (KEY=VALUE).
+    ///
+    /// KEY must be a valid POSIX shell identifier: start with an ASCII letter
+    /// or underscore, followed by ASCII letters, digits, or underscores only.
+    /// Invalid keys are rejected immediately with a clear error.
+    ///
+    /// Can be repeated: `--env FOO=bar --env BAZ=qux`.
     #[arg(long = "env", short = 'e')]
     pub env_vars: Vec<String>,
 
@@ -63,26 +74,44 @@ pub struct RunArgs {
     pub command: Vec<String>,
 }
 
+/// Parse and validate a single `KEY=VALUE` environment variable string.
+///
+/// Returns `(key, value)` on success or a descriptive error. The key is
+/// validated against POSIX shell identifier rules via [`validate_env_key`].
+/// This is the single parsing entry point for `--env` arguments.
+fn parse_env_var(s: &str) -> Result<(String, String)> {
+    let mut parts = s.splitn(2, '=');
+    let key = parts.next().unwrap_or("").to_string();
+    let value = parts.next().unwrap_or("").to_string();
+
+    validate_env_key(&key).map_err(|e| anyhow::anyhow!("--env {s:?}: {e}"))?;
+
+    Ok((key, value))
+}
+
 pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
 ) -> Result<()> {
+    // ── Input validation (trust boundary) ────────────────────────────────
+    // Validate the task ID before it is used as a branch name, worktree
+    // directory, socket path, log file name, or PID file name.
+    validate_task_id(&args.task)
+        .map_err(|e| anyhow::anyhow!("--task {:?}: {e}", args.task))?;
+
     if args.detach {
         return spawn_detached(&args, orchestrator);
     }
 
+    // Parse and validate every --env KEY=VALUE argument. Fail fast on the
+    // first invalid key so the user gets a clear error before any VM work.
     let env_vars: Vec<(String, String)> = args
         .env_vars
         .iter()
-        .filter_map(|s| {
-            let mut parts = s.splitn(2, '=');
-            let key = parts.next()?.to_string();
-            let value = parts.next().unwrap_or("").to_string();
-            Some((key, value))
-        })
-        .collect();
+        .map(|s| parse_env_var(s))
+        .collect::<Result<Vec<_>>>()?;
 
     let params = CreateSandboxParams {
         task_id: args.task.clone(),
@@ -123,6 +152,9 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
 /// because it's debuggable: `ps` shows a real `abox run` process, and the
 /// supervisor's argv reflects exactly what the user typed minus the
 /// `--detach` flag.
+///
+/// Note: task ID validation is performed before reaching this function, so
+/// the task string is already known-safe when used to construct file paths.
 fn spawn_detached<W: WorkspacePort, V: VmPort>(
     args: &RunArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
@@ -171,7 +203,7 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_detach_flag;
+    use super::{parse_env_var, strip_detach_flag};
 
     #[test]
     fn test_strip_detach_in_middle() {
@@ -198,5 +230,55 @@ mod tests {
     fn test_strip_detach_at_start() {
         let raw = vec!["--detach".to_string(), "run".to_string(), "--task".to_string()];
         assert_eq!(strip_detach_flag(&raw), vec!["run", "--task"]);
+    }
+
+    // ── parse_env_var tests ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_env_var_accepts_valid_key() {
+        let (k, v) = parse_env_var("FOO=bar").unwrap();
+        assert_eq!(k, "FOO");
+        assert_eq!(v, "bar");
+    }
+
+    #[test]
+    fn parse_env_var_accepts_empty_value() {
+        let (k, v) = parse_env_var("FOO=").unwrap();
+        assert_eq!(k, "FOO");
+        assert_eq!(v, "");
+    }
+
+    #[test]
+    fn parse_env_var_accepts_value_with_equals() {
+        // Value may itself contain '=' — only the first '=' is the separator.
+        let (k, v) = parse_env_var("FOO=a=b=c").unwrap();
+        assert_eq!(k, "FOO");
+        assert_eq!(v, "a=b=c");
+    }
+
+    #[test]
+    fn parse_env_var_rejects_digit_start_key() {
+        assert!(parse_env_var("1FOO=bar").is_err());
+    }
+
+    #[test]
+    fn parse_env_var_rejects_hyphen_in_key() {
+        assert!(parse_env_var("FOO-BAR=baz").is_err());
+    }
+
+    #[test]
+    fn parse_env_var_rejects_shell_injection_key() {
+        // A crafted key that would break `export <key>='value'` shell syntax.
+        // Note: injection in the *value* is safe because sh_escape() wraps
+        // values in single quotes. Only the *key* is interpolated unescaped.
+        assert!(parse_env_var("FOO$(cmd)=bar").is_err()); // $ in key
+        assert!(parse_env_var("FOO BAR=baz").is_err()); // space in key
+        assert!(parse_env_var("FOO;evil=bar").is_err()); // semicolon in key
+        assert!(parse_env_var("=value").is_err()); // empty key
+    }
+
+    #[test]
+    fn parse_env_var_rejects_empty_key() {
+        assert!(parse_env_var("=value").is_err());
     }
 }
