@@ -357,13 +357,13 @@ fn default_claude_stub() -> toml::Value {
 fn default_codex_stub() -> toml::Value {
     toml::toml! {
         auth_mode = "chatgpt"
+        last_refresh = "2099-01-01T00:00:00Z"
 
         [tokens]
-        id_token = "abox-proxy-managed"
-        access_token = "abox-proxy-managed"
-        refresh_token = "abox-proxy-managed"
-        account_id = "abox-proxy-managed"
-        last_refresh = "2099-01-01T00:00:00Z"
+        id_token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhYm94LXByb3h5LW1hbmFnZWQiLCJleHAiOjQxMDI0NDQ4MDB9.c2ln"
+        access_token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzY29wZSI6ImFib3gtcHJveHktbWFuYWdlZCIsImV4cCI6NDEwMjQ0NDgwMH0.c2ln"
+        refresh_token = "abox-proxy-managed-refresh"
+        account_id = "00000000-0000-4000-8000-000000000000"
     }
     .into()
 }
@@ -423,6 +423,23 @@ mod tests {
         assert_eq!(entry.guest, "~/.tool/auth.json");
         assert_eq!(entry.mode, "0600");
         assert_eq!(entry.stub["token"].as_str(), Some("abox-proxy-managed"));
+    }
+
+    #[test]
+    fn default_codex_stub_matches_current_auth_shape() {
+        let stub = default_codex_stub();
+        assert_eq!(stub["auth_mode"].as_str(), Some("chatgpt"));
+        assert_eq!(stub["last_refresh"].as_str(), Some("2099-01-01T00:00:00Z"));
+
+        let id_token = stub["tokens"]["id_token"].as_str().expect("id_token missing");
+        let access_token = stub["tokens"]["access_token"].as_str().expect("access_token missing");
+
+        assert_eq!(id_token.matches('.').count(), 2, "id_token should be JWT-like");
+        assert_eq!(access_token.matches('.').count(), 2, "access_token should be JWT-like");
+        assert_eq!(
+            stub["tokens"]["account_id"].as_str(),
+            Some("00000000-0000-4000-8000-000000000000")
+        );
     }
 
     #[test]

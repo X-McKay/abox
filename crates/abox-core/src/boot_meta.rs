@@ -160,6 +160,21 @@ impl BootMeta {
                 writeln!(s, "chmod {} '{}'", sh_escape(&cred.mode), sh_escape(&cred.guest_path));
             let _ = writeln!(s, "chown abox:abox '{}'", sh_escape(&cred.guest_path));
         }
+        // Older experimental builds accidentally wrote the MITM CA PEM into
+        // ~/.claude.json. Claude treats that path as JSON config and aborts on
+        // subsequent multi-turn runs if the stale PEM is left behind.
+        s.push_str(
+            "if [ -f /home/abox/.claude.json ] && \
+             grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.claude.json; then\n\
+             \x20   rm -f /home/abox/.claude.json\n\
+             fi\n",
+        );
+        s.push_str(
+            "if [ -f /home/abox/.codex/config.toml ] && \
+             grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.codex/config.toml; then\n\
+             \x20   rm -f /home/abox/.codex/config.toml\n\
+             fi\n",
+        );
         // Drop privileges and exec agent. su-exec is Alpine's standard
         // atomic uid/gid-drop-and-exec tool (like setpriv but available in
         // BusyBox-based rootfs). It sets uid, gid, and supplementary groups
@@ -426,6 +441,34 @@ mod tests {
         let exec_pos = script.find("\nexec ").expect("exec line missing");
         assert!(cp_pos < chmod_pos, "cp must precede chmod");
         assert!(cp_pos + file_chown_pos < exec_pos, "file chown must precede exec");
+    }
+
+    #[test]
+    fn runner_script_removes_stale_claude_pem_config() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(script.contains("grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.claude.json"));
+        assert!(script.contains("rm -f /home/abox/.claude.json"));
+    }
+
+    #[test]
+    fn runner_script_removes_stale_codex_pem_config() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(
+            script.contains("grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.codex/config.toml")
+        );
+        assert!(script.contains("rm -f /home/abox/.codex/config.toml"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ if [ -z "${ABOX:-}" ]; then
     cargo build --quiet --bin abox
     ABOX="$REPO_ROOT/target/debug/abox"
 fi
+ABOX_BIN="$ABOX"
 FILTER="${1:-all}"
 
 # ─── State ──────────────────────────────────────────────────────────────
@@ -43,7 +44,7 @@ cleanup() {
     local idx task_id
     for ((idx=${#TASK_IDS[@]} - 1; idx >= 0; idx--)); do
         task_id="${TASK_IDS[$idx]}"
-        "$ABOX" --repo "$SCRATCH" stop "$task_id" --clean >/dev/null 2>&1 || true
+        "$ABOX_BIN" --config "$SCRATCH/config.toml" --repo "$SCRATCH" stop "$task_id" --clean >/dev/null 2>&1 || true
     done
     rm -rf "$LOGDIR" "$SCRATCH"
 }
@@ -79,7 +80,7 @@ run_sandbox() {
     local log="$LOGDIR/$name.log"
     local task_id="${SMOKE_TASK_PREFIX}-$name"
     TASK_IDS+=("$task_id")
-    timeout "${TIMEOUT:-90}" "$ABOX" --repo "$SCRATCH" run --task "$task_id" --ephemeral -- "$@" \
+    timeout "${TIMEOUT:-90}" "$ABOX_BIN" --config "$SCRATCH/config.toml" --repo "$SCRATCH" run --task "$task_id" --ephemeral -- "$@" \
         >"$log" 2>&1 || true
     echo "$log"
 }
@@ -105,7 +106,7 @@ HEREDOC
 echo
 echo "━━━ abox agent smoke tests ━━━"
 echo "  repo:   $SCRATCH"
-echo "  abox:   $($ABOX --version 2>/dev/null || echo 'dev build')"
+echo "  abox:   $($ABOX_BIN --version 2>/dev/null || echo 'dev build')"
 echo "  run id: $RUN_ID"
 echo "  logs:   $LOGDIR"
 echo
@@ -115,6 +116,28 @@ HAS_CLAUDE=false
 HAS_CODEX=false
 [ -f "$HOME/.claude/.credentials.json" ] && HAS_CLAUDE=true
 [ -f "$HOME/.codex/auth.json" ] && HAS_CODEX=true
+
+mkdir -p "$SCRATCH/state/policies" "$SCRATCH/r"
+cp "$REPO_ROOT/policies/default.toml" "$SCRATCH/state/policies/default.toml"
+cat > "$SCRATCH/config.toml" <<EOF
+state_dir = "$SCRATCH/state"
+runtime_dir = "$SCRATCH/r"
+
+[vm_defaults]
+memory_mib = 2048
+vcpus = 2
+image_path = "$HOME/.abox/vm/rootfs.raw"
+kernel_path = "$HOME/.abox/vm/vmlinux"
+
+[proxy]
+policy_dir = "$SCRATCH/state/policies"
+
+[auth.providers.claude]
+enabled = $HAS_CLAUDE
+
+[auth.providers.codex]
+enabled = $HAS_CODEX
+EOF
 
 # ═══ CLAUDE CODE TESTS ══════════════════════════════════════════════════
 if [[ "$FILTER" == "all" || "$FILTER" == "claude" ]]; then
