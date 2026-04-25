@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.3.2 — 2026-04-25
+
+### Features
+
+- feat: adopt managed auth provider defaults (f3f0b55)
+
+### Fixes
+
+- fix: stabilize managed auth smoke coverage (1bf601e)
+- fix: validate task IDs against runtime socket budget (fa50de1)
+- fix: make virtiofsd hardening profile loadable (c08f6e1)
+- fix: add rebuild-rootfs helper for guest image updates (a361427)
+
+### Documentation
+
+- security: harden guest virtiofs mounts with nodev, nosuid, and ro flags (b67f8a7)
+- security: harden virtiofsd process isolation and add AppArmor profile (83329d3)
+
+### Other
+
+- Merge branch 'pr-13-validate-env-keys-and-task-ids' into chore/security-release-train (6a662ab)
+- Merge branch 'pr-15-harden-virtiofsd' into chore/security-release-train (e4143e3)
+- Merge branch 'pr-16-deprivilege-guest-bootstrap' into chore/security-release-train (1bfa79a)
+- security: harden guest virtiofs mounts with nodev, nosuid, and ro flags (b67f8a7)
+- security: harden virtiofsd process isolation and add AppArmor profile (83329d3)
+- security: enforce strict validation for env var keys and task IDs (09390c3)
+
+
 ## v0.3.1 — 2026-04-21
 
 ### Fixes
