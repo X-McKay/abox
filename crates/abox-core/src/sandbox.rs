@@ -66,17 +66,16 @@ pub fn toml_to_json(value: &toml::Value) -> serde_json::Value {
     }
 }
 
-/// Resolve credential file config entries into staged credential payloads.
+/// Resolve guest stub-file config entries into staged credential payloads.
 ///
 /// For each [`CredentialFileEntry`]:
 /// - Expands `~` in the host path.
-/// - If the host file does not exist, logs a debug message and skips.
-///   This applies to **both** stub and copy modes — the host file's existence
-///   is the proxy of "user is logged in"; staging a stub for a tool the user
-///   is not logged into would mislead the guest into believing credentials are
-///   available when the host-side proxy has nothing to inject.
-/// - If `stub` is set, serializes the TOML stub value to JSON.
-/// - Otherwise, copies the host file content as-is.
+/// - If the host file does not exist, logs a warning and skips.
+///   Host-file existence is the proxy of "user is logged in"; staging a stub
+///   for a tool the user is not logged into would mislead the guest into
+///   believing credentials are available when the host-side proxy has nothing
+///   to inject.
+/// - Serializes the TOML stub value to JSON.
 pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<CredentialToStage> {
     let mut result = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -91,70 +90,39 @@ pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<Credential
                 continue;
             }
         };
-        let host_path = crate::policy::expand_tilde(&entry.host);
+        let host_path = crate::policy::expand_tilde(&entry.host_credential_file);
         let path = std::path::Path::new(&host_path);
         if !path.exists() {
-            if entry.stub.is_some() {
-                tracing::warn!(
-                    host_path = %host_path,
-                    guest_path = %entry.guest,
-                    "No host credential file for a stub-bearing entry; agent will \
-                     start without this credential and may fail at first API call. \
-                     Log in to the tool on the host, or unset the entry in \
-                     ~/.abox/config.toml if intentional."
-                );
-            } else {
-                tracing::debug!(
-                    host_path = %host_path,
-                    guest_path = %entry.guest,
-                    "Host credential file does not exist; skipping (optional entry)"
-                );
-            }
+            tracing::warn!(
+                host_path = %host_path,
+                guest_path = %entry.guest,
+                "No host credential file for this stub-bearing entry; agent will \
+                 start without this credential and may fail at first API call. \
+                 Log in to the tool on the host, or disable the provider in \
+                 ~/.abox/config.toml if intentional."
+            );
             continue;
         }
 
-        if let Some(ref stub) = entry.stub {
-            // Stub mode: serialize TOML value to JSON.
-            let json_value = toml_to_json(stub);
-            let content = match serde_json::to_string_pretty(&json_value) {
-                Ok(s) => s.into_bytes(),
-                Err(e) => {
-                    tracing::warn!(
-                        index,
-                        guest_path = %entry.guest,
-                        error = %e,
-                        "Failed to serialize credential stub to JSON; skipping"
-                    );
-                    continue;
-                }
-            };
-            result.push(CredentialToStage {
-                index,
-                guest_path: guest_expanded.clone(),
-                mode: entry.mode.clone(),
-                content,
-            });
-        } else {
-            // Copy mode: read from host file.
-            match std::fs::read(path) {
-                Ok(content) => {
-                    result.push(CredentialToStage {
-                        index,
-                        guest_path: guest_expanded.clone(),
-                        mode: entry.mode.clone(),
-                        content,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        host_path = %host_path,
-                        guest_path = %entry.guest,
-                        error = %e,
-                        "Failed to read host credential file; skipping"
-                    );
-                }
+        let json_value = toml_to_json(&entry.stub);
+        let content = match serde_json::to_string_pretty(&json_value) {
+            Ok(s) => s.into_bytes(),
+            Err(e) => {
+                tracing::warn!(
+                    index,
+                    guest_path = %entry.guest,
+                    error = %e,
+                    "Failed to serialize credential stub to JSON; skipping"
+                );
+                continue;
             }
-        }
+        };
+        result.push(CredentialToStage {
+            index,
+            guest_path: guest_expanded.clone(),
+            mode: entry.mode.clone(),
+            content,
+        });
     }
     result
 }
@@ -171,6 +139,10 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         Self { config, workspace, vm_manager }
     }
 
+    pub fn config(&self) -> &AboxConfig {
+        &self.config
+    }
+
     /// Runtime directory (where sockets, console logs, and detached
     /// supervisor PID files live). Exposed so CLI commands like
     /// `abox run --detach` can write per-sandbox state next to the rest.
@@ -185,6 +157,13 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     /// 2. Start virtiofsd + Cloud Hypervisor VM
     /// 3. The VM boots, mounts the worktree at /workspace, and runs the agent
     pub async fn create_sandbox(&self, params: CreateSandboxParams) -> Result<SandboxStatus> {
+        crate::util::validate_task_id_for_runtime_dir(&params.task_id, &self.config.runtime_dir())
+            .map_err(anyhow::Error::msg)?;
+        for (key, _) in &params.env_vars {
+            crate::util::validate_env_key(key)
+                .map_err(|e| anyhow::anyhow!("invalid environment variable key {key:?}: {e}"))?;
+        }
+
         // Step 1: Create the git worktree
         let t_worktree = std::time::Instant::now();
         let worktree_path = self
@@ -260,7 +239,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         }
 
         // Resolve credential files from config so they can be staged into the guest.
-        let credential_files = stage_credential_files(&self.config.guest.credential_files);
+        let credential_files = stage_credential_files(&self.config.auth.credential_files());
 
         let vm_config = VmConfig {
             id: params.task_id.clone(),
@@ -722,23 +701,18 @@ mod tests {
 
     #[test]
     fn stage_credential_files_with_stub() {
-        // Stub mode still requires the host file to exist (= "user is logged in").
-        // The stub's content is what gets staged into the guest, but the
-        // host file's existence gates whether anything is staged at all.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), b"real-creds-on-host").unwrap();
 
         let entries = vec![CredentialFileEntry {
-            host: tmp.path().to_str().unwrap().to_string(),
+            host_credential_file: tmp.path().to_str().unwrap().to_string(),
             guest: "/.claude/.credentials.json".into(),
             mode: "0600".into(),
-            stub: Some(
-                toml::toml! {
-                    [claudeAiOauth]
-                    accessToken = "stub-token"
-                }
-                .into(),
-            ),
+            stub: toml::toml! {
+                [claudeAiOauth]
+                accessToken = "stub-token"
+            }
+            .into(),
         }];
 
         let staged = stage_credential_files(&entries);
@@ -755,13 +729,11 @@ mod tests {
 
     #[test]
     fn stage_credential_files_stub_skipped_when_host_missing() {
-        // Per the design spec, stubs must NOT be staged when the host file is
-        // absent — host-file existence is the proxy of "user is logged in".
         let entries = vec![CredentialFileEntry {
-            host: "/this/path/definitely/does/not/exist".into(),
+            host_credential_file: "/this/path/definitely/does/not/exist".into(),
             guest: "/.claude/.credentials.json".into(),
             mode: "0600".into(),
-            stub: Some(toml::toml! { key = "val" }.into()),
+            stub: toml::toml! { key = "val" }.into(),
         }];
 
         let staged = stage_credential_files(&entries);
@@ -772,84 +744,42 @@ mod tests {
     }
 
     #[test]
-    fn stage_credential_files_missing_host_skipped() {
-        let entries = vec![CredentialFileEntry {
-            host: "/this/path/does/not/exist".into(),
-            guest: "/root/.config/creds".into(),
-            mode: "0600".into(),
-            stub: None,
-        }];
-
-        let staged = stage_credential_files(&entries);
-        assert!(staged.is_empty(), "missing host file should be skipped");
-    }
-
-    #[test]
-    fn stage_credential_files_copy_mode() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), b"secret-content").unwrap();
-
-        let entries = vec![CredentialFileEntry {
-            host: tmp.path().to_str().unwrap().to_string(),
-            guest: "/root/.secret".into(),
-            mode: "0400".into(),
-            stub: None,
-        }];
-
-        let staged = stage_credential_files(&entries);
-        assert_eq!(staged.len(), 1);
-        assert_eq!(staged[0].content, b"secret-content");
-        assert_eq!(staged[0].mode, "0400");
-    }
-
-    #[test]
-    fn stage_credential_files_mixed() {
-        // Two host files exist; one missing-host case for each branch
-        // (copy and stub). Both missing-host entries should be skipped.
-        let real_for_copy = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(real_for_copy.path(), b"real-cred").unwrap();
-        let real_for_stub = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(real_for_stub.path(), b"present-but-stub-overrides").unwrap();
+    fn stage_credential_files_multiple_stubs_keep_indices() {
+        let first = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(first.path(), b"first-real").unwrap();
+        let second = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(second.path(), b"second-real").unwrap();
 
         let entries = vec![
             CredentialFileEntry {
-                host: "/missing".into(),
+                host_credential_file: first.path().to_str().unwrap().to_string(),
                 guest: "/a".into(),
                 mode: "0600".into(),
-                stub: None,
+                stub: toml::toml! { token = "alpha" }.into(),
             },
             CredentialFileEntry {
-                host: real_for_copy.path().to_str().unwrap().to_string(),
+                host_credential_file: second.path().to_str().unwrap().to_string(),
                 guest: "/b".into(),
-                mode: "0600".into(),
-                stub: None,
-            },
-            CredentialFileEntry {
-                host: "/also-missing".into(),
-                guest: "/c".into(),
-                mode: "0600".into(),
-                stub: Some(toml::toml! { key = "val" }.into()),
-            },
-            CredentialFileEntry {
-                host: real_for_stub.path().to_str().unwrap().to_string(),
-                guest: "/d".into(),
-                mode: "0600".into(),
-                stub: Some(toml::toml! { key = "stub-val" }.into()),
+                mode: "0400".into(),
+                stub: toml::toml! { token = "beta" }.into(),
             },
         ];
 
         let staged = stage_credential_files(&entries);
-        // Entry 0 (missing, no stub): skipped.
-        // Entry 1 (real, copy): included with host file content.
-        // Entry 2 (missing, stub): skipped (new behavior; was a bug before).
-        // Entry 3 (real, stub): included with stub content.
         assert_eq!(staged.len(), 2);
-        assert_eq!(staged[0].index, 1);
-        assert_eq!(staged[0].guest_path, "/b");
-        assert_eq!(staged[0].content, b"real-cred");
-        assert_eq!(staged[1].index, 3);
-        assert_eq!(staged[1].guest_path, "/d");
-        let json: serde_json::Value = serde_json::from_slice(&staged[1].content).unwrap();
-        assert_eq!(json["key"], "stub-val");
+        assert_eq!(staged[0].index, 0);
+        assert_eq!(staged[0].guest_path, "/a");
+        assert_eq!(staged[0].mode, "0600");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&staged[0].content).unwrap()["token"],
+            "alpha"
+        );
+        assert_eq!(staged[1].index, 1);
+        assert_eq!(staged[1].guest_path, "/b");
+        assert_eq!(staged[1].mode, "0400");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&staged[1].content).unwrap()["token"],
+            "beta"
+        );
     }
 }

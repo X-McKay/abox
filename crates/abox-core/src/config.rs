@@ -28,9 +28,9 @@ pub struct AboxConfig {
     #[serde(default)]
     pub proxy: ProxyConfig,
 
-    /// Guest VM configuration.
+    /// Managed authentication and advanced stub configuration.
     #[serde(default)]
-    pub guest: GuestConfig,
+    pub auth: AuthConfig,
 }
 
 /// Default VM resource allocation.
@@ -53,39 +53,117 @@ pub struct VmDefaults {
     pub kernel_path: Option<PathBuf>,
 }
 
-/// Guest VM configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GuestConfig {
-    /// Credential files to stage in the guest VM.
+/// Authentication configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AuthConfig {
+    /// First-class managed providers.
     #[serde(default)]
-    pub credential_files: Vec<CredentialFileEntry>,
+    pub providers: ManagedAuthProviders,
+
+    /// Explicitly advanced, stub-only escape hatch for unsupported tools.
+    #[serde(default)]
+    pub advanced: AdvancedAuthConfig,
 }
 
-impl Default for GuestConfig {
-    fn default() -> Self {
-        Self {
-            credential_files: vec![CredentialFileEntry {
-                host: "~/.claude/.credentials.json".to_string(),
-                guest: "~/.claude/.credentials.json".to_string(),
+impl AuthConfig {
+    /// Resolve every guest stub file that should be staged at boot.
+    pub fn credential_files(&self) -> Vec<CredentialFileEntry> {
+        let mut files = Vec::new();
+
+        if self.providers.claude.enabled {
+            files.push(CredentialFileEntry {
+                host_credential_file: self.providers.claude.host_credential_file(),
+                guest: default_claude_guest_credential_file(),
                 mode: default_credential_mode(),
-                stub: None,
-            }],
+                stub: default_claude_stub(),
+            });
         }
+
+        if self.providers.codex.enabled {
+            files.push(CredentialFileEntry {
+                host_credential_file: self.providers.codex.host_credential_file(),
+                guest: default_codex_guest_credential_file(),
+                mode: default_credential_mode(),
+                stub: default_codex_stub(),
+            });
+        }
+
+        files.extend(self.advanced.stub_files.iter().cloned());
+        files
+    }
+
+    pub fn claude_enabled(&self) -> bool {
+        self.providers.claude.enabled
+    }
+
+    pub fn codex_enabled(&self) -> bool {
+        self.providers.codex.enabled
     }
 }
 
-/// A credential file to place inside the guest VM at boot.
+/// First-class managed providers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManagedAuthProviders {
+    #[serde(default)]
+    pub claude: ClaudeProviderConfig,
+    #[serde(default)]
+    pub codex: CodexProviderConfig,
+}
+
+/// Claude Code managed-auth configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClaudeProviderConfig {
+    /// Whether abox should stage the Claude stub and proxy the host token.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional override for the host credential file path.
+    #[serde(default)]
+    pub host_credential_file: Option<String>,
+}
+
+impl ClaudeProviderConfig {
+    pub fn host_credential_file(&self) -> String {
+        self.host_credential_file.clone().unwrap_or_else(default_claude_host_credential_file)
+    }
+}
+
+/// Codex managed-auth configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodexProviderConfig {
+    /// Whether abox should stage the Codex stub and proxy the host token.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional override for the host credential file path.
+    #[serde(default)]
+    pub host_credential_file: Option<String>,
+}
+
+impl CodexProviderConfig {
+    pub fn host_credential_file(&self) -> String {
+        self.host_credential_file.clone().unwrap_or_else(default_codex_host_credential_file)
+    }
+}
+
+/// Advanced auth configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdvancedAuthConfig {
+    /// Stub-only guest files for unsupported tools.
+    #[serde(default)]
+    pub stub_files: Vec<CredentialFileEntry>,
+}
+
+/// A stub file to place inside the guest VM at boot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialFileEntry {
     /// Source path on the host. Supports `~` expansion.
-    pub host: String,
+    pub host_credential_file: String,
     /// Absolute destination path inside the VM.
     pub guest: String,
     /// Unix permissions for the file. Default: "0600".
     #[serde(default = "default_credential_mode")]
     pub mode: String,
-    /// If set, generate a stub JSON file instead of copying the host file.
-    pub stub: Option<toml::Value>,
+    /// JSON-ish placeholder content staged into the guest.
+    pub stub: toml::Value,
 }
 
 /// Proxy daemon configuration.
@@ -146,7 +224,7 @@ impl Default for AboxConfig {
             runtime_dir: None,
             vm_defaults: VmDefaults::default(),
             proxy: ProxyConfig::default(),
-            guest: GuestConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }
@@ -248,76 +326,133 @@ fn default_policy_dir() -> PathBuf {
     default_state_dir().join("policies")
 }
 
+pub fn default_claude_host_credential_file() -> String {
+    "~/.claude/.credentials.json".to_string()
+}
+
+pub fn default_codex_host_credential_file() -> String {
+    "~/.codex/auth.json".to_string()
+}
+
+fn default_claude_guest_credential_file() -> String {
+    "~/.claude/.credentials.json".to_string()
+}
+
+fn default_codex_guest_credential_file() -> String {
+    "~/.codex/auth.json".to_string()
+}
+
+fn default_claude_stub() -> toml::Value {
+    toml::toml! {
+        [claudeAiOauth]
+        accessToken = "abox-proxy-managed"
+        refreshToken = "abox-proxy-managed"
+        expiresAt = 9_999_999_999_999i64
+        scopes = ["user:inference"]
+        subscriptionType = "pro"
+    }
+    .into()
+}
+
+fn default_codex_stub() -> toml::Value {
+    toml::toml! {
+        auth_mode = "chatgpt"
+        last_refresh = "2099-01-01T00:00:00Z"
+
+        [tokens]
+        id_token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhYm94LXByb3h5LW1hbmFnZWQiLCJleHAiOjQxMDI0NDQ4MDB9.c2ln"
+        access_token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzY29wZSI6ImFib3gtcHJveHktbWFuYWdlZCIsImV4cCI6NDEwMjQ0NDgwMH0.c2ln"
+        refresh_token = "abox-proxy-managed-refresh"
+        account_id = "00000000-0000-4000-8000-000000000000"
+    }
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn default_guest_credential_path_is_tilde_prefixed() {
-        let cfg = GuestConfig::default();
-        let first = cfg.credential_files.first().expect("default must have one credential entry");
+    fn default_auth_config_stages_no_credentials() {
+        let cfg = AuthConfig::default();
+        assert!(cfg.credential_files().is_empty(), "managed providers should opt in explicitly");
+    }
+
+    #[test]
+    fn test_parse_managed_providers() {
+        let toml_str = r#"
+        [auth.providers.claude]
+        enabled = true
+
+        [auth.providers.codex]
+        enabled = true
+        host_credential_file = "/tmp/codex-auth.json"
+    "#;
+        let config: AboxConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.auth.providers.claude.enabled);
+        assert!(config.auth.providers.codex.enabled);
         assert_eq!(
-            first.guest, "~/.claude/.credentials.json",
-            "default guest path should use ~/ form"
+            config.auth.providers.codex.host_credential_file(),
+            "/tmp/codex-auth.json".to_string()
+        );
+
+        let files = config.auth.credential_files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].host_credential_file, "~/.claude/.credentials.json");
+        assert_eq!(files[0].guest, "~/.claude/.credentials.json");
+        assert_eq!(files[1].host_credential_file, "/tmp/codex-auth.json");
+        assert_eq!(files[1].guest, "~/.codex/auth.json");
+    }
+
+    #[test]
+    fn test_parse_advanced_stub_files() {
+        let toml_str = r#"
+        [auth.advanced]
+        [[auth.advanced.stub_files]]
+        host_credential_file = "~/.tool/auth.json"
+        guest = "~/.tool/auth.json"
+
+        [auth.advanced.stub_files.stub]
+        token = "abox-proxy-managed"
+    "#;
+        let config: AboxConfig = toml::from_str(toml_str).unwrap();
+        let files = config.auth.credential_files();
+        assert_eq!(files.len(), 1);
+        let entry = &files[0];
+        assert_eq!(entry.host_credential_file, "~/.tool/auth.json");
+        assert_eq!(entry.guest, "~/.tool/auth.json");
+        assert_eq!(entry.mode, "0600");
+        assert_eq!(entry.stub["token"].as_str(), Some("abox-proxy-managed"));
+    }
+
+    #[test]
+    fn default_codex_stub_matches_current_auth_shape() {
+        let stub = default_codex_stub();
+        assert_eq!(stub["auth_mode"].as_str(), Some("chatgpt"));
+        assert_eq!(stub["last_refresh"].as_str(), Some("2099-01-01T00:00:00Z"));
+
+        let id_token = stub["tokens"]["id_token"].as_str().expect("id_token missing");
+        let access_token = stub["tokens"]["access_token"].as_str().expect("access_token missing");
+
+        assert_eq!(id_token.matches('.').count(), 2, "id_token should be JWT-like");
+        assert_eq!(access_token.matches('.').count(), 2, "access_token should be JWT-like");
+        assert_eq!(
+            stub["tokens"]["account_id"].as_str(),
+            Some("00000000-0000-4000-8000-000000000000")
         );
     }
 
     #[test]
-    fn test_parse_guest_credential_files() {
-        let toml_str = r#"
-        [guest]
-        [[guest.credential_files]]
-        host = "~/.claude/.credentials.json"
-        guest = "/.claude/.credentials.json"
-        mode = "0600"
-
-        [guest.credential_files.stub]
-        [guest.credential_files.stub.claudeAiOauth]
-        accessToken = "abox-proxy-managed"
-        refreshToken = "abox-proxy-managed"
-        expiresAt = 9999999999999
-        scopes = ["user:inference"]
-        subscriptionType = "pro"
-    "#;
-        let config: AboxConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.guest.credential_files.len(), 1);
-        let entry = &config.guest.credential_files[0];
-        assert_eq!(entry.host, "~/.claude/.credentials.json");
-        assert_eq!(entry.guest, "/.claude/.credentials.json");
-        assert_eq!(entry.mode, "0600");
-        assert!(entry.stub.is_some());
-    }
-
-    #[test]
-    fn test_parse_guest_credential_files_without_stub() {
-        let toml_str = r#"
-        [guest]
-        [[guest.credential_files]]
-        host = "~/.config/gh/hosts.yml"
-        guest = "/root/.config/gh/hosts.yml"
-    "#;
-        let config: AboxConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.guest.credential_files.len(), 1);
-        let entry = &config.guest.credential_files[0];
-        assert!(entry.stub.is_none());
-        assert_eq!(entry.mode, "0600"); // default
-    }
-
-    #[test]
-    fn test_parse_empty_guest_section() {
-        // When no [guest] section is present, serde falls back to
-        // GuestConfig::default() which now provides a single Claude credential
-        // entry (the tilde-form path). An explicit empty [[guest.credential_files]]
-        // list in the TOML would still produce zero entries.
+    fn test_parse_empty_auth_section() {
         let toml_str = r"
         [vm_defaults]
         memory_mib = 2048
     ";
         let config: AboxConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
-            config.guest.credential_files.len(),
-            1,
-            "absent [guest] section should fall back to the default Claude credential entry"
+            config.auth.credential_files().len(),
+            0,
+            "absent [auth] section should not enable any managed providers by default"
         );
     }
 
@@ -352,17 +487,14 @@ mod tests {
 
     #[test]
     fn test_runtime_dir_default_is_short() {
-        // The default runtime dir must be short enough that even a moderately
-        // long task ID won't push the longest socket suffix past 108 bytes.
+        // The default runtime dir should preserve the full advertised task-ID
+        // budget for a typical home-directory install.
         let config =
             AboxConfig { state_dir: PathBuf::from("/home/username/.abox"), ..Default::default() };
         let runtime = config.runtime_dir();
-        // Longest known suffix: "vfs-status-<task-id>.sock" (25 chars + task id)
-        // With a 20-char task id that's 45 chars. runtime + '/' + suffix must be < 108.
-        let worst_case = runtime.to_string_lossy().len() + 1 + 45;
         assert!(
-            worst_case < 108,
-            "default runtime_dir produces socket paths that may exceed SUN_LEN: {worst_case} bytes"
+            crate::util::max_task_id_len_for_runtime_dir(&runtime) >= crate::util::TASK_ID_MAX_LEN,
+            "default runtime_dir should preserve the full task-ID budget: {runtime:?}"
         );
     }
 }

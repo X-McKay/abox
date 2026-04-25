@@ -3,7 +3,10 @@
 //! Creates a git worktree, boots a MicroVM, mounts the worktree via virtiofs,
 //! and starts the specified agent inside the VM.
 
+use super::validate_task_arg_for_runtime_dir;
+use abox_core::config::AboxConfig;
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
+use abox_core::util::validate_env_key;
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
@@ -13,6 +16,11 @@ use clap::Args;
 pub struct RunArgs {
     /// Unique task identifier (e.g., "fix-auth"). Used as the sandbox name,
     /// branch name suffix, and worktree directory name.
+    ///
+    /// Must contain only ASCII letters, digits, hyphens, underscores, and
+    /// dots. Must not start or end with a dot, contain consecutive dots, or
+    /// exceed 64 characters. On very deep `runtime_dir` layouts, the effective
+    /// limit may be lower because abox embeds the task ID in Unix socket paths.
     #[arg(long)]
     pub task: String,
 
@@ -36,7 +44,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub user: Option<String>,
 
-    /// Environment variables to set (KEY=VALUE). Can be repeated.
+    /// Environment variables to set inside the sandbox (KEY=VALUE).
+    ///
+    /// KEY must be a valid POSIX shell identifier: start with an ASCII letter
+    /// or underscore, followed by ASCII letters, digits, or underscores only.
+    /// Invalid keys are rejected immediately with a clear error.
+    ///
+    /// Can be repeated: `--env FOO=bar --env BAZ=qux`.
     #[arg(long = "env", short = 'e')]
     pub env_vars: Vec<String>,
 
@@ -63,26 +77,93 @@ pub struct RunArgs {
     pub command: Vec<String>,
 }
 
+/// Parse and validate a single `KEY=VALUE` environment variable string.
+///
+/// Returns `(key, value)` on success or a descriptive error. The key is
+/// validated against POSIX shell identifier rules via [`validate_env_key`].
+/// This is the single parsing entry point for `--env` arguments.
+fn parse_env_var(s: &str) -> Result<(String, String)> {
+    let mut parts = s.splitn(2, '=');
+    let key = parts.next().unwrap_or("").to_string();
+    let value = parts.next().unwrap_or("").to_string();
+
+    validate_env_key(&key).map_err(|e| anyhow::anyhow!("--env {s:?}: {e}"))?;
+
+    Ok((key, value))
+}
+
+fn selected_managed_agent(command: &[String]) -> Option<&str> {
+    command.first().map(String::as_str).and_then(|cmd| match cmd {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        _ => None,
+    })
+}
+
+fn ensure_managed_agent_ready(command: &[String], config: &AboxConfig) -> Result<()> {
+    let Some(agent) = selected_managed_agent(command) else {
+        return Ok(());
+    };
+
+    let (enabled, host_credential_file, provider_label) = match agent {
+        "claude" => (
+            config.auth.providers.claude.enabled,
+            config.auth.providers.claude.host_credential_file(),
+            "Claude Code",
+        ),
+        "codex" => (
+            config.auth.providers.codex.enabled,
+            config.auth.providers.codex.host_credential_file(),
+            "Codex",
+        ),
+        _ => return Ok(()),
+    };
+
+    let expanded = abox_core::policy::expand_tilde(&host_credential_file);
+    let config_path = AboxConfig::default_path()
+        .map_or_else(|_| "~/.abox/config.toml".to_string(), |p| p.display().to_string());
+
+    if !enabled {
+        anyhow::bail!(
+            "{provider_label} is not enabled for managed auth.\n\n\
+             Enable it under [auth.providers.{agent}] in {config_path}, then re-run `abox init` \
+             or edit the config manually."
+        );
+    }
+
+    if !std::path::Path::new(&expanded).exists() {
+        anyhow::bail!(
+            "{provider_label} is enabled, but host credentials were not found at {expanded}.\n\n\
+             Log in to {provider_label} on the host, or disable [auth.providers.{agent}] in \
+             {config_path} if you do not want abox to manage it."
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
 ) -> Result<()> {
+    // ── Input validation (trust boundary) ────────────────────────────────
+    // Validate the task ID before it is used as a branch name, worktree
+    // directory, socket path, log file name, or PID file name.
+    validate_task_arg_for_runtime_dir(&args.task, &orchestrator.runtime_dir())
+        .map_err(|e| anyhow::anyhow!("--task {:?}: {e}", args.task))?;
+
+    // Parse and validate every --env KEY=VALUE argument. Fail fast on the
+    // first invalid key so the user gets a clear error before any VM work.
+    let env_vars: Vec<(String, String)> =
+        args.env_vars.iter().map(|s| parse_env_var(s)).collect::<Result<Vec<_>>>()?;
+
+    ensure_managed_agent_ready(&args.command, orchestrator.config())?;
+
     if args.detach {
         return spawn_detached(&args, orchestrator);
     }
-
-    let env_vars: Vec<(String, String)> = args
-        .env_vars
-        .iter()
-        .filter_map(|s| {
-            let mut parts = s.splitn(2, '=');
-            let key = parts.next()?.to_string();
-            let value = parts.next().unwrap_or("").to_string();
-            Some((key, value))
-        })
-        .collect();
 
     let params = CreateSandboxParams {
         task_id: args.task.clone(),
@@ -123,6 +204,9 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
 /// because it's debuggable: `ps` shows a real `abox run` process, and the
 /// supervisor's argv reflects exactly what the user typed minus the
 /// `--detach` flag.
+///
+/// Note: task ID validation is performed before reaching this function, so
+/// the task string is already known-safe when used to construct file paths.
 fn spawn_detached<W: WorkspacePort, V: VmPort>(
     args: &RunArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
@@ -171,7 +255,10 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_detach_flag;
+    use super::{
+        ensure_managed_agent_ready, parse_env_var, selected_managed_agent, strip_detach_flag,
+    };
+    use abox_core::config::AboxConfig;
 
     #[test]
     fn test_strip_detach_in_middle() {
@@ -198,5 +285,99 @@ mod tests {
     fn test_strip_detach_at_start() {
         let raw = vec!["--detach".to_string(), "run".to_string(), "--task".to_string()];
         assert_eq!(strip_detach_flag(&raw), vec!["run", "--task"]);
+    }
+
+    // ── parse_env_var tests ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_env_var_accepts_valid_key() {
+        let (k, v) = parse_env_var("FOO=bar").unwrap();
+        assert_eq!(k, "FOO");
+        assert_eq!(v, "bar");
+    }
+
+    #[test]
+    fn parse_env_var_accepts_empty_value() {
+        let (k, v) = parse_env_var("FOO=").unwrap();
+        assert_eq!(k, "FOO");
+        assert_eq!(v, "");
+    }
+
+    #[test]
+    fn parse_env_var_accepts_value_with_equals() {
+        // Value may itself contain '=' — only the first '=' is the separator.
+        let (k, v) = parse_env_var("FOO=a=b=c").unwrap();
+        assert_eq!(k, "FOO");
+        assert_eq!(v, "a=b=c");
+    }
+
+    #[test]
+    fn parse_env_var_rejects_digit_start_key() {
+        assert!(parse_env_var("1FOO=bar").is_err());
+    }
+
+    #[test]
+    fn parse_env_var_rejects_hyphen_in_key() {
+        assert!(parse_env_var("FOO-BAR=baz").is_err());
+    }
+
+    #[test]
+    fn parse_env_var_rejects_shell_injection_key() {
+        // A crafted key that would break `export <key>='value'` shell syntax.
+        // Note: injection in the *value* is safe because sh_escape() wraps
+        // values in single quotes. Only the *key* is interpolated unescaped.
+        assert!(parse_env_var("FOO$(cmd)=bar").is_err()); // $ in key
+        assert!(parse_env_var("FOO BAR=baz").is_err()); // space in key
+        assert!(parse_env_var("FOO;evil=bar").is_err()); // semicolon in key
+        assert!(parse_env_var("=value").is_err()); // empty key
+    }
+
+    #[test]
+    fn parse_env_var_rejects_empty_key() {
+        assert!(parse_env_var("=value").is_err());
+    }
+
+    #[test]
+    fn selected_managed_agent_identifies_supported_agents() {
+        assert_eq!(selected_managed_agent(&["claude".into()]), Some("claude"));
+        assert_eq!(selected_managed_agent(&["codex".into(), "--quiet".into()]), Some("codex"));
+        assert_eq!(selected_managed_agent(&["echo".into(), "hi".into()]), None);
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_allows_arbitrary_commands() {
+        let config = AboxConfig::default();
+        assert!(ensure_managed_agent_ready(&["echo".into(), "hi".into()], &config).is_ok());
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_rejects_disabled_provider() {
+        let config = AboxConfig::default();
+        let err = ensure_managed_agent_ready(&["claude".into()], &config).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Claude Code is not enabled"));
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_rejects_missing_host_credentials() {
+        let mut config = AboxConfig::default();
+        config.auth.providers.claude.enabled = true;
+        config.auth.providers.claude.host_credential_file =
+            Some("/definitely/missing/abox-claude-auth.json".into());
+
+        let err = ensure_managed_agent_ready(&["claude".into()], &config).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("host credentials were not found"));
+    }
+
+    #[test]
+    fn ensure_managed_agent_ready_accepts_present_host_credentials() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut config = AboxConfig::default();
+        config.auth.providers.codex.enabled = true;
+        config.auth.providers.codex.host_credential_file =
+            Some(tmp.path().to_string_lossy().to_string());
+
+        assert!(ensure_managed_agent_ready(&["codex".into()], &config).is_ok());
     }
 }

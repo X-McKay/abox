@@ -3,6 +3,7 @@
 //! Connects to the VM's serial console socket via `socat`, giving the user
 //! an interactive terminal inside the sandbox.
 
+use super::validate_task_arg;
 use abox_core::sandbox::SandboxOrchestrator;
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
@@ -19,6 +20,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: AttachArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
 ) -> Result<()> {
+    validate_task_arg(&args.task)?;
+
     let vm_info = orchestrator.vm_info(&args.task).await.context("Failed to get VM info")?;
 
     let console_socket = vm_info.console_socket;

@@ -5,6 +5,7 @@
 //! the guest init reads them. This avoids kernel-cmdline length limits and
 //! quoting issues, and never touches the user's worktree.
 
+use crate::util::validate_env_key;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
@@ -80,6 +81,14 @@ impl BootMeta {
     /// The script runs as root (inherited from init.sh), stages credentials,
     /// fixes ownership, then drops privileges via `su-exec` before exec-ing
     /// the agent. See ADR-004.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any environment variable key in `self.env` fails
+    /// [`validate_env_key`]. Keys must be validated at the CLI boundary
+    /// (in `run.rs`) before being stored in `BootMeta`. This panic is a
+    /// defence-in-depth guard against keys reaching this function via any
+    /// call path that bypasses the CLI.
     pub fn runner_script(&self) -> String {
         let mut s = String::from("#!/bin/sh\n");
         s.push_str("set -e\n");
@@ -101,6 +110,15 @@ impl BootMeta {
         s.push_str(&sh_escape(&self.sandbox_id));
         s.push_str("'\n");
         for (k, v) in &self.env {
+            // Defence-in-depth: panic rather than emit a malformed export
+            // statement. The CLI boundary (run.rs) must have already rejected
+            // invalid keys; this guard catches any call path that bypasses it.
+            validate_env_key(k).unwrap_or_else(|e| {
+                panic!(
+                    "BUG: invalid env key {k:?} reached runner_script(); \
+                     validate at the CLI boundary before constructing BootMeta: {e}"
+                )
+            });
             s.push_str("export ");
             s.push_str(k);
             s.push_str("='");
@@ -142,6 +160,21 @@ impl BootMeta {
                 writeln!(s, "chmod {} '{}'", sh_escape(&cred.mode), sh_escape(&cred.guest_path));
             let _ = writeln!(s, "chown abox:abox '{}'", sh_escape(&cred.guest_path));
         }
+        // Older experimental builds accidentally wrote the MITM CA PEM into
+        // ~/.claude.json. Claude treats that path as JSON config and aborts on
+        // subsequent multi-turn runs if the stale PEM is left behind.
+        s.push_str(
+            "if [ -f /home/abox/.claude.json ] && \
+             grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.claude.json; then\n\
+             \x20   rm -f /home/abox/.claude.json\n\
+             fi\n",
+        );
+        s.push_str(
+            "if [ -f /home/abox/.codex/config.toml ] && \
+             grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.codex/config.toml; then\n\
+             \x20   rm -f /home/abox/.codex/config.toml\n\
+             fi\n",
+        );
         // Drop privileges and exec agent. su-exec is Alpine's standard
         // atomic uid/gid-drop-and-exec tool (like setpriv but available in
         // BusyBox-based rootfs). It sets uid, gid, and supplementary groups
@@ -411,6 +444,34 @@ mod tests {
     }
 
     #[test]
+    fn runner_script_removes_stale_claude_pem_config() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(script.contains("grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.claude.json"));
+        assert!(script.contains("rm -f /home/abox/.claude.json"));
+    }
+
+    #[test]
+    fn runner_script_removes_stale_codex_pem_config() {
+        let meta = BootMeta {
+            sandbox_id: "t".into(),
+            agent_command: vec!["/bin/true".into()],
+            env: vec![],
+            credential_files: vec![],
+        };
+        let script = meta.runner_script();
+        assert!(
+            script.contains("grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.codex/config.toml")
+        );
+        assert!(script.contains("rm -f /home/abox/.codex/config.toml"));
+    }
+
+    #[test]
     fn expand_guest_path_tilde_prefix() {
         assert_eq!(
             expand_guest_path("~/.claude/.credentials.json").unwrap(),
@@ -452,5 +513,39 @@ mod tests {
         assert!(init_sh.contains("boot_fail 70 \"failed to mount tmpfs scratch at $ABOX_TMPDIR\""));
         assert!(init_sh.contains("chown \"$ABOX_UID:$ABOX_GID\" \"$ABOX_TMPDIR\""));
         assert!(init_sh.contains("chmod 0700 \"$ABOX_TMPDIR\""));
+    }
+
+    #[test]
+    fn guest_init_mounts_workspace_with_nodev_nosuid() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        // The workspace virtiofs share must be mounted with nodev and nosuid to
+        // prevent the agent from creating device nodes or using setuid binaries
+        // on the host-backed share.
+        assert!(
+            init_sh.contains("mount -t virtiofs -o nodev,nosuid workspace /workspace"),
+            "workspace mount must include nodev,nosuid; init.sh:\n{init_sh}"
+        );
+    }
+
+    #[test]
+    fn guest_init_mounts_aboxmeta_read_only() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        // The aboxmeta share must be mounted read-only to prevent a compromised
+        // guest process from modifying runner.sh or staged credentials after boot.
+        // nodev and nosuid are also required.
+        assert!(
+            init_sh.contains("mount -t virtiofs -o ro,nodev,nosuid aboxmeta /abox-meta"),
+            "aboxmeta mount must include ro,nodev,nosuid; init.sh:\n{init_sh}"
+        );
+    }
+
+    #[test]
+    fn guest_init_mounts_aboxstatus_with_nodev_nosuid() {
+        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
+        // The status share must be mounted with nodev and nosuid.
+        assert!(
+            init_sh.contains("mount -t virtiofs -o nodev,nosuid aboxstatus /abox-status"),
+            "aboxstatus mount must include nodev,nosuid; init.sh:\n{init_sh}"
+        );
     }
 }

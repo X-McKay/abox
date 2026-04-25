@@ -193,25 +193,14 @@ vcpus = 1
 egress_port = 28443
 policy_dir = "$SCRATCH/state/policies"
 
-[guest]
-
-[[guest.credential_files]]
-host = "$SCRATCH/fake-creds.json"
-guest = "/.claude/.credentials.json"
-mode = "0600"
-
-[guest.credential_files.stub]
-[guest.credential_files.stub.claudeAiOauth]
-accessToken = "abox-proxy-managed"
-refreshToken = "abox-proxy-managed"
-expiresAt = 9999999999999
-scopes = ["user:inference"]
-subscriptionType = "pro"
+[auth.providers.claude]
+enabled = true
+host_credential_file = "$SCRATCH/fake-creds.json"
 EOF
 
-# Create a fake host credential file so the stub-staging code path runs.
-# The content does not matter — only its existence, since `stub` mode
-# generates a synthetic credential file rather than copying this one.
+# Create a fake host credential file so the managed-provider stub staging
+# path runs. The content does not matter for the guest stub itself; only the
+# file's existence matters here.
 cat > "$SCRATCH/fake-creds.json" <<'EOF'
 {"claudeAiOauth": {"accessToken": "fake-host-token", "refreshToken": "fake-refresh"}}
 EOF
@@ -614,10 +603,10 @@ else
     # live API call — just checks the file landed with the expected
     # placeholder content.
     step "Stub credential file is placed inside the guest"
-    how 'abox run --task stub-test --ephemeral -- cat /.claude/.credentials.json'
+    how 'abox run --task stub-test --ephemeral -- cat /home/abox/.claude/.credentials.json'
     expect "stub file exists with accessToken=abox-proxy-managed"
     STUB_OUT=$(timeout 60 $ABOX run --task stub-test --ephemeral -- \
-        cat /.claude/.credentials.json 2>&1)
+        cat /home/abox/.claude/.credentials.json 2>&1)
     if echo "$STUB_OUT" | grep -q '"accessToken": "abox-proxy-managed"'; then
         pass "stub credential file placed with placeholder token"
     else

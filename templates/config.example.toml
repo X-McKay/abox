@@ -44,47 +44,40 @@ egress_port = 18443
 # Directory containing policy TOML files.
 # policy_dir = "~/.abox/policies"
 
-# ─── Guest credential forwarding ────────────────────────────────────────────
+# ─── Managed Authentication ────────────────────────────────────────────────
 #
-# Credential files to stage inside the guest VM at boot.
+# abox's default supported auth surface is:
+#   - Claude Code
+#   - Codex
 #
-# For each entry you can either COPY the host file into the guest (`stub`
-# omitted) or PLACE A STUB (`stub` set) — the stub is a placeholder file that
-# passes the tool's local auth check, while the real credential is injected
-# by the egress proxy at the network layer (see `policies/default.toml`).
-# Stubs are the preferred mode: the VM never sees the real credential.
+# Enabling a managed provider causes abox to stage a worthless stub file into
+# the guest and inject the real host-side credential at request time. Real
+# secrets never enter the VM.
 #
-# The examples below forward Claude Code and Codex OAuth credentials.
-# Uncomment and adjust for your setup. See docs/explainer.md Section 8.
+# Uncomment the providers you want abox to manage. The default host path can be
+# overridden if your credential file lives somewhere else.
 #
-# [guest]
+# [auth.providers.claude]
+# enabled = true
+# # host_credential_file = "~/.claude/.credentials.json"
 #
-# # ── Claude Code ──
-# [[guest.credential_files]]
-# host = "~/.claude/.credentials.json"
-# guest = "~/.claude/.credentials.json"
+# [auth.providers.codex]
+# enabled = true
+# # host_credential_file = "~/.codex/auth.json"
+#
+# ─── Advanced Custom Stubs ─────────────────────────────────────────────────
+#
+# This is an explicitly advanced escape hatch for unsupported tools. It is
+# stub-only: abox never copies the real host credential into the VM.
+#
+# If you use it, you must also add the matching host-side policy / egress rule
+# yourself. See docs/credential-scoping.md for directions.
+#
+# [auth.advanced]
+# [[auth.advanced.stub_files]]
+# host_credential_file = "~/.tool/auth.json"
+# guest = "~/.tool/auth.json"
 # mode = "0600"
 #
-# [guest.credential_files.stub]
-# [guest.credential_files.stub.claudeAiOauth]
-# accessToken = "abox-proxy-managed"
-# refreshToken = "abox-proxy-managed"
-# expiresAt = 9999999999999
-# scopes = ["user:inference"]
-# subscriptionType = "pro"
-#
-# # ── Codex (OpenAI) ──
-# [[guest.credential_files]]
-# host = "~/.codex/auth.json"
-# guest = "~/.codex/auth.json"
-# mode = "0600"
-#
-# [guest.credential_files.stub]
-# auth_mode = "chatgpt"
-#
-# [guest.credential_files.stub.tokens]
-# id_token = "abox-proxy-managed"
+# [auth.advanced.stub_files.stub]
 # access_token = "abox-proxy-managed"
-# refresh_token = "abox-proxy-managed"
-# account_id = "abox-proxy-managed"
-# last_refresh = "2099-01-01T00:00:00Z"

@@ -1,5 +1,6 @@
 //! `abox template` — Manage VM snapshot templates.
 
+use super::validate_task_arg;
 use abox_core::config::AboxConfig;
 use abox_core::sandbox::SandboxOrchestrator;
 use abox_core::snapshot::SnapshotManager;
@@ -85,6 +86,8 @@ pub async fn execute_create<W: WorkspacePort, V: VmPort>(
     orchestrator: &SandboxOrchestrator<W, V>,
     config: &AboxConfig,
 ) -> Result<()> {
+    validate_task_arg(from)?;
+
     let snap_mgr = SnapshotManager::new(
         config.templates_dir(),
         config.runtime_dir(),

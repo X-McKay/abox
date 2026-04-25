@@ -1,5 +1,6 @@
 //! `abox merge` — Merge a sandbox's branch back into the base branch.
 
+use super::validate_task_arg;
 use abox_core::sandbox::SandboxOrchestrator;
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
@@ -20,6 +21,8 @@ pub fn execute<W: WorkspacePort, V: VmPort>(
     args: &MergeArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
 ) -> Result<()> {
+    validate_task_arg(&args.task)?;
+
     let conflicts = orchestrator.merge(&args.task, &args.base)?;
 
     if conflicts.is_empty() {

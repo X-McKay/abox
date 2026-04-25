@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 fn use_color() -> bool {
     std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
+        && std::env::var("TERM").map_or(true, |t| t != "dumb")
         && std::io::stdout().is_tty()
 }
 fn col_green(s: &str) -> String {
@@ -343,79 +343,88 @@ fn find_source_policy() -> Option<PathBuf> {
     None
 }
 
-/// Detect host credentials and offer to add them to config.
-///
-/// Claude credentials are already in the default config (`GuestConfig::default()`
-/// adds `~/.claude/.credentials.json`). This wizard focuses on Codex, which is
-/// not in the default, and prints a summary of all credential sources.
+/// Detect managed provider credentials, enable providers when present, and
+/// print a summary of what abox can support out of the box.
 fn detect_credentials(config_path: &Path, yes: bool) -> Result<()> {
+    let _ = yes;
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
 
     // Check known credential sources.
     let claude_found = home.join(".claude/.credentials.json").exists();
     let codex_found = home.join(".codex/auth.json").exists();
-    let github_token = std::env::var("GITHUB_TOKEN").is_ok();
-    let google_key = std::env::var("GOOGLE_API_KEY").is_ok();
 
-    // Offer to add Codex credentials if found and not already in config.
-    if codex_found {
-        let config_content = std::fs::read_to_string(config_path).unwrap_or_default();
-        if config_content.contains(".codex/auth.json") {
-            print_ok("Codex credentials already configured");
+    let config_content = std::fs::read_to_string(config_path).unwrap_or_default();
+
+    if claude_found {
+        if provider_section_present(&config_content, "claude") {
+            print_ok("Claude Code managed auth already configured");
         } else {
-            let add = if yes {
-                true
-            } else {
-                print!("    Found Codex credentials at ~/.codex/auth.json. Add to sandbox config? [Y/n] ");
-                use std::io::Write;
-                std::io::stdout().flush()?;
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let trimmed = input.trim().to_lowercase();
-                trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
-            };
+            append_managed_provider(config_path, "claude")?;
+            print_action("Enabled Claude Code managed auth");
+        }
+    }
 
-            if add {
-                let entry = "\n\
-                    [[guest.credential_files]]\n\
-                    host = \"~/.codex/auth.json\"\n\
-                    guest = \"~/.codex/auth.json\"\n\
-                    mode = \"0600\"\n";
-                let mut file = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(config_path)
-                    .with_context(|| format!("Failed to append to {}", config_path.display()))?;
-                use std::io::Write;
-                file.write_all(entry.as_bytes())?;
-                print_action("Added Codex credentials to config");
-            }
+    if codex_found {
+        if provider_section_present(&config_content, "codex") {
+            print_ok("Codex managed auth already configured");
+        } else {
+            append_managed_provider(config_path, "codex")?;
+            print_action("Enabled Codex managed auth");
         }
     }
 
     // Print status summary.
     println!();
-    println!("    Credential status:");
+    println!("    Managed provider status:");
     println!(
         "      Claude Code: {}",
         if claude_found {
-            "~/.claude/.credentials.json (configured by default)"
+            "~/.claude/.credentials.json (enabled)"
         } else {
-            "not found"
+            "not found — provider left disabled"
         }
     );
     println!(
         "      Codex:       {}",
-        if codex_found { "~/.codex/auth.json (configured)" } else { "not found" }
-    );
-    println!(
-        "      GITHUB_TOKEN: {}",
-        if github_token { "set (policy handles injection)" } else { "not set" }
-    );
-    println!(
-        "      GOOGLE_API_KEY: {}",
-        if google_key { "set (policy handles injection)" } else { "not set" }
+        if codex_found {
+            "~/.codex/auth.json (enabled)"
+        } else {
+            "not found — provider left disabled"
+        }
     );
 
+    if !claude_found && !codex_found {
+        println!();
+        println!("    {}  No Claude Code or Codex host credentials were found.", col_yellow("!"));
+        println!(
+            "      {}",
+            col_dim(
+                "abox can still launch arbitrary sandbox commands, but the default managed agent \
+                 workflow requires at least one of those providers."
+            )
+        );
+    }
+
+    println!();
+    println!(
+        "    GitHub access is optional and stays on the host via managed 'git'/'gh' commands."
+    );
+
+    Ok(())
+}
+
+fn provider_section_present(config_content: &str, provider: &str) -> bool {
+    config_content.contains(&format!("[auth.providers.{provider}]"))
+}
+
+fn append_managed_provider(config_path: &Path, provider: &str) -> Result<()> {
+    let entry = format!("\n[auth.providers.{provider}]\nenabled = true\n");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(config_path)
+        .with_context(|| format!("Failed to append to {}", config_path.display()))?;
+    use std::io::Write;
+    file.write_all(entry.as_bytes())?;
     Ok(())
 }
 

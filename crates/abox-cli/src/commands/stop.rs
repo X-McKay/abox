@@ -1,5 +1,6 @@
 //! `abox stop` — Stop a sandbox and optionally clean up.
 
+use super::validate_task_arg;
 use abox_core::sandbox::SandboxOrchestrator;
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
@@ -20,6 +21,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: StopArgs,
     orchestrator: &SandboxOrchestrator<W, V>,
 ) -> Result<()> {
+    validate_task_arg(&args.task)?;
+
     // If this sandbox was launched with `abox run --detach`, kill the
     // supervisor process first so it tears down its own VM. The
     // orchestrator's stop_sandbox below will then clean up any residual

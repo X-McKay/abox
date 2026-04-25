@@ -1,217 +1,171 @@
-# Credential scoping guide
+# Credential Scoping Guide
 
-abox injects credentials into agent requests at the network layer — the agent never sees real tokens. But the *scope* of those tokens matters: a GitHub token with `admin:org` permission is just as dangerous when injected by a proxy as when read from disk, because a rogue agent controls what API calls it makes on allowed domains.
+abox keeps real secrets on the **host** and uses managed boundaries to apply
+them on the agent's behalf. That is a strong security improvement, but token
+scope still matters: a prompt-injected agent can only do what the host-held
+credential is allowed to do.
 
-This guide covers how to create minimally-scoped credentials for each provider abox supports.
+This guide covers the default supported auth surface:
 
----
+- Claude Code
+- Codex / OpenAI
+- GitHub via managed `git` / constrained `gh`
 
-## How credential injection works
+See also [ADR-006](decisions/006-managed-auth-product-principles.md).
 
-Quick recap (see [`docs/explainer.md`](explainer.md) sections 6–7 for the full story):
+## How managed auth works
 
-1. The agent inside the VM sees only **stub credentials** — placeholder files with values like `"abox-proxy-managed"`.
-2. When the agent makes an HTTPS request, abox's egress proxy intercepts it.
-3. The proxy evaluates the destination against your **policy file** (`~/.abox/policies/default.toml`).
-4. If the domain matches an egress rule with credential injection, the proxy reads the real token from your **host environment** (env var or file) and injects it into the `Authorization` header.
-5. The request reaches the upstream API with real credentials. The agent never sees them.
+1. `abox init` or manual config enables a managed provider in
+   `~/.abox/config.toml`.
+2. abox stages a **stub** credential file into the guest.
+3. The real credential stays on the host.
+4. The host-side proxy or host-side CLI execution path applies the real
+   credential at request time.
 
-**The risk:** the proxy injects credentials but does not filter what the agent *does* with those credentials. If your GitHub token can delete repositories, a prompt-injected agent can call `DELETE /repos/{owner}/{repo}` on `api.github.com` — the proxy will happily attach your token to that request.
+The guest sees only placeholder values such as `"abox-proxy-managed"`.
 
-**The mitigation:** use the narrowest possible token scope for each provider.
+## GitHub
 
----
+GitHub is a **host-managed workflow surface**, not a default API-egress
+surface.
 
-## Provider-specific guidance
+Out of the box, abox supports GitHub through:
 
-### GitHub
+- `git`
+- constrained `gh`
 
-abox injects `GITHUB_TOKEN` as a Bearer token on requests to `api.github.com`. This is also used by the `gh` CLI when proxied through the CLI policy engine.
+That means your GitHub credential should be configured for host-side tooling,
+not copied into the VM.
 
-**Recommended: fine-grained personal access token (PAT)**
+### Recommended credential shape
 
-Create one at [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new):
+Use a **fine-grained personal access token** scoped to the specific repository
+or repositories the agent needs.
 
-| Setting | Value |
-|---------|-------|
-| **Resource owner** | Your personal account or the org that owns the repo |
-| **Repository access** | "Only select repositories" — pick the repo(s) agents will work on |
-| **Permissions** | See table below |
+Minimum useful permissions for a coding workflow:
 
-**Minimum permissions for a coding agent:**
+- `Contents`: read and write
+- `Pull requests`: read and write
+- `Metadata`: read-only
 
-| Permission | Access | Why |
-|------------|--------|-----|
-| Contents | Read and write | Read/write files, create commits, push branches |
-| Pull requests | Read and write | Create and update PRs |
-| Metadata | Read-only | Required by GitHub for all fine-grained PATs |
+Do **not** grant:
 
-**Do NOT grant** unless you have a specific reason:
+- `Administration`
+- destructive org-level scopes
+- repo deletion / webhook management
+- any broader repository set than the agent actually needs
 
-| Permission | Risk |
-|------------|------|
-| Administration | Can delete the repo, change settings, manage webhooks |
-| Actions | Can trigger/cancel CI workflows |
-| Environments, Secrets | Can read/write deployment secrets |
-| Organization permissions | Grants access beyond the selected repo |
+### Why scope still matters
 
-**Set the token:**
+abox constrains which `gh` subcommands are allowed by policy, but GitHub auth is
+still powerful. If the token can write to many repositories, the agent can act
+within those permissions through the allowed host-managed workflow.
 
-```bash
-export GITHUB_TOKEN="github_pat_..."
-```
+## Anthropic (Claude Code)
 
-Or add it to your shell profile so abox picks it up at runtime.
+Claude Code uses the host credential file at:
 
-**Classic PATs:** If you must use a classic PAT, select only the `repo` scope. Never select `admin:org`, `delete_repo`, or `admin:repo_hook`. Classic PATs cannot be scoped to a single repository — prefer fine-grained PATs.
+- `~/.claude/.credentials.json`
 
----
-
-### Anthropic (Claude Code)
-
-abox reads the Claude OAuth token from `~/.claude/.credentials.json` at the JSON path `claudeAiOauth.accessToken`. This token is managed by Claude Code's own login flow — you do not create it manually.
-
-**Scoping considerations:**
-
-- The token's scope is determined by your Claude subscription and the OAuth consent flow. You cannot narrow it further.
-- The token grants inference access (sending prompts, receiving completions). It does not grant account management, billing changes, or API key creation.
-- If you use a team/organization Claude account, the token inherits your role's permissions. Ensure the account used for agent work does not have admin privileges on the organization.
-
-**Stub configuration** (already in the default `config.example.toml`):
+Enable it in `~/.abox/config.toml`:
 
 ```toml
-[[guest.credential_files]]
-host = "~/.claude/.credentials.json"
-guest = "~/.claude/.credentials.json"
-mode = "0600"
-
-[guest.credential_files.stub.claudeAiOauth]
-accessToken = "abox-proxy-managed"
-refreshToken = "abox-proxy-managed"
-expiresAt = 9999999999999
-scopes = ["user:inference"]
-subscriptionType = "pro"
+[auth.providers.claude]
+enabled = true
 ```
 
-The stub satisfies Claude Code's startup checks. The real token is injected by the proxy.
+Optional override:
 
----
+```toml
+[auth.providers.claude]
+enabled = true
+host_credential_file = "/path/to/custom/.credentials.json"
+```
 
-### OpenAI (Codex)
+### Scoping considerations
 
-abox supports two credential sources for OpenAI, checked in this order:
+- The OAuth token is managed by Claude Code's own login flow.
+- abox keeps that token on the host and stages only a stub into the guest.
+- The account or org role behind the token still matters. Use a non-admin
+  account for agent work where possible.
 
-1. **Environment variable** `OPENAI_API_KEY` — checked first
-2. **Credential file** `~/.codex/auth.json` at path `tokens.access_token` — fallback
+## Codex / OpenAI
 
-**If using an API key (`OPENAI_API_KEY`):**
+Codex uses the host credential file at:
 
-Create one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys):
+- `~/.codex/auth.json`
 
-- Use a **project-scoped key** (not a user-level key) if your OpenAI organization supports projects
-- Set a **spending limit** on the project to cap damage from a runaway agent
-- If possible, restrict the key to only the models the agent needs (e.g., `gpt-4o` only)
+Enable it in `~/.abox/config.toml`:
+
+```toml
+[auth.providers.codex]
+enabled = true
+```
+
+Optional override:
+
+```toml
+[auth.providers.codex]
+enabled = true
+host_credential_file = "/path/to/custom/auth.json"
+```
+
+For OpenAI-compatible HTTP clients, the default policy also supports the host
+environment variable:
 
 ```bash
 export OPENAI_API_KEY="sk-proj-..."
 ```
 
-**If using Codex OAuth (`~/.codex/auth.json`):**
+### Scoping considerations
 
-The token is managed by Codex's login flow. Scoping is determined by your OpenAI account role. The stub:
+- Prefer project-scoped keys when the OpenAI account model supports them.
+- Set spending limits on the project or account used for agent work.
+- Keep the repo/workflow boundary narrow; abox protects the secret location, not
+  your upstream billing policy.
+
+## Advanced Custom Stubs
+
+Unsupported tools can still use an explicitly advanced, stub-only escape hatch.
+
+Example:
 
 ```toml
-[[guest.credential_files]]
-host = "~/.codex/auth.json"
-guest = "~/.codex/auth.json"
+[auth.advanced]
+[[auth.advanced.stub_files]]
+host_credential_file = "~/.tool/auth.json"
+guest = "~/.tool/auth.json"
 mode = "0600"
 
-[guest.credential_files.stub]
-auth_mode = "chatgpt"
-
-[guest.credential_files.stub.tokens]
-id_token = "abox-proxy-managed"
+[auth.advanced.stub_files.stub]
 access_token = "abox-proxy-managed"
 refresh_token = "abox-proxy-managed"
-account_id = "abox-proxy-managed"
-last_refresh = "2099-01-01T00:00:00Z"
 ```
 
----
+If you use this path, you must also add the matching host-side policy yourself.
+The advanced stub only satisfies the guest tool's local file check. It does not
+automatically create the corresponding egress or CLI policy rule.
 
-### Google (googleapis.com)
+Use this path only when:
 
-abox injects `GOOGLE_API_KEY` as a Bearer token on requests to `*.googleapis.com`.
+- the tool is not a first-class managed provider
+- a stub is enough for local startup checks
+- you understand the host-side policy you are enabling
 
-**Recommended: API key with restrictions**
+## General Principles
 
-Create one at [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials):
+1. Keep the credential on the host.
+2. Use the narrowest upstream scope you can.
+3. Prefer provider-specific managed auth over custom stubs.
+4. Treat advanced custom stubs as power-user configuration, not the default
+   product path.
+5. Review `~/.abox/logs/audit.jsonl` after incidents or suspicious runs.
 
-- **Application restrictions:** Set to "None" (or IP-restrict to your machine if feasible)
-- **API restrictions:** Select only the specific APIs the agent needs (e.g., Vertex AI API). Do not leave as "Unrestricted."
+## Quick Reference
 
-```bash
-export GOOGLE_API_KEY="AIza..."
-```
-
-For service accounts: create a dedicated service account with only the IAM roles the agent needs. Never use your personal account's credentials.
-
----
-
-### AWS (CLI commands)
-
-AWS credentials are used by the CLI proxy (not the egress proxy) when the agent runs `aws` commands. The policy engine controls which `aws` subcommands are allowed.
-
-**Recommended: scoped IAM credentials**
-
-- Create a dedicated IAM user or role for agent work
-- Attach a policy that grants only the permissions the agent needs
-- Use short-lived credentials via `aws sts assume-role` with a session duration cap
-
-**Example: agent that only needs S3 read and CloudWatch log access:**
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:ListBucket"],
-      "Resource": "arn:aws:s3:::my-bucket/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["logs:GetLogEvents", "logs:DescribeLogGroups"],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-The default policy already denies most AWS CLI subcommands — only `s3`, `sts get-caller-identity`, and `logs` commands are allowed.
-
----
-
-## General principles
-
-1. **Scope to the repo, not the account.** Fine-grained PATs (GitHub) and project-scoped keys (OpenAI) exist for this reason. Use them.
-
-2. **Set spending limits.** For API providers that bill per-token (OpenAI, Anthropic, Google), set budget caps on the project or account the agent uses.
-
-3. **Rotate after incidents.** If an agent behaves unexpectedly, rotate the credential immediately. Check `~/.abox/logs/audit.jsonl` to see what requests were made.
-
-4. **Audit what you grant.** Run `abox doctor` — future versions will check token scopes where the provider API exposes them (e.g., GitHub's `X-OAuth-Scopes` response header).
-
-5. **Prefer env vars over credential files** when the provider supports API keys. Env vars are never written to disk in any form — they exist only in the host process's memory and are injected per-request.
-
----
-
-## Quick reference
-
-| Provider | Source | Config key | Recommended scope |
-|----------|--------|------------|-------------------|
-| GitHub | env var | `GITHUB_TOKEN` | Fine-grained PAT: `contents:rw`, `pull_requests:rw`, single repo |
-| Anthropic | file | `~/.claude/.credentials.json` | Managed by Claude login (inference only) |
-| OpenAI | env var or file | `OPENAI_API_KEY` or `~/.codex/auth.json` | Project-scoped key with spending limit |
-| Google | env var | `GOOGLE_API_KEY` | API-restricted key, specific APIs only |
-| AWS | env var | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | Scoped IAM role, short-lived session |
+| Surface | Host source | Default path | Notes |
+|---------|-------------|--------------|-------|
+| Claude Code | OAuth file | `~/.claude/.credentials.json` | First-class managed provider |
+| Codex | OAuth file | `~/.codex/auth.json` | First-class managed provider |
+| OpenAI API | env var | `OPENAI_API_KEY` | Optional host-side alternate for HTTP clients |
+| GitHub | host `git` / `gh` auth | host-managed | No default GitHub API egress injection |
