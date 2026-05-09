@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- feat(network): add repo-owned `safe` / `scoped` / `open` network modes with
+  trust-on-first-use and prompt-file support for bare `claude` / `codex`
+- feat(env): add guest-native repo environments with `abox project ...`,
+  `abox env ...`, durable caches, prepare flows, and official `base` / `node`
+  / `python` / `rust` guest profiles
+
+### Validation
+
+- validate(vm): exercised real-VM warm/run flows for `node`, `python`, and
+  `rust` profiles on the release-prep branch
+- validate(setup): require `virtiofsd` file capabilities and surface them via
+  `abox doctor`
+
 ## v0.3.2 — 2026-04-25
 
 ### Features

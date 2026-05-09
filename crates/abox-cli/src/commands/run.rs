@@ -3,14 +3,21 @@
 //! Creates a git worktree, boots a MicroVM, mounts the worktree via virtiofs,
 //! and starts the specified agent inside the VM.
 
+use super::env::ensure_warm_environment_for_run;
 use super::validate_task_arg_for_runtime_dir;
 use abox_core::config::AboxConfig;
+use abox_core::project::{
+    is_approved, project_cache_root, record_approval, standalone_network_scope, EnvironmentProfile,
+    NetworkMode, ProjectConfig, ResolvedProjectConfig,
+};
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
 use abox_core::util::validate_env_key;
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
-use anyhow::Result;
-use clap::Args;
+use anyhow::{Context, Result};
+use clap::{Args, ValueEnum};
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
@@ -54,6 +61,18 @@ pub struct RunArgs {
     #[arg(long = "env", short = 'e')]
     pub env_vars: Vec<String>,
 
+    /// Override the effective repo network mode for this run.
+    #[arg(long, value_enum)]
+    pub network: Option<RunNetworkMode>,
+
+    /// Inline prompt content for known managed agents.
+    #[arg(long, conflicts_with = "prompt_file")]
+    pub prompt: Option<String>,
+
+    /// Load prompt content from a file on the host.
+    #[arg(long, conflicts_with = "prompt")]
+    pub prompt_file: Option<PathBuf>,
+
     /// Kill sandbox after N seconds (exit code 124, like GNU timeout).
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -61,6 +80,14 @@ pub struct RunArgs {
     /// Auto-remove sandbox (worktree + branch) after exit.
     #[arg(long)]
     pub ephemeral: bool,
+
+    /// Skip automatic guest-native environment refresh before launch.
+    ///
+    /// When a repo config defines durable caches plus a prepare flow, `abox run`
+    /// normally refreshes stale or missing warm state automatically. Use this
+    /// flag to bypass that refresh for a single run.
+    #[arg(long)]
+    pub no_warm: bool,
 
     /// Detach after launching the sandbox instead of blocking on the agent.
     ///
@@ -75,6 +102,13 @@ pub struct RunArgs {
     /// Everything after `--` is treated as the command.
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RunNetworkMode {
+    Safe,
+    Scoped,
+    Open,
 }
 
 /// Parse and validate a single `KEY=VALUE` environment variable string.
@@ -144,6 +178,7 @@ fn ensure_managed_agent_ready(command: &[String], config: &AboxConfig) -> Result
 
 pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
+    repo_root: &Path,
     orchestrator: &SandboxOrchestrator<W, V>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
@@ -156,13 +191,73 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
 
     // Parse and validate every --env KEY=VALUE argument. Fail fast on the
     // first invalid key so the user gets a clear error before any VM work.
-    let env_vars: Vec<(String, String)> =
+    let mut env_vars: Vec<(String, String)> =
         args.env_vars.iter().map(|s| parse_env_var(s)).collect::<Result<Vec<_>>>()?;
 
     ensure_managed_agent_ready(&args.command, orchestrator.config())?;
 
+    let requested_network = args.network.map(Into::into);
+    let resolved_project = match ProjectConfig::load(repo_root)? {
+        Some(config) => Some(config.resolve(repo_root)?),
+        None => None,
+    };
+    if let Some(resolved) = resolved_project.as_ref() {
+        ensure_project_trusted(
+            resolved,
+            policy.as_ref(),
+            &orchestrator.config().state_dir,
+            requested_network,
+        )?;
+        if args.template.is_some() && resolved.has_durable_caches() {
+            anyhow::bail!(
+                "Template restore is not yet supported with repo-managed durable caches.\n\n\
+                 Remove `--template` for this run, or remove [environment].caches from \
+                 .abox/project.toml for this repo."
+            );
+        }
+    }
+
+    let network_scope = match (resolved_project.as_ref(), requested_network) {
+        (Some(resolved), override_mode) => Some(resolved.effective_network_scope(override_mode)?),
+        (None, Some(mode)) => Some(standalone_network_scope(mode)?),
+        (None, None) => None,
+    };
+    let policy = if let Some(scope) = network_scope.as_ref() {
+        println!("Network mode: {}", scope.mode);
+        std::sync::Arc::new(policy.as_ref().with_network_scope(scope.clone())?)
+    } else {
+        policy
+    };
+
+    let cache_mount_dir = resolved_project.as_ref().and_then(|resolved| {
+        if resolved.has_durable_caches() {
+            env_vars.extend(resolved.cache_env_vars());
+            Some(project_cache_root(&orchestrator.config().state_dir, &resolved.project_id))
+        } else {
+            None
+        }
+    });
+
+    let resolved_prompt = resolve_prompt_input(&args, resolved_project.as_ref())?;
+    let command = adapt_command_for_prompt(&args.command, resolved_prompt.as_deref())?;
+
     if args.detach {
         return spawn_detached(&args, orchestrator);
+    }
+
+    if args.no_warm {
+        if resolved_project.as_ref().is_some_and(ResolvedProjectConfig::is_warmable) {
+            println!("Skipping guest-native environment refresh (--no-warm).");
+        }
+    } else {
+        ensure_warm_environment_for_run(
+            repo_root,
+            resolved_project.as_ref(),
+            orchestrator,
+            std::sync::Arc::clone(&policy),
+            std::sync::Arc::clone(&root_ca),
+        )
+        .await?;
     }
 
     let params = CreateSandboxParams {
@@ -173,7 +268,13 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         vcpus: args.cpus,
         user: args.user,
         env_vars,
-        command: args.command,
+        command,
+        resolved_prompt,
+        cache_mount_dir,
+        staged_prepare_script: None,
+        environment_profile: resolved_project
+            .as_ref()
+            .map_or(EnvironmentProfile::Base, |resolved| resolved.environment_profile),
         timeout_secs: args.timeout,
         ephemeral: args.ephemeral,
         ca_cert_pem: None, // Populated by run_sandbox from the loaded RootCa.
@@ -194,6 +295,114 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         eprintln!("\nSandbox '{}' exited with code {}.", args.task, exit_code);
         std::process::exit(exit_code);
     }
+}
+
+impl From<RunNetworkMode> for NetworkMode {
+    fn from(value: RunNetworkMode) -> Self {
+        match value {
+            RunNetworkMode::Safe => Self::Safe,
+            RunNetworkMode::Scoped => Self::Scoped,
+            RunNetworkMode::Open => Self::Open,
+        }
+    }
+}
+
+fn resolve_prompt_input(
+    args: &RunArgs,
+    resolved_project: Option<&ResolvedProjectConfig>,
+) -> Result<Option<String>> {
+    if let Some(prompt) = &args.prompt {
+        return Ok(Some(prompt.clone()));
+    }
+
+    if let Some(prompt_file) = &args.prompt_file {
+        let content = std::fs::read_to_string(prompt_file)
+            .with_context(|| format!("Reading prompt file {}", prompt_file.display()))?;
+        return Ok(Some(content));
+    }
+
+    if let Some(resolved_project) = resolved_project {
+        if let Some(bytes) = &resolved_project.default_prompt_bytes {
+            let prompt = String::from_utf8(bytes.clone()).context(
+                "Repo default prompt file is not valid UTF-8; prompt inputs must be UTF-8 text",
+            )?;
+            return Ok(Some(prompt));
+        }
+    }
+
+    Ok(None)
+}
+
+fn adapt_command_for_prompt(command: &[String], prompt: Option<&str>) -> Result<Vec<String>> {
+    let Some(_prompt) = prompt else {
+        return Ok(command.to_vec());
+    };
+
+    match command {
+        [single] if single == "codex" => {
+            Ok(vec!["sh".into(), "-lc".into(), "cat \"$ABOX_PROMPT_FILE\" | codex exec -".into()])
+        }
+        [single] if single == "claude" => Ok(vec![
+            "sh".into(),
+            "-lc".into(),
+            "PROMPT=$(cat \"$ABOX_PROMPT_FILE\")\nexec claude -p \"$PROMPT\"".into(),
+        ]),
+        [single, ..] if single == "codex" || single == "claude" => anyhow::bail!(
+            "Prompt input currently supports only bare `{single}` commands.\n\n\
+             Remove extra `{single}` arguments or omit --prompt/--prompt-file for this run."
+        ),
+        [other, ..] => anyhow::bail!(
+            "Prompt input is only supported for known managed agents right now.\n\n\
+             Command {other:?} cannot consume --prompt/--prompt-file yet."
+        ),
+        [] => anyhow::bail!("no agent command provided"),
+    }
+}
+
+fn ensure_project_trusted(
+    resolved: &ResolvedProjectConfig,
+    policy: &abox_core::policy::PolicyEngine,
+    state_dir: &Path,
+    requested_network: Option<NetworkMode>,
+) -> Result<()> {
+    if is_approved(state_dir, resolved) {
+        return Ok(());
+    }
+
+    let mut summary_lines = resolved.summary_lines(&policy.managed_egress_domains());
+    if let Some(mode) = requested_network {
+        if mode != resolved.default_network_mode {
+            summary_lines.push(format!("Current run overrides network mode to: {mode}"));
+        }
+    }
+
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!(
+            "Repo-owned abox behavior is not yet trusted for this fingerprint.\n\n\
+             Run `abox project explain` to review it, then `abox project trust` to approve it."
+        );
+    }
+
+    eprintln!("Repo-owned abox behavior is not yet trusted:");
+    for line in summary_lines {
+        eprintln!("  {line}");
+    }
+    eprint!("Trust this repo config and continue? [y/N]: ");
+    std::io::stderr().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let accepted = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !accepted {
+        anyhow::bail!(
+            "Launch cancelled. Run `abox project trust` after reviewing the repo config."
+        );
+    }
+
+    let record_path = record_approval(state_dir, resolved)?;
+    eprintln!("Trusted current repo behavior.");
+    eprintln!("Approval record: {}", record_path.display());
+    Ok(())
 }
 
 /// Re-exec the current binary without `--detach`, redirecting stdout/err
@@ -256,9 +465,12 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_managed_agent_ready, parse_env_var, selected_managed_agent, strip_detach_flag,
+        adapt_command_for_prompt, ensure_managed_agent_ready, parse_env_var, resolve_prompt_input,
+        selected_managed_agent, strip_detach_flag, RunArgs,
     };
     use abox_core::config::AboxConfig;
+    use abox_core::project::{EnvironmentProfile, NetworkMode, ResolvedProjectConfig};
+    use std::path::PathBuf;
 
     #[test]
     fn test_strip_detach_in_middle() {
@@ -285,6 +497,20 @@ mod tests {
     fn test_strip_detach_at_start() {
         let raw = vec!["--detach".to_string(), "run".to_string(), "--task".to_string()];
         assert_eq!(strip_detach_flag(&raw), vec!["run", "--task"]);
+    }
+
+    #[test]
+    fn test_strip_detach_preserves_no_warm_flag() {
+        let raw = vec![
+            "run".to_string(),
+            "--task".to_string(),
+            "x".to_string(),
+            "--no-warm".to_string(),
+            "--detach".to_string(),
+            "--".to_string(),
+            "codex".to_string(),
+        ];
+        assert_eq!(strip_detach_flag(&raw), vec!["run", "--task", "x", "--no-warm", "--", "codex"]);
     }
 
     // ── parse_env_var tests ───────────────────────────────────────────────
@@ -379,5 +605,67 @@ mod tests {
             Some(tmp.path().to_string_lossy().to_string());
 
         assert!(ensure_managed_agent_ready(&["codex".into()], &config).is_ok());
+    }
+
+    #[test]
+    fn adapt_prompt_for_bare_codex_uses_exec_stdin() {
+        let adapted = adapt_command_for_prompt(&["codex".into()], Some("prompt")).unwrap();
+        assert_eq!(adapted, vec!["sh", "-lc", "cat \"$ABOX_PROMPT_FILE\" | codex exec -"]);
+    }
+
+    #[test]
+    fn adapt_prompt_for_bare_claude_uses_print_mode() {
+        let adapted = adapt_command_for_prompt(&["claude".into()], Some("prompt")).unwrap();
+        assert_eq!(
+            adapted,
+            vec!["sh", "-lc", "PROMPT=$(cat \"$ABOX_PROMPT_FILE\")\nexec claude -p \"$PROMPT\"",]
+        );
+    }
+
+    #[test]
+    fn adapt_prompt_rejects_extra_managed_agent_args() {
+        let err = adapt_command_for_prompt(&["codex".into(), "--model".into()], Some("prompt"))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("bare `codex`"));
+    }
+
+    #[test]
+    fn resolve_prompt_uses_repo_default_when_cli_prompt_missing() {
+        let args = RunArgs {
+            task: "x".into(),
+            base: "main".into(),
+            template: None,
+            memory: None,
+            cpus: None,
+            user: None,
+            env_vars: vec![],
+            network: None,
+            prompt: None,
+            prompt_file: None,
+            timeout: None,
+            ephemeral: false,
+            no_warm: false,
+            detach: false,
+            command: vec!["codex".into()],
+        };
+        let resolved = ResolvedProjectConfig {
+            config_path: PathBuf::from(".abox/project.toml"),
+            project_id: "repo".into(),
+            default_network_mode: NetworkMode::Safe,
+            bundles: vec![],
+            domains: vec![],
+            environment_profile: EnvironmentProfile::Base,
+            caches: vec![],
+            prepare_path: None,
+            prepare_bytes: None,
+            watch_paths: vec![],
+            default_prompt_path: Some(PathBuf::from(".abox/prompt.md")),
+            default_prompt_bytes: Some(b"hello from repo prompt".to_vec()),
+            notes: vec![],
+            approval_fingerprint: "abc".into(),
+        };
+
+        let prompt = resolve_prompt_input(&args, Some(&resolved)).unwrap();
+        assert_eq!(prompt.as_deref(), Some("hello from repo prompt"));
     }
 }

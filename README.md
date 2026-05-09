@@ -36,7 +36,7 @@ When running multiple autonomous agents on a single codebase, you face three pro
 
 ### Installation
 
-> **Note:** `v0.2.0` is released, but source install remains the recommended
+> **Note:** `v0.3.2` is released, but source install remains the recommended
 > path while the installer and release packaging continue to harden.
 
 **From source** (recommended):
@@ -52,6 +52,9 @@ export PATH="$PWD/target/release:$PATH"
 
 abox init             # guided first-run setup: downloads VM stack,
                       # writes config, installs default policy
+
+# Optionally install additional official guest profiles up front
+abox init --profile node --profile python --profile rust
 ```
 
 Or run the steps individually:
@@ -65,6 +68,16 @@ abox doctor           # verify the environment before first use
 The guest rootfs is a 768 MiB sparse Alpine image that includes bash,
 Node.js/npm, Python 3, `su-exec`, the system CA bundle, `abox-shim`, and
 pinned Claude Code / Codex CLIs.
+
+Official guest profiles are also available for repo-owned workflows:
+
+- `base`
+- `node`
+- `python`
+- `rust`
+
+These install as separate rootfs images under `~/.abox/vm/profiles/` and are
+selected by repo config, not by raw image path.
 
 `virtiofsd` also needs `cap_sys_admin+ep` on the installed runtime binary
 before the first sandbox boot. `abox init` now checks that directly, and
@@ -133,42 +146,79 @@ namespace sandbox.
    abox run --task fix-auth --base main -- claude
    ```
 
-3. **Start with runtime controls:**
+3. **Set up a repo-owned workflow with network intent and a guest profile:**
+   ```bash
+   abox project init --profile node
+
+   cat > .abox/project.toml <<'EOF'
+   [network]
+   mode = "scoped"
+   bundles = ["npm-public"]
+
+   [environment]
+   profile = "node"
+   caches = ["npm"]
+   prepare = ".abox/prepare.sh"
+   EOF
+
+   cat > .abox/prepare.sh <<'EOF'
+   #!/bin/sh
+   set -e
+   npm ci --ignore-scripts --no-fund --no-audit
+   EOF
+   chmod +x .abox/prepare.sh
+
+   abox project validate
+   abox project trust
+   abox env warm
+   ```
+
+4. **Launch a known managed agent with a prompt file:**
+   ```bash
+   abox run --task fix-auth --prompt-file prompts/fix-auth.md -- codex
+   ```
+
+5. **Start with runtime controls:**
    ```bash
    abox run --task fix-auth --timeout 300 --ephemeral -- claude
    # --timeout N: kill after N seconds (exit code 124)
    # --ephemeral: auto-remove sandbox after exit
    ```
 
-4. **Fast start from a template (snapshot restore, ~100ms):**
+6. **Override the repo's network mode for a single run:**
+   ```bash
+   abox run --task docs-scan --network open --prompt-file prompts/research.md -- claude
+   ```
+
+7. **Fast start from a template (snapshot restore, ~100ms):**
    ```bash
    abox template create --name base --from running-sandbox
    abox run --template base --task fix-auth -- claude
    ```
 
-5. **List running sandboxes:**
+8. **List running sandboxes:**
    ```bash
    abox list
    ```
 
-6. **Check divergence across agents:**
+9. **Check divergence across agents:**
    ```bash
    abox divergence
    ```
 
-7. **Merge a completed task:**
+10. **Merge a completed task:**
    ```bash
    abox merge fix-auth
    ```
 
-8. **Manage the CA (for HTTPS credential injection):**
+11. **Manage the CA (for HTTPS credential injection):**
    ```bash
    abox ca show      # fingerprint + expiry
    abox ca rotate    # regenerate CA + rebuild rootfs
    abox ca path      # print CA directory
    ```
 
-9. **Enable managed auth providers (Claude Code, Codex):**
+12. **Enable managed auth providers (Claude Code, Codex):**
    ```bash
    # Edit ~/.abox/config.toml and add:
    # [auth.providers.claude]
@@ -179,6 +229,15 @@ namespace sandbox.
    #
    # See docs/explainer.md Section 8 and docs/credential-scoping.md.
    ```
+
+For profile-backed repo environments:
+
+- `node` is validated for `npm`
+- `python` is validated for `uv` / `pip3`, and prepare flows should prefer
+  `uv`-managed virtual environments over `uv pip install --system`
+- `rust` is validated for `cargo`, but the current guest toolchain is
+  `rustc/cargo 1.76.0`; repos requiring Cargo edition 2024 or Cargo.lock v4
+  need a newer guest toolchain before warming
 
 ## Development
 

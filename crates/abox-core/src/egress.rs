@@ -5,7 +5,7 @@
 //! spawned by [`crate::sandbox::SandboxOrchestrator::run_sandbox()`].
 
 use crate::ca::RootCa;
-use crate::policy::{domain_matches, PolicyEngine};
+use crate::policy::{domain_matches, EgressTransport, PolicyEngine};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -28,7 +28,7 @@ pub async fn handle_request(
     req: Request<hyper::body::Incoming>,
     policy: &PolicyEngine,
     root_ca: Arc<RootCa>,
-    bypass_tls: &[String],
+    _bypass_tls: &[String],
     audit_fn: impl Fn(&str, &str, i32) + Send + 'static,
 ) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     if req.method() == Method::CONNECT {
@@ -43,9 +43,9 @@ pub async fn handle_request(
                 .unwrap());
         };
 
-        match policy.evaluate_egress(&domain) {
-            Ok(rule_opt) => {
-                if let Some(rule) = &rule_opt {
+        match policy.evaluate_egress_request(&domain, port) {
+            Ok(evaluation) => {
+                if let Some(rule) = &evaluation.rule {
                     tracing::debug!(
                         domain = %domain,
                         inject_header = %rule.inject_header,
@@ -54,26 +54,34 @@ pub async fn handle_request(
                 }
                 audit_fn(&domain, "allowed", 200);
 
-                let should_bypass = is_tls_bypassed(&domain, bypass_tls);
-                let rule_opt = rule_opt.cloned();
+                let rule_opt = evaluation.rule.cloned();
                 let root_ca = Arc::clone(&root_ca);
+                let transport = evaluation.transport;
 
                 tokio::spawn(async move {
                     match hyper::upgrade::on(req).await {
-                        Ok(upgraded) => {
-                            if should_bypass {
+                        Ok(upgraded) => match transport {
+                            EgressTransport::Passthrough => {
                                 handle_passthrough(upgraded, &domain, port).await;
-                            } else if let Err(e) =
-                                handle_mitm(upgraded, &domain, port, &root_ca, rule_opt.as_ref())
-                                    .await
-                            {
-                                tracing::error!(
-                                    domain = %domain,
-                                    error = %e,
-                                    "MITM proxy error"
-                                );
                             }
-                        }
+                            EgressTransport::Mitm => {
+                                if let Err(e) = handle_mitm(
+                                    upgraded,
+                                    &domain,
+                                    port,
+                                    &root_ca,
+                                    rule_opt.as_ref(),
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        domain = %domain,
+                                        error = %e,
+                                        "MITM proxy error"
+                                    );
+                                }
+                            }
+                        },
                         Err(e) => {
                             tracing::error!(error = %e, "Upgrade failed");
                         }

@@ -63,6 +63,21 @@ pub struct InitArgs {
     /// Non-interactive mode: automatically answer yes to all prompts.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Install one or more additional official guest profiles.
+    ///
+    /// `base` is always installed by default. Repeat this flag to add
+    /// profiles such as `node`, `python`, or `rust`.
+    #[arg(long = "profile", value_enum)]
+    pub profiles: Vec<InitProfileArg>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum InitProfileArg {
+    Base,
+    Node,
+    Python,
+    Rust,
 }
 
 pub fn execute(args: &InitArgs) -> Result<()> {
@@ -81,7 +96,7 @@ pub fn execute(args: &InitArgs) -> Result<()> {
     // ── Step 2: VM artifacts ─────────────────────────────────────────────────
     print_step(2, "Checking VM artifacts");
     let vm_dir = default_state_dir().join("vm");
-    ensure_vm_artifacts(&vm_dir, args.yes)?;
+    ensure_vm_artifacts(&vm_dir, &args.profiles, args.yes)?;
 
     // ── Step 3: virtiofsd sandbox capability ────────────────────────────────
     print_step(3, "Checking virtiofsd sandbox permissions");
@@ -153,28 +168,64 @@ fn check_kvm() -> Result<()> {
     }
 }
 
-fn ensure_vm_artifacts(vm_dir: &Path, yes: bool) -> Result<()> {
+fn ensure_vm_artifacts(
+    vm_dir: &Path,
+    requested_profiles: &[InitProfileArg],
+    yes: bool,
+) -> Result<()> {
     let required = ["cloud-hypervisor", "virtiofsd", "vmlinux", "rootfs.raw"];
     let missing: Vec<&str> =
         required.iter().copied().filter(|f| !vm_dir.join(f).exists()).collect();
+    let missing_profiles: Vec<String> = requested_profiles
+        .iter()
+        .filter_map(|profile| {
+            let name = profile.as_str();
+            if name == "base" {
+                return None;
+            }
+            let path = vm_dir.join("profiles").join(name).join("rootfs.raw");
+            if path.exists() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .collect();
 
-    if missing.is_empty() {
+    if missing.is_empty() && missing_profiles.is_empty() {
         print_ok("VM artifacts already present");
         return Ok(());
     }
 
-    println!("    Missing artifacts: {}", missing.join(", "));
+    if !missing.is_empty() {
+        println!("    Missing artifacts: {}", missing.join(", "));
+    }
+    if !missing_profiles.is_empty() {
+        println!("    Missing profile images: {}", missing_profiles.join(", "));
+    }
 
     // Find the bootstrap script relative to the running binary or via a
     // well-known location. Fall back to asking the user to run it manually.
     let bootstrap = find_bootstrap_script();
 
     if let Some(script) = bootstrap {
-        print_action(&format!("Running {} --yes --no-symlink", script.display()));
-        let status = std::process::Command::new("bash")
-            .arg(&script)
-            .arg("--yes")
-            .arg("--no-symlink")
+        let mut command = std::process::Command::new("bash");
+        command.arg(&script).arg("--yes").arg("--no-symlink");
+        for profile in requested_profiles {
+            if profile.as_str() != "base" {
+                command.arg("--profile").arg(profile.as_str());
+            }
+        }
+        print_action(&format!(
+            "Running {} --yes --no-symlink{}",
+            script.display(),
+            requested_profiles
+                .iter()
+                .filter(|profile| profile.as_str() != "base")
+                .map(|profile| format!(" --profile {}", profile.as_str()))
+                .collect::<String>()
+        ));
+        let status = command
             .env("BOOTSTRAP_YES", if yes { "1" } else { "0" })
             .status()
             .with_context(|| format!("Failed to run {}", script.display()))?;
@@ -198,6 +249,17 @@ fn ensure_vm_artifacts(vm_dir: &Path, yes: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+impl InitProfileArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Node => "node",
+            Self::Python => "python",
+            Self::Rust => "rust",
+        }
+    }
 }
 
 fn ensure_virtiofsd_caps(vm_dir: &Path, allow_sudo_prompt: bool) -> Result<()> {

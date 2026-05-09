@@ -280,6 +280,11 @@ impl AboxConfig {
         self.state_dir.join("logs")
     }
 
+    /// Return the trust directory: `<state_dir>/trust/`.
+    pub fn trust_dir(&self) -> PathBuf {
+        self.state_dir.join("trust")
+    }
+
     /// Return the runtime directory for sockets and PIDs.
     ///
     /// If `runtime_dir` is set in config, use it. Otherwise default to
@@ -296,6 +301,7 @@ impl AboxConfig {
         std::fs::create_dir_all(self.worktrees_dir())?;
         std::fs::create_dir_all(self.templates_dir())?;
         std::fs::create_dir_all(self.logs_dir())?;
+        std::fs::create_dir_all(self.trust_dir())?;
         std::fs::create_dir_all(self.runtime_dir())?;
         std::fs::create_dir_all(&self.proxy.policy_dir)?;
         Ok(())

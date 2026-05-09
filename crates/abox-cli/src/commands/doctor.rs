@@ -6,6 +6,7 @@
 use abox_core::config::{
     default_claude_host_credential_file, default_codex_host_credential_file, AboxConfig,
 };
+use abox_core::project::{image_path_for_profile, EnvironmentProfile, ProjectConfig};
 use abox_core::util::{max_task_id_len_for_runtime_dir, TASK_ID_MAX_LEN};
 use anyhow::Result;
 use std::path::Path;
@@ -130,7 +131,7 @@ impl Check {
 
 /// Run all doctor checks and print a summary. Returns `Ok(true)` if all
 /// checks pass (or only warnings), `Ok(false)` if any check fails.
-pub fn execute(config: &AboxConfig) -> Result<bool> {
+pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
     let version = env!("CARGO_PKG_VERSION");
     println!(
         "{}  {}",
@@ -193,6 +194,10 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
     print_section("Environment");
     let env_check = check_local_bin_on_path(&vm_dir);
     env_check.print();
+    let installed_profiles = check_installed_guest_profiles(config);
+    installed_profiles.print();
+    let repo_profile = check_repo_requested_profile(config, repo_root);
+    repo_profile.print();
 
     // ── Summary ──────────────────────────────────────────────────────────────
     let all_checks: Vec<&Check> = std::iter::once(&kvm)
@@ -200,6 +205,8 @@ pub fn execute(config: &AboxConfig) -> Result<bool> {
         .chain(cfg_checks.iter())
         .chain(auth_checks.iter())
         .chain(std::iter::once(&env_check))
+        .chain(std::iter::once(&installed_profiles))
+        .chain(std::iter::once(&repo_profile))
         .collect();
 
     let failures = all_checks.iter().filter(|c| c.is_fail()).count();
@@ -328,6 +335,108 @@ fn check_local_bin_on_path(vm_dir: &Path) -> Check {
         Check::warn(
             "cloud-hypervisor reachable on PATH",
             "VM artifacts not yet installed — run 'abox init' first.",
+        )
+    }
+}
+
+fn installed_profiles(config: &AboxConfig) -> Vec<EnvironmentProfile> {
+    let mut profiles = Vec::new();
+    for profile in [
+        EnvironmentProfile::Base,
+        EnvironmentProfile::Node,
+        EnvironmentProfile::Python,
+        EnvironmentProfile::Rust,
+    ] {
+        if image_path_for_profile(config, profile).exists() {
+            profiles.push(profile);
+        }
+    }
+    profiles
+}
+
+fn check_installed_guest_profiles(config: &AboxConfig) -> Check {
+    let installed = installed_profiles(config);
+    let label = "Installed guest profiles";
+    if installed.is_empty() {
+        return Check::fail(
+            label,
+            "No guest profile images are installed.\nRun 'abox init' to bootstrap the base image."
+                .to_string(),
+        );
+    }
+
+    let installed_names = installed.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    let missing_names = [
+        EnvironmentProfile::Base,
+        EnvironmentProfile::Node,
+        EnvironmentProfile::Python,
+        EnvironmentProfile::Rust,
+    ]
+    .into_iter()
+    .filter(|profile| !installed.contains(profile))
+    .map(|profile| profile.to_string())
+    .collect::<Vec<_>>();
+
+    let detail = if missing_names.is_empty() {
+        format!("installed: {installed_names}")
+    } else {
+        format!(
+            "installed: {installed_names}\noptional profiles not yet installed: {}",
+            missing_names.join(", ")
+        )
+    };
+    Check::ok_with(label, detail)
+}
+
+fn check_repo_requested_profile(config: &AboxConfig, repo_root: &Path) -> Check {
+    let label = "Current repo environment profile";
+    let config_path = ProjectConfig::default_path(repo_root);
+    let loaded = match ProjectConfig::load(repo_root) {
+        Ok(config) => config,
+        Err(err) => {
+            return Check::warn(
+                label,
+                format!(
+                    "Failed to load {}.\nRun `abox project validate` for details.\n{err:#}",
+                    config_path.display()
+                ),
+            )
+        }
+    };
+
+    let Some(project) = loaded else {
+        return Check::ok_with(label, "no repo config found; base profile will be used");
+    };
+
+    let resolved = match project.resolve(repo_root) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            return Check::warn(
+                label,
+                format!(
+                    "Failed to resolve {}.\nRun `abox project validate` for details.\n{err:#}",
+                    config_path.display()
+                ),
+            )
+        }
+    };
+
+    let image_path = image_path_for_profile(config, resolved.environment_profile);
+    if image_path.exists() {
+        Check::ok_with(
+            label,
+            format!("{} ({})", resolved.environment_profile, image_path.display()),
+        )
+    } else {
+        Check::fail(
+            label,
+            format!(
+                "Repo requests '{}' but the image is missing at {}.\n\
+                 Install it with `abox init --profile {}`.",
+                resolved.environment_profile,
+                image_path.display(),
+                resolved.environment_profile
+            ),
         )
     }
 }

@@ -7,4 +7,5 @@ RUN apk add --no-cache \
     findutils \
     nodejs \
     npm \
-    python3
+    python3 \
+    py3-pip

@@ -40,7 +40,7 @@ mount -t devtmpfs dev /dev 2>/dev/null || true
 # the HTTPS egress proxy bridge on TCP port 18443).
 ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
 
-mkdir -p /run "$ABOX_TMPDIR" /workspace /abox-meta
+mkdir -p /run "$ABOX_TMPDIR" /workspace /abox-meta /abox-cache
 
 # Dedicated guest scratch area for the unprivileged agent user.
 # This is VM-local only: not virtiofs-backed, not under /home/abox, and
@@ -75,6 +75,11 @@ mount -t virtiofs -o nodev,nosuid workspace /workspace 2>/dev/null || \
 # or setuid binaries.
 mount -t virtiofs -o ro,nodev,nosuid aboxmeta /abox-meta 2>/dev/null || \
     boot_fail 72 "failed to mount aboxmeta virtiofs"
+
+# Optional durable project cache share. Not every sandbox has one, so failure
+# is non-fatal here; callers that rely on cache persistence will surface that
+# through host-side status/warm flows.
+mount -t virtiofs -o nodev,nosuid aboxcache /abox-cache 2>/dev/null || true
 
 # ── Inject the host-generated abox MITM CA into the guest trust store ──
 # The rootfs ships with only the Mozilla CA set; the per-user abox CA is

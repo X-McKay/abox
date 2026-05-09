@@ -84,8 +84,11 @@ struct RunningVm {
     virtiofsd_child: Child,
     meta_virtiofsd_child: Child,
     status_virtiofsd_child: Child,
+    cache_virtiofsd_child: Option<Child>,
     meta_dir: PathBuf,
     status_dir: PathBuf,
+    #[allow(dead_code)]
+    cache_dir: Option<PathBuf>,
     api_socket: PathBuf,
     console_socket: PathBuf,
     /// Actual virtiofsd socket paths (may differ from standard naming in restore mode).
@@ -175,6 +178,13 @@ impl VmPort for CloudHypervisorAdapter {
     async fn start(&self, config: VmConfig) -> Result<VmInfo> {
         validate_task_id_for_runtime_dir(&config.id, &self.runtime_dir)
             .map_err(anyhow::Error::msg)?;
+        if matches!(config.start_mode, StartMode::Restore { .. })
+            && (config.cache_mount_dir.is_some() || config.staged_prepare_script.is_some())
+        {
+            bail!(
+                "template restore is not yet supported for cache-backed or prepare-backed project environments"
+            );
+        }
 
         let api_socket = self.runtime_dir.join(format!("ch-api-{}.sock", config.id));
         // cloud-hypervisor v44 supports file= for console but not socket=.
@@ -209,6 +219,10 @@ impl VmPort for CloudHypervisorAdapter {
                 (self.runtime_dir.join(ws), self.runtime_dir.join(mt), self.runtime_dir.join(st))
             }
         };
+        let cache_socket = config
+            .cache_mount_dir
+            .as_ref()
+            .map(|_| self.runtime_dir.join(format!("vfs-cache-{}.sock", config.id)));
 
         let t_meta = std::time::Instant::now();
 
@@ -230,6 +244,27 @@ impl VmPort for CloudHypervisorAdapter {
         };
         meta.stage(&meta_dir)
             .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
+
+        if let Some(prompt) = &config.resolved_prompt {
+            let prompt_path = meta_dir.join("prompt.md");
+            std::fs::write(&prompt_path, prompt).with_context(|| {
+                format!("Failed to write prompt file {}", prompt_path.display())
+            })?;
+        }
+        if let Some(prepare_script) = &config.staged_prepare_script {
+            let prepare_path = meta_dir.join("prepare.sh");
+            std::fs::write(&prepare_path, prepare_script).with_context(|| {
+                format!("Failed to write prepare script {}", prepare_path.display())
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&prepare_path, std::fs::Permissions::from_mode(0o755))
+                    .with_context(|| {
+                        format!("Failed to chmod prepare script {}", prepare_path.display())
+                    })?;
+            }
+        }
 
         // Write credential file contents into meta_dir/credentials/.
         if !config.credential_files.is_empty() {
@@ -260,6 +295,10 @@ impl VmPort for CloudHypervisorAdapter {
         // Pre-create an empty exit-code file so virtiofsd has something to serve
         // and the guest can truncate it without permission errors.
         let _ = std::fs::write(status_dir.join("exit-code"), "");
+        if let Some(cache_dir) = &config.cache_mount_dir {
+            std::fs::create_dir_all(cache_dir)
+                .with_context(|| format!("Failed to create cache dir {}", cache_dir.display()))?;
+        }
 
         tracing::info!(
             sandbox_id = %config.id,
@@ -270,6 +309,9 @@ impl VmPort for CloudHypervisorAdapter {
         // Clean up any stale sockets/files from a previous run
         for sock in [&virtiofs_socket, &meta_socket, &status_socket, &api_socket, &vsock_socket] {
             let _ = std::fs::remove_file(sock);
+        }
+        if let Some(cache_socket) = &cache_socket {
+            let _ = std::fs::remove_file(cache_socket);
         }
         let _ = std::fs::remove_file(&console_socket);
 
@@ -317,16 +359,36 @@ impl VmPort for CloudHypervisorAdapter {
         }
         let status_virtiofsd_child =
             status_cmd.kill_on_drop(true).spawn().context("Failed to start status virtiofsd")?;
+        let cache_virtiofsd_child = if let (Some(cache_socket), Some(cache_dir)) =
+            (cache_socket.as_ref(), config.cache_mount_dir.as_ref())
+        {
+            let cache_args = workspace_virtiofsd_args(cache_socket, cache_dir, uid, gid);
+            let mut cache_cmd = Command::new(self.resolve_binary("virtiofsd")?);
+            for a in &cache_args {
+                cache_cmd.arg(a);
+            }
+            Some(cache_cmd.kill_on_drop(true).spawn().context("Failed to start cache virtiofsd")?)
+        } else {
+            None
+        };
 
         // Wait for all three sockets concurrently instead of sequentially.
-        let (ws_res, meta_res, status_res) = tokio::join!(
+        let cache_wait = async {
+            if let Some(cache_socket) = cache_socket.as_ref() {
+                Self::wait_for_socket(cache_socket, 5000).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        let (ws_res, meta_res, status_res, cache_res) = tokio::join!(
             Self::wait_for_socket(&virtiofs_socket, 5000),
             Self::wait_for_socket(&meta_socket, 5000),
             Self::wait_for_socket(&status_socket, 5000),
+            cache_wait,
         );
         ws_res.context("workspace virtiofsd socket did not appear within 5 seconds")?;
         meta_res.context("meta virtiofsd socket did not appear within 5 seconds")?;
         status_res.context("status virtiofsd socket did not appear within 5 seconds")?;
+        cache_res.context("cache virtiofsd socket did not appear within 5 seconds")?;
 
         tracing::info!(
             sandbox_id = %config.id,
@@ -370,6 +432,9 @@ impl VmPort for CloudHypervisorAdapter {
                         "tag=aboxstatus,socket={},num_queues=1,queue_size=256",
                         status_socket.display()
                     ))
+                    .args(cache_socket.iter().map(|socket| {
+                        format!("tag=aboxcache,socket={},num_queues=1,queue_size=256", socket.display())
+                    }))
                     .arg("--vsock")
                     .arg(format!("cid=3,socket={}", vsock_socket.display()))
                     .arg("--console")
@@ -430,11 +495,19 @@ impl VmPort for CloudHypervisorAdapter {
             virtiofsd_child,
             meta_virtiofsd_child,
             status_virtiofsd_child,
+            cache_virtiofsd_child,
             meta_dir: meta_dir.clone(),
             status_dir: status_dir.clone(),
+            cache_dir: config.cache_mount_dir.clone(),
             api_socket: api_socket.clone(),
             console_socket: console_socket.clone(),
-            virtiofs_sockets: vec![virtiofs_socket, meta_socket, status_socket],
+            virtiofs_sockets: {
+                let mut sockets = vec![virtiofs_socket, meta_socket, status_socket];
+                if let Some(cache_socket) = cache_socket {
+                    sockets.push(cache_socket);
+                }
+                sockets
+            },
             config,
         };
 
@@ -452,6 +525,9 @@ impl VmPort for CloudHypervisorAdapter {
             let _ = vm.virtiofsd_child.kill().await;
             let _ = vm.meta_virtiofsd_child.kill().await;
             let _ = vm.status_virtiofsd_child.kill().await;
+            if let Some(cache_virtiofsd_child) = vm.cache_virtiofsd_child.as_mut() {
+                let _ = cache_virtiofsd_child.kill().await;
+            }
 
             // Clean up all runtime files (sockets, console log, meta dir,
             // and the status dir — this is an explicit teardown).

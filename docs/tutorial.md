@@ -88,6 +88,13 @@ To verify your environment is ready, run:
 abox doctor
 ```
 
+If you already know you want the official ecosystem profiles too, install them
+up front:
+
+```bash
+abox init --profile node --profile python --profile rust
+```
+
 ---
 
 ## 5. Your first sandbox
@@ -189,7 +196,65 @@ abox list
 
 ---
 
-## 8. What just happened?
+## 8. Repo-owned workflow
+
+The first sandbox above used only host config. For a repo you plan to work in
+repeatedly, add repo-owned behavior explicitly:
+
+```bash
+mkdir -p .abox prompts
+
+cat > .abox/project.toml <<'EOF'
+[network]
+mode = "scoped"
+bundles = ["npm-public"]
+
+[environment]
+profile = "node"
+caches = ["npm"]
+prepare = ".abox/prepare.sh"
+watch = ["package-lock.json"]
+
+[agent]
+default_prompt_file = "prompts/fix-auth.md"
+EOF
+
+cat > .abox/prepare.sh <<'EOF'
+#!/bin/sh
+set -e
+npm ci --ignore-scripts --no-fund --no-audit
+EOF
+chmod +x .abox/prepare.sh
+
+echo "Review the auth flow and suggest a fix." > prompts/fix-auth.md
+
+abox project validate
+abox project trust
+abox env warm
+abox run --task fix-auth -- codex
+```
+
+That flow gives you:
+
+1. A repo-owned network mode (`safe`, `scoped`, or `open`)
+2. An official guest profile (`base`, `node`, `python`, or `rust`)
+3. Durable per-project caches
+4. A repeatable prepare step that runs inside the real guest
+5. First-class prompt-file support for bare `claude` and `codex`
+
+Two profile-specific notes from the real validation matrix:
+
+- Python prepare flows should prefer a virtualenv-based `uv` workflow rather
+  than `uv pip install --system`, because the guest Python is intentionally
+  externally managed.
+- The current `rust` guest profile ships `rustc/cargo 1.76.0`. Repos that
+  require Cargo edition 2024 or Cargo.lock v4 need a newer guest toolchain
+  before `abox env warm` will succeed.
+
+Use `abox project explain` at any time to review the effective repo behavior
+that was approved, including the selected profile and widened network scope.
+
+## 9. What just happened?
 
 In about 10 minutes you:
 
