@@ -69,6 +69,8 @@ For the same diff, map touched code paths to docs that may need updating (see [`
 
 If the diff touches `justfile`, `.github/workflows/**`, `scripts/release.sh`, or `scripts/pre_release.sh`, verify that **this same PR** also updates `AGENTS.md` and any affected skill under `.claude/skills/`. If not, refuse to mark the PR ready; add the missing updates first.
 
+If the diff changes GitHub-hosted workflow action refs, also confirm any first-party `actions/*` upgrades move to Node 24-compatible major versions so the workflow does not keep shipping known runtime deprecation warnings.
+
 ### 6. Conventional-commit message quality
 
 Read the last N commit subject lines (`git log main..HEAD --format='%s'`). For each, ask: "If this appeared verbatim in a release-notes bullet, would a user understand what changed?" If not, propose amended messages before the PR is opened.
