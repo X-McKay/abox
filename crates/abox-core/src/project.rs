@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fmt::Write as _;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -487,40 +488,16 @@ impl ProjectConfig {
                 validate_rust_profile_repo_compatibility(repo_root)?;
             }
             if let Some(prepare) = &environment.prepare {
-                anyhow::ensure!(
-                    !prepare.is_absolute(),
-                    "environment.prepare must be repo-relative, not absolute ({})",
-                    prepare.display()
-                );
-                let path = repo_root.join(prepare);
-                anyhow::ensure!(
-                    path.exists(),
-                    "environment.prepare points to missing path {}",
-                    path.display()
-                );
+                ensure_repo_owned_path(repo_root, prepare, "environment.prepare", true)?;
             }
             for watch in &environment.watch {
-                anyhow::ensure!(
-                    !watch.is_absolute(),
-                    "environment.watch entries must be repo-relative, not absolute ({})",
-                    watch.display()
-                );
+                ensure_repo_owned_path(repo_root, watch, "environment.watch", false)?;
             }
         }
 
         if let Some(agent) = &self.agent {
             if let Some(prompt_file) = &agent.default_prompt_file {
-                anyhow::ensure!(
-                    !prompt_file.is_absolute(),
-                    "agent.default_prompt_file must be repo-relative, not absolute ({})",
-                    prompt_file.display()
-                );
-                let path = repo_root.join(prompt_file);
-                anyhow::ensure!(
-                    path.exists(),
-                    "agent.default_prompt_file points to missing path {}",
-                    path.display()
-                );
+                ensure_repo_owned_path(repo_root, prompt_file, "agent.default_prompt_file", true)?;
             }
         }
 
@@ -687,7 +664,8 @@ impl ResolvedProjectConfig {
         for watch_path in &self.watch_paths {
             hasher.update(b"\nwatch-path:");
             hasher.update(watch_path.display().to_string().as_bytes());
-            let absolute = repo_root.join(watch_path);
+            let absolute =
+                ensure_repo_owned_path(repo_root, watch_path, "environment.watch", false)?;
             if absolute.exists() {
                 let bytes = std::fs::read(&absolute)
                     .with_context(|| format!("Reading watch file {}", absolute.display()))?;
@@ -1147,9 +1125,65 @@ fn read_repo_file_bytes(
     relative_path: &Path,
     field_name: &str,
 ) -> Result<Vec<u8>> {
-    let path = repo_root.join(relative_path);
+    let path = ensure_repo_owned_path(repo_root, relative_path, field_name, true)?;
     std::fs::read(&path)
         .with_context(|| format!("Reading {} referenced by {}", path.display(), field_name))
+}
+
+fn ensure_repo_owned_path(
+    repo_root: &Path,
+    relative_path: &Path,
+    field_name: &str,
+    require_exists: bool,
+) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !relative_path.is_absolute(),
+        "{field_name} must be repo-relative, not absolute ({})",
+        relative_path.display()
+    );
+    anyhow::ensure!(
+        !relative_path
+            .components()
+            .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir)),
+        "{field_name} must be repo-relative, not absolute ({})",
+        relative_path.display()
+    );
+    anyhow::ensure!(
+        !relative_path.components().any(|component| matches!(component, Component::ParentDir)),
+        "{field_name} must stay within repo root {} (got {})",
+        repo_root.display(),
+        relative_path.display()
+    );
+
+    let repo_root = repo_root
+        .canonicalize()
+        .with_context(|| format!("Resolving repo root {}", repo_root.display()))?;
+    let candidate = repo_root.join(relative_path);
+
+    if require_exists {
+        anyhow::ensure!(
+            candidate.exists(),
+            "{field_name} points to missing path {}",
+            candidate.display()
+        );
+    }
+
+    let boundary_probe = existing_boundary_probe(&candidate).unwrap_or_else(|| repo_root.clone());
+    let canonical_probe = boundary_probe
+        .canonicalize()
+        .with_context(|| format!("Resolving {}", boundary_probe.display()))?;
+    anyhow::ensure!(
+        canonical_probe.starts_with(&repo_root),
+        "{field_name} must stay within repo root {} (got {})",
+        repo_root.display(),
+        relative_path.display()
+    );
+
+    Ok(candidate)
+}
+
+fn existing_boundary_probe(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find(|ancestor| ancestor.exists()).map(Path::to_path_buf)
 }
 
 fn hash_hex(bytes: &[u8]) -> String {
@@ -1428,6 +1462,78 @@ mod tests {
         let second = config.resolve(repo_root).unwrap();
 
         assert_ne!(first.approval_fingerprint, second.approval_fingerprint);
+    }
+
+    #[test]
+    fn prompt_file_must_stay_within_repo_root() {
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join(".abox")).expect("create .abox");
+        std::fs::write(temp.path().join("outside-secret.txt"), "secret\n").expect("write secret");
+
+        let config = ProjectConfig {
+            project: None,
+            network: NetworkConfig::default(),
+            environment: None,
+            agent: Some(AgentConfig {
+                default_prompt_file: Some(PathBuf::from("../outside-secret.txt")),
+            }),
+        };
+
+        let err = config.validate(&repo_root).expect_err("prompt path should be rejected");
+        assert!(format!("{err:#}").contains("must stay within repo root"));
+    }
+
+    #[test]
+    fn prepare_script_symlink_cannot_escape_repo_root() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let temp = tempdir().expect("tempdir");
+            let repo_root = temp.path().join("repo");
+            let outside = temp.path().join("outside-prepare.sh");
+            std::fs::create_dir_all(repo_root.join(".abox")).expect("create .abox");
+            std::fs::write(&outside, "#!/bin/sh\necho outside\n").expect("write prepare");
+            symlink(&outside, repo_root.join(".abox/prepare.sh")).expect("create symlink");
+
+            let config = ProjectConfig {
+                project: None,
+                network: NetworkConfig::default(),
+                environment: Some(EnvironmentConfig {
+                    profile: None,
+                    caches: vec!["npm".into()],
+                    prepare: Some(PathBuf::from(".abox/prepare.sh")),
+                    watch: vec![],
+                }),
+                agent: None,
+            };
+
+            let err = config.validate(&repo_root).expect_err("symlink escape should be rejected");
+            assert!(format!("{err:#}").contains("must stay within repo root"));
+        }
+    }
+
+    #[test]
+    fn watch_entries_must_stay_within_repo_root() {
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("create repo");
+
+        let config = ProjectConfig {
+            project: None,
+            network: NetworkConfig::default(),
+            environment: Some(EnvironmentConfig {
+                profile: None,
+                caches: vec!["npm".into()],
+                prepare: None,
+                watch: vec![PathBuf::from("../outside-lock.json")],
+            }),
+            agent: None,
+        };
+
+        let err = config.validate(&repo_root).expect_err("watch escape should be rejected");
+        assert!(format!("{err:#}").contains("must stay within repo root"));
     }
 
     #[test]

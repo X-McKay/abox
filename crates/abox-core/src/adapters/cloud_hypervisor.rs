@@ -265,6 +265,15 @@ impl VmPort for CloudHypervisorAdapter {
                     })?;
             }
         }
+        if config.cache_mount_dir.is_some() {
+            let expect_cache_path = meta_dir.join("expect-cache-mount");
+            std::fs::write(&expect_cache_path, "").with_context(|| {
+                format!(
+                    "Failed to write cache mount expectation marker {}",
+                    expect_cache_path.display()
+                )
+            })?;
+        }
 
         // Write credential file contents into meta_dir/credentials/.
         if !config.credential_files.is_empty() {
