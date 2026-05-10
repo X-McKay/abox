@@ -252,18 +252,18 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development guidelines.
 ## Performance
 
 Measured on x86_64, 32 cores, kernel 6.14.0-37-generic. VM benchmarks averaged over 5 runs.
-Updated at release v0.3.2 (2026-04-25).
+Updated at release v0.4.0 (2026-05-09).
 
 | Metric | Value | What it measures |
 |---|---|---|
-| VM boot | 179 ms | Cloud Hypervisor start to first proxied request |
-| Proxy round-trip | 178 ms | Bridge ready to `git status` response |
-| Full `abox run` | 318 ms | Total wall time for trivial guest command |
-| Sandbox cleanup | 17 ms | `abox stop --clean` teardown |
-| Policy evaluation | ~52.622 ns | `evaluate_cli` for `git status` (allowed) |
-| Request serialization | ~54.551 ns | JSON encode of `ProxyRequest` |
-| Boot meta generation | ~147.20 ns | `BootMeta::to_json()` |
-| Release binary | 9.5 MB | `target/release/abox` (LTO + strip) |
+| VM boot | 171 ms | Cloud Hypervisor start to first proxied request |
+| Proxy round-trip | 171 ms | Bridge ready to `git status` response |
+| Full `abox run` | 315 ms | Total wall time for trivial guest command |
+| Sandbox cleanup | 16 ms | `abox stop --clean` teardown |
+| Policy evaluation | ~47.629 ns | `evaluate_cli` for `git status` (allowed) |
+| Request serialization | ~51.492 ns | JSON encode of `ProxyRequest` |
+| Boot meta generation | ~167.58 ns | `BootMeta::to_json()` |
+| Release binary | 9.9 MB | `target/release/abox` (LTO + strip) |
 
 Run `just bench` (criterion, no VM) or `just bench-vm-n 5` (VM latency) to reproduce.
 

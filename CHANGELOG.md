@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.0 — 2026-05-09
+
+### Features
+
+- feat: add repo network modes and guest profiles (232cbd0)
+
+### Other
+
+- Merge pull request #17 from X-McKay/chore/security-release-train (f8a5b5a)
+
+
 ## v0.3.2 — 2026-04-25
 
 ### Features
