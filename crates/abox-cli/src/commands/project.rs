@@ -134,27 +134,24 @@ fn write_project_config(repo_root: &Path, config: &ProjectConfig) -> Result<()> 
 
 fn set_profile(repo_root: &Path, profile: EnvironmentProfile) -> Result<()> {
     let mut config = load_editable_project(repo_root)?;
-    match profile {
-        EnvironmentProfile::Base => {
-            if let Some(environment) = config.environment.as_mut() {
-                environment.profile = None;
-                if environment.caches.is_empty()
-                    && environment.prepare.is_none()
-                    && environment.watch.is_empty()
-                {
-                    config.environment = None;
-                }
+    if profile == EnvironmentProfile::Base {
+        if let Some(environment) = config.environment.as_mut() {
+            environment.profile = None;
+            if environment.caches.is_empty()
+                && environment.prepare.is_none()
+                && environment.watch.is_empty()
+            {
+                config.environment = None;
             }
         }
-        _ => {
-            let environment = config.environment.get_or_insert(EnvironmentConfig {
-                profile: None,
-                caches: Vec::new(),
-                prepare: None,
-                watch: Vec::new(),
-            });
-            environment.profile = Some(profile);
-        }
+    } else {
+        let environment = config.environment.get_or_insert(EnvironmentConfig {
+            profile: None,
+            caches: Vec::new(),
+            prepare: None,
+            watch: Vec::new(),
+        });
+        environment.profile = Some(profile);
     }
 
     config.validate(repo_root)?;

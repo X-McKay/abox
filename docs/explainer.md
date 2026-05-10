@@ -195,6 +195,22 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 **What it does:** The egress proxy (`abox-proxyd::egress_proxy`) intercepts outbound HTTPS traffic from the guest and injects API credentials into requests, so secrets never enter the VM. See [ADR-003](decisions/003-https-credential-injection.md) for the full design rationale.
 
+**How repo-local network intent fits in now:** `abox` can also resolve a
+repo-local `.abox/project.toml` into one of three user-facing network modes:
+
+- `safe` — only the host-managed surface
+- `scoped` — `safe` plus approved bundles / exact hostnames
+- `open` — broad proxy-mediated HTTPS access
+
+These modes do **not** bypass the host mediation boundary. They compile into
+the same policy / transport machinery described below:
+
+- managed destinations still use MITM when host-held credentials must be
+  applied
+- public package registries and other unmanaged destinations use passthrough by
+  default
+- the guest still has no direct NIC-based outbound path
+
 **How it works:**
 
 1. The guest sets `HTTPS_PROXY=http://127.0.0.1:18443` (injected automatically by the orchestrator). `127.0.0.1:18443` is a `socat` bridge inside the guest that forwards to the host over vsock port 5001. When the agent's HTTPS client sends a CONNECT request, it arrives at the host-side proxy.
@@ -280,11 +296,23 @@ The proxy injects the real credentials; the agent never sees them.
 
 **What would break without the orchestrator:** Each CLI command would have to assemble `virtiofsd + cloud-hypervisor + the bridge + the console streamer + the cleanup` itself. The orchestrator is the single place that knows the full lifecycle.
 
+**What it owns now beyond raw VM startup:** the orchestrator also resolves
+repo-owned behavior before launch:
+
+- loads `.abox/project.toml` if present
+- applies trust-on-first-use for repo-widened behavior
+- stages immutable prompt / prepare inputs into boot metadata
+- mounts durable cache roots when configured
+- selects the official guest profile image (`base`, `node`, `python`,
+  `rust`) for the repo
+- refreshes guest-native warm state before launch when the repo is configured
+  with caches plus a prepare flow
+
 ---
 
 ## 10. The bootstrap script: `bootstrap_vm.sh`
 
-**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles an ext4 rootfs containing busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. The rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). Rootfs assembly now runs inside a cached Dockerized Alpine builder so file ownership and modes in the image match a real root-owned guest filesystem. CLI versions are pinned in `build_rootfs.sh` for reproducible builds. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
+**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles ext4 guest images. The default `base` image contains busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. Official profile images (`node`, `python`, `rust`) are built alongside it under `~/.abox/vm/profiles/`. The guest rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). Rootfs assembly now runs inside a cached Dockerized Alpine builder so file ownership and modes in the image match a real root-owned guest filesystem. CLI versions are pinned in `build_rootfs.sh` for reproducible builds. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
 
 **Why it's bash and not Rust:** Bootstrapping is a one-time operation per machine. Bash is universal, easy to read, and avoids the chicken-and-egg problem of "you need cargo to build the bootstrap, but the bootstrap installs cargo's musl target". The `vendor/` cache and SHA256 checksums make it idempotent and recoverable from network blips. The 200 lines are ~50% comments and pinned-version constants — the actual logic is small.
 
@@ -342,30 +370,47 @@ If any of these get re-published or corrupted in transit, the bootstrap fails fa
 Let's walk through what happens when you press Enter on:
 
 ```bash
-abox run --task fix-auth -- claude
+abox run --task fix-auth --prompt-file prompts/fix-auth.md -- codex
 ```
 
-**Stage 1: CLI parsing.** clap parses args, builds `RunArgs { task: "fix-auth", ..., command: ["claude"] }`. `commands::run::execute` is called.
+**Stage 1: CLI parsing.** clap parses args, builds `RunArgs { task: "fix-auth", ..., command: ["codex"] }`. `commands::run::execute` is called.
 
-**Stage 2: Orchestrator setup.** `Cli::parse` already loaded the config and built a `SandboxOrchestrator<Git2Workspace, CloudHypervisorAdapter>`. The policy engine was loaded from `~/.abox/policies/default.toml`.
+**Stage 2: Repo behavior resolution.** If the repo has `.abox/project.toml`, the CLI resolves:
 
-**Stage 3: Worktree creation.** `orchestrator.run_sandbox(params, policy)` calls `create_sandbox`, which calls `workspace.create_worktree("fix-auth", "main")`. `Git2Workspace` runs `git worktree add ~/.abox/state/worktrees/fix-auth -b agent/fix-auth main`.
+- default network mode (`safe` / `scoped` / `open`)
+- optional official guest profile
+- durable cache config
+- immutable `prepare.sh`
+- default prompt file, overridden here by `--prompt-file`
 
-**Stage 4: VM config.** A `VmConfig` is built with the worktree path, the configured kernel and rootfs, memory, vcpus, env vars, and `agent_command = ["claude"]`.
+If the repo widens behavior beyond the builtin defaults, `abox` checks the
+trust-on-first-use approval fingerprint before continuing.
 
-**Stage 5: VM start.** `vm_manager.start(vm_config)` invokes `CloudHypervisorAdapter::start`:
+**Stage 3: Orchestrator setup.** `Cli::parse` already loaded the host config and built a `SandboxOrchestrator<Git2Workspace, CloudHypervisorAdapter>`. The host policy engine was loaded from `~/.abox/policies/default.toml`, then narrowed or widened by the resolved repo network mode.
+
+**Stage 4: Warm-state refresh (optional).** If the repo config defines durable
+caches plus a prepare flow, `abox run` checks the recorded warm-state
+fingerprint. If it is missing or stale, `abox` launches an ephemeral warm VM
+first, runs the staged prepare script inside the real guest, persists cache
+state, and only then continues to the actual agent run.
+
+**Stage 5: Worktree creation.** `orchestrator.run_sandbox(params, policy)` calls `create_sandbox`, which calls `workspace.create_worktree("fix-auth", "main")`. `Git2Workspace` runs `git worktree add ~/.abox/state/worktrees/fix-auth -b agent/fix-auth main`.
+
+**Stage 6: VM config.** A `VmConfig` is built with the worktree path, the selected kernel and rootfs profile, memory, vcpus, env vars, staged prompt metadata, and `agent_command = ["codex"]` adapted for prompt-file delivery if needed.
+
+**Stage 7: VM start.** `vm_manager.start(vm_config)` invokes `CloudHypervisorAdapter::start`:
 1. Allocates short-suffixed socket paths under `<runtime>/`: `vfs-fix-auth.sock` (workspace), `vfs-meta-fix-auth.sock` (meta), `vfs-status-fix-auth.sock` (status), `ch-api-fix-auth.sock` (CH API), `vsock-fix-auth.sock` (vsock).
 2. Stages `<runtime>/meta-fix-auth/boot.json` + `runner.sh` containing the agent command and env.
 3. Pre-creates `<runtime>/status-fix-auth/exit-code` (empty).
-4. Spawns three `virtiofsd` processes — one per share — and waits for each socket to appear.
+4. Spawns three `virtiofsd` processes — one per share — plus a cache share when durable caches are configured, and waits for each socket to appear.
 5. Spawns `cloud-hypervisor` with `--memory shared=on`, three `--fs` entries, `--vsock cid=3,...`, `--console file=...`, the kernel, and the rootfs.
 6. Waits for the CH API socket to appear, returns a `VmInfo`.
 
-**Stage 6: Bridge + console streamer.** Back in `run_sandbox`, the orchestrator:
+**Stage 8: Bridge + console streamer.** Back in `run_sandbox`, the orchestrator:
 1. Spawns a `ProxyBridge` on `<runtime>/vsock-fix-auth.sock_5000` with `SandboxAttribution::Fixed("fix-auth")` and a CWD map `/workspace → <real worktree>`.
 2. Spawns a console tailer on `<runtime>/console-fix-auth.log` with a shutdown `Notify`.
 
-**Stage 7: Guest boot.** The Linux kernel boots in ~150 ms, mounts `/workspace`, `/abox-meta`, and `/abox-status` from virtiofs, runs `/sbin/init` (which is the embedded `guest/init.sh`):
+**Stage 9: Guest boot.** The Linux kernel boots in ~150 ms, mounts `/workspace`, `/abox-meta`, and `/abox-status` from virtiofs, runs `/sbin/init` (which is the embedded `guest/init.sh`):
 1. Mount `/proc`, `/sys`, `/dev`.
 2. Print "abox guest init: online".
 3. `socat UNIX-LISTEN:/run/abox-proxy.sock,fork VSOCK-CONNECT:2:5000 &` — starts the unix↔vsock bridge.
@@ -374,23 +419,23 @@ abox run --task fix-auth -- claude
    - Pre-flight: `getent passwd abox` — exits 69 if the rootfs is missing the unprivileged user.
    - Stages credential stubs from `/abox-meta/credentials/` into `/home/abox/.claude/` (or `.codex/`), chowns them to `abox:abox`.
    - Fixes `/home/abox` ownership via `chown -R abox:abox /home/abox`.
-   - Drops privileges: `exec su-exec abox:abox env HOME=/home/abox USER=abox claude …`
+   - Drops privileges: `exec su-exec abox:abox env HOME=/home/abox USER=abox codex …`
 6. The agent runs as `uid=1000(abox)`, not root. The workspace virtiofs share is launched with `--uid-map=:1000:<host_uid>:1:` so host-owned worktree files appear as uid 1000 in the guest and agent-created files land on the host owned by the host user. See ADR-004.
 7. Eventually the agent exits with some code N.
 8. `echo $N > /abox-status/exit-code; sync`
 9. `kill $SOCAT_PID; poweroff -f`
 
-**Stage 8: Each guest intercepted CLI invocation** (while the agent is running) goes through the shim → vsock → bridge → policy → exec → audit → response cycle described in section 7. Console output goes through the kernel's serial driver → `--console file=...` → console tailer → orchestrator's stdout.
+**Stage 10: Each guest intercepted CLI invocation** (while the agent is running) goes through the shim → vsock → bridge → policy → exec → audit → response cycle described in section 7. Console output goes through the kernel's serial driver → `--console file=...` → console tailer → orchestrator's stdout.
 
-**Stage 9: VM exit.** Cloud Hypervisor's `--cmdline` had `quiet`, but the kernel still prints the poweroff message. `ch_child.try_wait()` in the orchestrator's poll loop sees the process is gone, calls `cleanup_vm_files(id, vm, remove_status_dir=false)` — this cleans the sockets but **leaves the status dir** so `run_sandbox` can read the exit code. The polling loop's `info()` returns Err, the loop breaks.
+**Stage 11: VM exit.** Cloud Hypervisor's `--cmdline` had `quiet`, but the kernel still prints the poweroff message. `ch_child.try_wait()` in the orchestrator's poll loop sees the process is gone, calls `cleanup_vm_files(id, vm, remove_status_dir=false)` — this cleans the sockets but **leaves the status dir** so `run_sandbox` can read the exit code. The polling loop's `info()` returns Err, the loop breaks.
 
-**Stage 10: Cleanup + return.** The bridge is aborted. The console shutdown is signalled; the tailer drains to EOF and exits within 500 ms. `read_exit_code(<runtime>/status-fix-auth/exit-code)` reads "0" (or whatever). The status dir is removed. `run_sandbox` returns `Ok(0)`.
+**Stage 12: Cleanup + return.** The bridge is aborted. The console shutdown is signalled; the tailer drains to EOF and exits within 500 ms. `read_exit_code(<runtime>/status-fix-auth/exit-code)` reads "0" (or whatever). The status dir is removed. `run_sandbox` returns `Ok(0)`.
 
-**Stage 11: CLI exit.** `commands::run::execute` checks the exit code:
+**Stage 13: CLI exit.** `commands::run::execute` checks the exit code:
 - `0` → prints "Sandbox 'fix-auth' exited cleanly." → `Ok(())` → process exits 0.
 - `≠ 0` → prints "Sandbox 'fix-auth' exited with code N." → `std::process::exit(N)` so the OS sees the actual code (not anyhow's generic 1).
 
-**Stage 12: Worktree preserved.** The git worktree at `~/.abox/state/worktrees/fix-auth` is still there. The user can `cd` into it, inspect what claude did, run `abox merge fix-auth` to integrate, or `abox stop fix-auth --clean` to throw it away.
+**Stage 14: Worktree preserved.** The git worktree at `~/.abox/state/worktrees/fix-auth` is still there. The user can `cd` into it, inspect what codex did, run `abox merge fix-auth` to integrate, or `abox stop fix-auth --clean` to throw it away.
 
 That's the whole lifecycle. Every step has a single owner and a clear failure mode.
 

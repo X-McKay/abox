@@ -13,6 +13,7 @@
 use anyhow::{Context, Result};
 use crossterm::style::Stylize;
 use crossterm::tty::IsTty;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 // ── Color helpers ────────────────────────────────────────────────────────────
@@ -211,20 +212,14 @@ fn ensure_vm_artifacts(
     if let Some(script) = bootstrap {
         let mut command = std::process::Command::new("bash");
         command.arg(&script).arg("--yes").arg("--no-symlink");
+        let mut profile_args = String::new();
         for profile in requested_profiles {
             if profile.as_str() != "base" {
                 command.arg("--profile").arg(profile.as_str());
+                let _ = write!(&mut profile_args, " --profile {}", profile.as_str());
             }
         }
-        print_action(&format!(
-            "Running {} --yes --no-symlink{}",
-            script.display(),
-            requested_profiles
-                .iter()
-                .filter(|profile| profile.as_str() != "base")
-                .map(|profile| format!(" --profile {}", profile.as_str()))
-                .collect::<String>()
-        ));
+        print_action(&format!("Running {} --yes --no-symlink{}", script.display(), profile_args));
         let status = command
             .env("BOOTSTRAP_YES", if yes { "1" } else { "0" })
             .status()

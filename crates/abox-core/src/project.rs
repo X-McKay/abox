@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -85,13 +86,13 @@ impl EnvironmentProfile {
 
     /// Return true when a cache family is a natural match for this profile.
     pub fn supports_cache(&self, cache: &str) -> bool {
-        match (self, cache) {
-            (Self::Base, _) => true,
-            (Self::Node, "npm") => true,
-            (Self::Python, "pip" | "uv") => true,
-            (Self::Rust, "cargo") => true,
-            _ => false,
-        }
+        matches!(
+            (self, cache),
+            (Self::Base, _)
+                | (Self::Node, "npm")
+                | (Self::Python, "pip" | "uv")
+                | (Self::Rust, "cargo")
+        )
     }
 
     /// Return the official profile that best matches a cache family.
@@ -199,7 +200,7 @@ pub struct AgentConfig {
 }
 
 /// Repo-local abox config.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     /// Optional project metadata.
@@ -214,12 +215,6 @@ pub struct ProjectConfig {
     /// Optional agent defaults.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
-}
-
-impl Default for ProjectConfig {
-    fn default() -> Self {
-        Self { project: None, network: NetworkConfig::default(), environment: None, agent: None }
-    }
 }
 
 /// The normalized scoped network input used by policy compilation.
@@ -307,6 +302,18 @@ struct BundleSpec {
     description: &'static str,
 }
 
+struct ApprovalFingerprintInputs<'a> {
+    config_bytes: &'a [u8],
+    default_network_mode: NetworkMode,
+    environment_profile: EnvironmentProfile,
+    bundles: &'a [String],
+    domains: &'a [String],
+    default_prompt_path: Option<&'a Path>,
+    default_prompt_bytes: Option<&'a [u8]>,
+    prepare_path: Option<&'a Path>,
+    prepare_bytes: Option<&'a [u8]>,
+}
+
 impl ProjectConfig {
     /// Return the canonical repo-local config path.
     pub fn default_path(repo_root: &Path) -> PathBuf {
@@ -384,17 +391,18 @@ impl ProjectConfig {
         let project_id = derive_project_identity(repo_root, self.project.as_ref())?;
         let bundles = self.network.bundles.clone();
         let domains = self.network.domains.clone();
-        let approval_fingerprint = build_approval_fingerprint(
-            &config_bytes,
+        let approval_inputs = ApprovalFingerprintInputs {
+            config_bytes: &config_bytes,
             default_network_mode,
             environment_profile,
-            &bundles,
-            &domains,
-            default_prompt_path.as_deref(),
-            default_prompt_bytes.as_deref(),
-            prepare_path.as_deref(),
-            prepare_bytes.as_deref(),
-        );
+            bundles: &bundles,
+            domains: &domains,
+            default_prompt_path: default_prompt_path.as_deref(),
+            default_prompt_bytes: default_prompt_bytes.as_deref(),
+            prepare_path: prepare_path.as_deref(),
+            prepare_bytes: prepare_bytes.as_deref(),
+        };
+        let approval_fingerprint = build_approval_fingerprint(&approval_inputs);
 
         Ok(ResolvedProjectConfig {
             config_path,
@@ -976,35 +984,26 @@ fn normalize_remote_url(url: &str) -> String {
     url.trim().trim_end_matches(".git").to_ascii_lowercase()
 }
 
-fn build_approval_fingerprint(
-    config_bytes: &[u8],
-    default_network_mode: NetworkMode,
-    environment_profile: EnvironmentProfile,
-    bundles: &[String],
-    domains: &[String],
-    default_prompt_path: Option<&Path>,
-    default_prompt_bytes: Option<&[u8]>,
-    prepare_path: Option<&Path>,
-    prepare_bytes: Option<&[u8]>,
-) -> String {
+fn build_approval_fingerprint(inputs: &ApprovalFingerprintInputs<'_>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"abox-project-approval-v1\n");
     hasher.update(b"bundle-catalog-version:");
     hasher.update(BUNDLE_CATALOG_VERSION.as_bytes());
     hasher.update(b"\nconfig-bytes:");
-    hasher.update(config_bytes);
+    hasher.update(inputs.config_bytes);
     hasher.update(b"\nresolved-network-mode:");
-    hasher.update(default_network_mode.to_string().as_bytes());
+    hasher.update(inputs.default_network_mode.to_string().as_bytes());
     hasher.update(b"\nresolved-environment-profile:");
-    hasher.update(environment_profile.to_string().as_bytes());
+    hasher.update(inputs.environment_profile.to_string().as_bytes());
 
-    let mut resolved_hosts = bundles
+    let mut resolved_hosts = inputs
+        .bundles
         .iter()
         .filter_map(|bundle| bundle_hosts(bundle))
         .flat_map(|hosts| hosts.iter().copied())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    resolved_hosts.extend(domains.iter().cloned());
+    resolved_hosts.extend(inputs.domains.iter().cloned());
     resolved_hosts.sort();
     resolved_hosts.dedup();
 
@@ -1013,19 +1012,19 @@ fn build_approval_fingerprint(
         hasher.update(host.as_bytes());
     }
 
-    if let Some(path) = default_prompt_path {
+    if let Some(path) = inputs.default_prompt_path {
         hasher.update(b"\ndefault-prompt-path:");
         hasher.update(path.display().to_string().as_bytes());
     }
-    if let Some(bytes) = default_prompt_bytes {
+    if let Some(bytes) = inputs.default_prompt_bytes {
         hasher.update(b"\ndefault-prompt-bytes:");
         hasher.update(bytes);
     }
-    if let Some(path) = prepare_path {
+    if let Some(path) = inputs.prepare_path {
         hasher.update(b"\nprepare-path:");
         hasher.update(path.display().to_string().as_bytes());
     }
-    if let Some(bytes) = prepare_bytes {
+    if let Some(bytes) = inputs.prepare_bytes {
         hasher.update(b"\nprepare-bytes:");
         hasher.update(bytes);
     }
@@ -1154,7 +1153,11 @@ fn read_repo_file_bytes(
 }
 
 fn hash_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 fn bundle_spec(bundle: &str) -> Option<BundleSpec> {
