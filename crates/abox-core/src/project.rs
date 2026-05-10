@@ -712,14 +712,25 @@ pub fn environments_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("env").join("projects")
 }
 
+fn project_state_component(project_id: &str) -> String {
+    let raw = hash_hex(project_id.as_bytes());
+    if raw.len() <= 255 {
+        raw
+    } else {
+        // Keep state path components bounded even when the project identity is
+        // a long remote URL or canonical filesystem path.
+        hash_hex(&Sha256::digest(project_id.as_bytes()))
+    }
+}
+
 /// Return the host cache root for a specific repo identity.
 pub fn project_cache_root(state_dir: &Path, project_id: &str) -> PathBuf {
-    state_dir.join("cache").join("projects").join(hash_hex(project_id.as_bytes()))
+    state_dir.join("cache").join("projects").join(project_state_component(project_id))
 }
 
 /// Return the on-disk record path for a project's current environment state.
 pub fn environment_record_path(state_dir: &Path, project_id: &str) -> PathBuf {
-    environments_dir(state_dir).join(hash_hex(project_id.as_bytes())).join("status.json")
+    environments_dir(state_dir).join(project_state_component(project_id)).join("status.json")
 }
 
 /// Return the on-disk record path for a specific project identity and
@@ -730,7 +741,7 @@ pub fn approval_record_path(
     approval_fingerprint: &str,
 ) -> PathBuf {
     approvals_dir(state_dir)
-        .join(hash_hex(project_id.as_bytes()))
+        .join(project_state_component(project_id))
         .join(format!("{approval_fingerprint}.json"))
 }
 
@@ -1436,6 +1447,48 @@ mod tests {
 
         let resolved = config.resolve(temp.path()).unwrap();
         assert_eq!(resolved.project_id, "git@github.com:openai/abox");
+    }
+
+    #[test]
+    fn short_project_ids_keep_existing_state_path_component_format() {
+        let temp = tempdir().unwrap();
+        let project_id = "repo";
+
+        let cache_root = project_cache_root(temp.path(), project_id);
+        let cache_component =
+            cache_root.file_name().and_then(|name| name.to_str()).expect("cache component");
+        assert_eq!(cache_component, hash_hex(project_id.as_bytes()));
+    }
+
+    #[test]
+    fn long_project_ids_use_hashed_state_path_components() {
+        let temp = tempdir().unwrap();
+        let project_id = format!(
+            "ssh://git@github.enterprise.example.com/org/{}/repo-with-extra-depth.git",
+            "very-long-segment/".repeat(24)
+        );
+
+        let cache_root = project_cache_root(temp.path(), &project_id);
+        let env_record = environment_record_path(temp.path(), &project_id);
+        let approval_record = approval_record_path(temp.path(), &project_id, "fingerprint");
+
+        let cache_component =
+            cache_root.file_name().and_then(|name| name.to_str()).expect("cache component");
+        let env_component = env_record
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .expect("env component");
+        let approval_component = approval_record
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .expect("approval component");
+
+        assert_eq!(cache_component.len(), 64);
+        assert_eq!(env_component.len(), 64);
+        assert_eq!(approval_component.len(), 64);
+        assert_ne!(cache_component, hash_hex(project_id.as_bytes()));
     }
 
     #[test]

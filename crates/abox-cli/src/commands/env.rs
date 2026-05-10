@@ -127,12 +127,9 @@ pub async fn execute_warm<W: WorkspacePort, V: VmPort>(
         println!("Warming environment caches for the first time...");
     }
 
-    let mut effective_policy = policy;
-    if let Ok(scope) = resolved.effective_network_scope(None) {
-        println!("Network mode: {}", scope.mode);
-        effective_policy =
-            std::sync::Arc::new(effective_policy.as_ref().with_network_scope(scope)?);
-    }
+    let scope = resolved.effective_network_scope(None)?;
+    println!("Network mode: {}", scope.mode);
+    let effective_policy = std::sync::Arc::new(policy.as_ref().with_network_scope(scope)?);
     let path = warm_environment(
         repo_root,
         &resolved,
@@ -453,11 +450,23 @@ fn stale_reason(
 }
 
 fn directory_size(path: &Path) -> Result<u64> {
-    if !path.exists() {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => {
+            return Err(err).with_context(|| format!("Reading metadata for {}", path.display()))
+        }
+    };
+
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
         return Ok(0);
     }
-    if path.is_file() {
-        return Ok(std::fs::metadata(path)?.len());
+    if file_type.is_file() {
+        return Ok(metadata.len());
+    }
+    if !file_type.is_dir() {
+        return Ok(0);
     }
 
     let mut total = 0u64;
@@ -814,6 +823,20 @@ mod tests {
         assert!(!cache_dirs_present(state_dir, &resolved));
         std::fs::create_dir_all(root.join("cargo")).unwrap();
         assert!(cache_dirs_present(state_dir, &resolved));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn directory_size_ignores_symlink_loops() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        let cache_root = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::write(cache_root.join("payload.bin"), b"hello").unwrap();
+        symlink(".", cache_root.join("loop")).unwrap();
+
+        assert_eq!(directory_size(&cache_root).unwrap(), 5);
     }
 
     #[tokio::test]
