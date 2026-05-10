@@ -41,7 +41,35 @@ print_virtiofsd_capability_note() {
 DO_SYMLINK=1
 ASSUME_YES="${BOOTSTRAP_YES:-0}"
 FROM_BUNDLE="${FROM_BUNDLE:-}"
+PROFILES=(base)
+
+add_profile() {
+    local profile="$1"
+    case "$profile" in
+        base|node|python|rust)
+            ;;
+        *)
+            echo "ERROR: unsupported profile '$profile' (expected base, node, python, or rust)" >&2
+            exit 1
+            ;;
+    esac
+
+    local existing
+    for existing in "${PROFILES[@]}"; do
+        if [[ "$existing" == "$profile" ]]; then
+            return
+        fi
+    done
+    PROFILES+=("$profile")
+}
+
+NEXT_IS_PROFILE=0
 for arg in "$@"; do
+    if [[ "$NEXT_IS_PROFILE" == "1" ]]; then
+        add_profile "$arg"
+        NEXT_IS_PROFILE=0
+        continue
+    fi
     case "$arg" in
         --no-symlink)
             DO_SYMLINK=0
@@ -49,13 +77,16 @@ for arg in "$@"; do
         --yes|-y)
             ASSUME_YES=1
             ;;
+        --profile)
+            NEXT_IS_PROFILE=1
+            ;;
         --from-bundle)
             # Next argument is the bundle path; handled below
             FROM_BUNDLE="__NEXT__"
             ;;
         --help|-h)
             cat <<HELP
-Usage: $(basename "$0") [--no-symlink] [--yes] [--from-bundle <path>]
+Usage: $(basename "$0") [--no-symlink] [--yes] [--profile <name>] [--from-bundle <path>]
 
   --no-symlink          Do NOT create symlinks in ~/.local/bin. You will need
                         to add $ABOX_VM_DIR to your PATH manually.
@@ -65,6 +96,9 @@ Usage: $(basename "$0") [--no-symlink] [--yes] [--from-bundle <path>]
                         the script fails fast and prints the rustup command
                         for you to run yourself.
                         Honored from the BOOTSTRAP_YES=1 environment variable too.
+  --profile <name>      Build an additional official guest profile image.
+                        Repeat to add more profiles. Supported values:
+                        base, node, python, rust.
   --from-bundle <path>  Restore VM assets from a pre-built tarball instead of
                         downloading components individually. The tarball should
                         be an abox-vm-assets-*.tar.gz from a GitHub release.
@@ -85,6 +119,10 @@ done
 
 if [[ "$FROM_BUNDLE" == "__NEXT__" ]]; then
     echo "ERROR: --from-bundle requires a path argument" >&2
+    exit 1
+fi
+if [[ "$NEXT_IS_PROFILE" == "1" ]]; then
+    echo "ERROR: --profile requires a profile name" >&2
     exit 1
 fi
 
@@ -246,15 +284,24 @@ if [ ! -f "$HOME/.abox/ca/root.crt" ]; then
 fi
 
 # ─── Phase 5: Assemble the guest rootfs ──────────────────────────────────
-echo "[5/5] Assembling guest rootfs..."
-SHIM_BIN="$SHIM_BIN" \
-ABOX_VM_DIR="$ABOX_VM_DIR" \
-GUEST_INIT="$REPO_ROOT/guest/init.sh" \
-    "$REPO_ROOT/scripts/build_rootfs.sh"
+echo "[5/5] Assembling guest rootfs image(s)..."
+for profile in "${PROFILES[@]}"; do
+    echo "  profile: $profile"
+    SHIM_BIN="$SHIM_BIN" \
+    ABOX_VM_DIR="$ABOX_VM_DIR" \
+    ABOX_PROFILE="$profile" \
+    GUEST_INIT="$REPO_ROOT/guest/init.sh" \
+        "$REPO_ROOT/scripts/build_rootfs.sh"
+done
 
 echo
 echo "Bootstrap complete. Files in $ABOX_VM_DIR:"
 ls -lh "$ABOX_VM_DIR"
+if [[ -d "$ABOX_VM_DIR/profiles" ]]; then
+    echo
+    echo "Additional profile images:"
+    find "$ABOX_VM_DIR/profiles" -maxdepth 2 -type f -name 'rootfs.raw' -print | sort
+fi
 print_virtiofsd_capability_note "$ABOX_VM_DIR/virtiofsd"
 
 # ─── Install convenience symlinks into ~/.local/bin ──────────────────────

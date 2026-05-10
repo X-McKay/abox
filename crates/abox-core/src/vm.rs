@@ -56,6 +56,12 @@ pub struct VmConfig {
     pub env_vars: Vec<(String, String)>,
     /// Command (argv-style) to exec inside the guest after boot.
     pub agent_command: Vec<String>,
+    /// Optional resolved prompt content to stage as `/abox-meta/prompt.md`.
+    pub resolved_prompt: Option<String>,
+    /// Optional repo-scoped host cache root mounted at `/abox-cache`.
+    pub cache_mount_dir: Option<PathBuf>,
+    /// Optional immutable prepare script content staged as `/abox-meta/prepare.sh`.
+    pub staged_prepare_script: Option<String>,
     /// How to start the VM: fresh boot or restore from snapshot.
     #[allow(dead_code)]
     pub start_mode: StartMode,

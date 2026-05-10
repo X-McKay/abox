@@ -48,6 +48,13 @@ enum Commands {
     /// Create and start a new sandbox.
     Run(commands::run::RunArgs),
 
+    /// Manage repo-local `.abox/project.toml`.
+    #[command(subcommand)]
+    Project(commands::project::ProjectCommand),
+
+    /// Manage durable repo caches and prepare flows.
+    Env(commands::env::EnvArgs),
+
     /// List all active sandboxes.
     #[command(alias = "ls")]
     List,
@@ -101,14 +108,28 @@ async fn main() -> Result<()> {
         return commands::init::execute(args);
     }
 
+    // Repo-local project config commands should stay reachable even when the
+    // host config is missing or malformed.
+    if let Some(Commands::Project(cmd)) = command.as_ref() {
+        let repo_path = repo.canonicalize()?;
+        return commands::project::execute(cmd, &repo_path, config.as_deref());
+    }
+
     let config_path = config.unwrap_or_else(|| AboxConfig::default_path().unwrap_or_default());
     let config = AboxConfig::load(&config_path)?;
     config.ensure_dirs()?;
+    let repo_path = repo.canonicalize()?;
+
+    if let Some(Commands::Env(args)) = command.as_ref() {
+        if commands::env::execute_without_orchestrator(args, &repo_path, &config)? {
+            return Ok(());
+        }
+    }
 
     // Doctor does not need the orchestrator and must run before the policy
     // check so it works even when setup is incomplete.
     if let Some(Commands::Doctor) = command.as_ref() {
-        let ok = commands::doctor::execute(&config)?;
+        let ok = commands::doctor::execute(&config, &repo_path)?;
         return if ok { Ok(()) } else { std::process::exit(1) };
     }
 
@@ -152,7 +173,6 @@ async fn main() -> Result<()> {
     let policy = std::sync::Arc::new(policy);
 
     // Build the orchestrator
-    let repo_path = repo.canonicalize()?;
     let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
     let vm_manager = CloudHypervisorAdapter::new(config.runtime_dir(), config.state_dir.clone())?;
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm_manager);
@@ -173,8 +193,29 @@ async fn main() -> Result<()> {
                 abox_core::ca::RootCa::load_or_generate(&ca_dir)
                     .context("Failed to load or generate root CA")?,
             );
-            commands::run::execute(args, &orchestrator, std::sync::Arc::clone(&policy), root_ca)
-                .await
+            commands::run::execute(
+                args,
+                &repo_path,
+                &orchestrator,
+                std::sync::Arc::clone(&policy),
+                root_ca,
+            )
+            .await
+        }
+        Commands::Env(args) => {
+            let ca_dir = abox_core::ca::RootCa::default_dir()?;
+            let root_ca = std::sync::Arc::new(
+                abox_core::ca::RootCa::load_or_generate(&ca_dir)
+                    .context("Failed to load or generate root CA")?,
+            );
+            commands::env::execute_warm(
+                &args,
+                &repo_path,
+                &orchestrator,
+                std::sync::Arc::clone(&policy),
+                root_ca,
+            )
+            .await
         }
         Commands::List => commands::list::execute(&orchestrator).await,
         Commands::Attach(args) => commands::attach::execute(args, &orchestrator).await,
@@ -187,6 +228,10 @@ async fn main() -> Result<()> {
             }
             _ => unreachable!(),
         },
-        Commands::Ca(_) | Commands::Tui | Commands::Init(_) | Commands::Doctor => unreachable!(),
+        Commands::Ca(_)
+        | Commands::Tui
+        | Commands::Init(_)
+        | Commands::Doctor
+        | Commands::Project(_) => unreachable!(),
     }
 }

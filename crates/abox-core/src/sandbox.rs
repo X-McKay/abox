@@ -5,10 +5,12 @@
 //! application-layer service that the CLI and TUI call into.
 
 use crate::config::{AboxConfig, CredentialFileEntry, VmRuntimeTuning};
+use crate::project::{image_path_for_profile, kernel_path_for_profile, EnvironmentProfile};
 use crate::vm::{CredentialToStage, VmConfig, VmInfo, VmPort, VmState};
 use crate::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Parameters for creating a new sandbox.
 #[derive(Debug, Clone)]
@@ -29,6 +31,14 @@ pub struct CreateSandboxParams {
     pub env_vars: Vec<(String, String)>,
     /// Command to execute inside the VM (the agent).
     pub command: Vec<String>,
+    /// Optional resolved prompt content staged into guest boot metadata.
+    pub resolved_prompt: Option<String>,
+    /// Optional repo-scoped host cache root mounted at `/abox-cache`.
+    pub cache_mount_dir: Option<PathBuf>,
+    /// Optional immutable prepare script content staged as `/abox-meta/prepare.sh`.
+    pub staged_prepare_script: Option<String>,
+    /// Guest environment profile that selects the rootfs image.
+    pub environment_profile: EnvironmentProfile,
     /// Kill the sandbox after this many seconds (exit code 124).
     pub timeout_secs: Option<u64>,
     /// Automatically remove the sandbox (worktree + branch) after exit.
@@ -195,6 +205,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let proxy_url = "http://127.0.0.1:18443".to_string();
         env_vars.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
         env_vars.push(("https_proxy".to_string(), proxy_url));
+        if params.resolved_prompt.is_some() {
+            env_vars.push(("ABOX_PROMPT_FILE".to_string(), "/abox-meta/prompt.md".to_string()));
+        }
         // Node.js uses its own embedded CA bundle; tell it to also trust the
         // abox root CA so the TLS-terminating MITM proxy is accepted.
         env_vars
@@ -205,27 +218,26 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         // fall back to the standard bootstrap location (~/.abox/vm/). Fail fast
         // with an actionable message rather than attempting to start with a
         // non-existent path and producing a cryptic OS error.
-        let default_vm_dir = self.config.state_dir.join("vm");
-        let image_path = self
-            .config
-            .vm_defaults
-            .image_path
-            .clone()
-            .unwrap_or_else(|| default_vm_dir.join("rootfs.raw"));
-        let kernel_path = self
-            .config
-            .vm_defaults
-            .kernel_path
-            .clone()
-            .unwrap_or_else(|| default_vm_dir.join("vmlinux"));
+        let image_path = image_path_for_profile(&self.config, params.environment_profile);
+        let kernel_path = kernel_path_for_profile(&self.config);
         if !image_path.exists() {
             // Roll back the worktree we just created before returning the error.
             let _ = self.workspace.remove_worktree(&params.task_id, true);
+            if params.environment_profile == EnvironmentProfile::Base {
+                anyhow::bail!(
+                    "VM rootfs image not found at {}\n\n\
+                     Run 'abox init' or 'just bootstrap-vm' to download and assemble\n\
+                     the VM stack, then try again.",
+                    image_path.display()
+                );
+            }
             anyhow::bail!(
-                "VM rootfs image not found at {}\n\n\
-                 Run 'abox init' or 'just bootstrap-vm' to download and assemble\n\
-                 the VM stack, then try again.",
-                image_path.display()
+                "VM rootfs image for profile '{}' not found at {}\n\n\
+                 Install or build the '{}' guest profile under ~/.abox/vm/profiles/{}/, then try again.",
+                params.environment_profile,
+                image_path.display(),
+                params.environment_profile,
+                params.environment_profile,
             );
         }
         if !kernel_path.exists() {
@@ -251,6 +263,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             user: params.user,
             env_vars,
             agent_command: params.command.clone(),
+            resolved_prompt: params.resolved_prompt,
+            cache_mount_dir: params.cache_mount_dir,
+            staged_prepare_script: params.staged_prepare_script,
             start_mode,
             credential_files,
             ca_cert_pem: params.ca_cert_pem.clone(),

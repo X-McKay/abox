@@ -23,6 +23,7 @@ pub mod console;
 pub mod egress;
 pub mod error;
 pub mod policy;
+pub mod project;
 pub mod protocol;
 pub mod proxy_bridge;
 pub mod sandbox;

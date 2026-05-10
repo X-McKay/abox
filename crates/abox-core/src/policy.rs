@@ -4,6 +4,7 @@
 //! allowed, denied, or have credentials injected. Policies are defined in
 //! TOML files under the `policies/` directory.
 
+use crate::project::{bundle_hosts, NetworkMode, NetworkScope};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -150,19 +151,46 @@ fn default_action() -> String {
 }
 
 /// The policy engine. Loaded once and used to evaluate every request.
+#[derive(Clone)]
 pub struct PolicyEngine {
     cli_policies: Vec<CompiledCliPolicy>,
     egress_rules: Vec<EgressRule>,
     default_cli_action: String,
     default_egress_action: String,
     bypass_tls: Vec<String>,
+    network_scope: Option<CompiledNetworkScope>,
 }
 
+#[derive(Clone)]
 struct CompiledCliPolicy {
     command: String,
     allow_patterns: Vec<Regex>,
     deny_patterns: Vec<Regex>,
     forward_ssh_agent: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledNetworkScope {
+    mode: NetworkMode,
+    allowed_domains: Vec<String>,
+}
+
+/// How the proxy should handle an allowed outbound request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressTransport {
+    /// Terminate TLS and inspect or inject request headers.
+    Mitm,
+    /// Leave TLS end-to-end and only tunnel bytes.
+    Passthrough,
+}
+
+/// Result of evaluating one outbound CONNECT request.
+#[derive(Debug, Clone, Copy)]
+pub struct EgressEvaluation<'a> {
+    /// The matched host-managed rule, if any.
+    pub rule: Option<&'a EgressRule>,
+    /// The transport to apply to the request.
+    pub transport: EgressTransport,
 }
 
 impl PolicyEngine {
@@ -222,6 +250,19 @@ impl PolicyEngine {
             default_cli_action: policy.default_cli_action,
             default_egress_action: policy.default_egress_action,
             bypass_tls: policy.bypass_tls,
+            network_scope: None,
+        })
+    }
+
+    /// Return a cloned policy engine with repo-level network scope applied.
+    pub fn with_network_scope(&self, scope: NetworkScope) -> Result<Self> {
+        Ok(Self {
+            cli_policies: self.cli_policies.clone(),
+            egress_rules: self.egress_rules.clone(),
+            default_cli_action: self.default_cli_action.clone(),
+            default_egress_action: self.default_egress_action.clone(),
+            bypass_tls: self.bypass_tls.clone(),
+            network_scope: Some(CompiledNetworkScope::from_scope(scope)?),
         })
     }
 
@@ -312,6 +353,15 @@ impl PolicyEngine {
         &self.bypass_tls
     }
 
+    /// Return the host-managed egress domain patterns from the host policy.
+    pub fn managed_egress_domains(&self) -> Vec<String> {
+        let mut domains =
+            self.egress_rules.iter().map(|rule| rule.domain.clone()).collect::<Vec<_>>();
+        domains.sort();
+        domains.dedup();
+        domains
+    }
+
     /// Evaluate an HTTP egress request.
     ///
     /// # Arguments
@@ -319,16 +369,82 @@ impl PolicyEngine {
     ///
     /// Returns the matching egress rule if allowed, or a deny decision.
     pub fn evaluate_egress(&self, domain: &str) -> Result<Option<&EgressRule>, Decision> {
+        self.evaluate_egress_request(domain, 443).map(|evaluation| evaluation.rule)
+    }
+
+    /// Evaluate a CONNECT request against host-managed rules and any active
+    /// repo-level network scope.
+    pub fn evaluate_egress_request(
+        &self,
+        domain: &str,
+        port: u16,
+    ) -> Result<EgressEvaluation<'_>, Decision> {
         for rule in &self.egress_rules {
             if domain_matches(&rule.domain, domain) {
-                return Ok(Some(rule));
+                let transport = if self.is_tls_bypassed(domain) {
+                    EgressTransport::Passthrough
+                } else {
+                    EgressTransport::Mitm
+                };
+                return Ok(EgressEvaluation { rule: Some(rule), transport });
             }
         }
 
+        if let Some(scope) = &self.network_scope {
+            return scope.evaluate(domain, port);
+        }
+
         if self.default_egress_action == "allow" {
-            Ok(None)
+            let transport = if self.is_tls_bypassed(domain) {
+                EgressTransport::Passthrough
+            } else {
+                EgressTransport::Mitm
+            };
+            Ok(EgressEvaluation { rule: None, transport })
         } else {
             Err(Decision::Deny(format!("No egress rule for domain '{domain}'")))
+        }
+    }
+}
+
+impl CompiledNetworkScope {
+    fn from_scope(scope: NetworkScope) -> Result<Self> {
+        let mut allowed_domains = scope.domains;
+        for bundle in &scope.bundles {
+            let Some(hosts) = bundle_hosts(bundle) else {
+                anyhow::bail!("unknown network bundle {bundle:?}");
+            };
+            allowed_domains.extend(hosts.iter().map(|host| (*host).to_string()));
+        }
+        allowed_domains.sort();
+        allowed_domains.dedup();
+
+        Ok(Self { mode: scope.mode, allowed_domains })
+    }
+
+    fn evaluate(&self, domain: &str, port: u16) -> Result<EgressEvaluation<'static>, Decision> {
+        if port != 443 {
+            return Err(Decision::Deny(format!(
+                "Repo network modes only allow proxy-mediated HTTPS CONNECT traffic on port 443 (got {port})"
+            )));
+        }
+
+        match self.mode {
+            NetworkMode::Safe => Err(Decision::Deny(format!(
+                "Network mode 'safe' does not allow unmanaged egress to '{domain}'"
+            ))),
+            NetworkMode::Scoped => {
+                if self.allowed_domains.iter().any(|allowed| allowed == domain) {
+                    Ok(EgressEvaluation { rule: None, transport: EgressTransport::Passthrough })
+                } else {
+                    Err(Decision::Deny(format!(
+                        "Domain '{domain}' is not allowed by scoped network config"
+                    )))
+                }
+            }
+            NetworkMode::Open => {
+                Ok(EgressEvaluation { rule: None, transport: EgressTransport::Passthrough })
+            }
         }
     }
 }
@@ -538,6 +654,76 @@ mod tests {
         let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
         let result = engine.evaluate_egress("evil.example.com");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_network_scope_safe_denies_unmanaged_egress() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let scoped = engine
+            .with_network_scope(NetworkScope {
+                mode: NetworkMode::Safe,
+                bundles: Vec::new(),
+                domains: Vec::new(),
+            })
+            .unwrap();
+
+        let result = scoped.evaluate_egress_request("docs.rs", 443);
+        assert!(matches!(result, Err(Decision::Deny(_))));
+    }
+
+    #[test]
+    fn test_network_scope_scoped_allows_bundle_host_as_passthrough() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let scoped = engine
+            .with_network_scope(NetworkScope {
+                mode: NetworkMode::Scoped,
+                bundles: vec!["pypi-public".into()],
+                domains: vec!["docs.rs".into()],
+            })
+            .unwrap();
+
+        let result = scoped.evaluate_egress_request("files.pythonhosted.org", 443).unwrap();
+        assert!(result.rule.is_none());
+        assert_eq!(result.transport, EgressTransport::Passthrough);
+
+        let result = scoped.evaluate_egress_request("docs.rs", 443).unwrap();
+        assert!(result.rule.is_none());
+        assert_eq!(result.transport, EgressTransport::Passthrough);
+    }
+
+    #[test]
+    fn test_network_scope_open_allows_unmanaged_443_only() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let scoped = engine
+            .with_network_scope(NetworkScope {
+                mode: NetworkMode::Open,
+                bundles: Vec::new(),
+                domains: Vec::new(),
+            })
+            .unwrap();
+
+        let result = scoped.evaluate_egress_request("example.com", 443).unwrap();
+        assert!(result.rule.is_none());
+        assert_eq!(result.transport, EgressTransport::Passthrough);
+
+        let result = scoped.evaluate_egress_request("example.com", 8443);
+        assert!(matches!(result, Err(Decision::Deny(_))));
+    }
+
+    #[test]
+    fn test_network_scope_preserves_managed_rules() {
+        let engine = PolicyEngine::from_policy_file(test_policy()).unwrap();
+        let scoped = engine
+            .with_network_scope(NetworkScope {
+                mode: NetworkMode::Safe,
+                bundles: Vec::new(),
+                domains: Vec::new(),
+            })
+            .unwrap();
+
+        let result = scoped.evaluate_egress_request("api.anthropic.com", 443).unwrap();
+        assert!(result.rule.is_some());
+        assert_eq!(result.transport, EgressTransport::Mitm);
     }
 
     #[test]
