@@ -48,6 +48,7 @@ After step 10, the developer pushes manually: `git push origin main --tags`. The
 ## After tag push
 
 - Watch the `release.yml` workflow. If it fails, the tag still exists but the release is not published. Fix and push a new tag, or delete the tag and retry.
+- Treat Node runtime deprecation annotations in `release.yml` as workflow debt. If GitHub warns that first-party `actions/*` refs still run on deprecated Node majors, update those workflow refs in a follow-up PR before the next release.
 - Install the published release on a clean machine via `./scripts/install.sh` and run `abox --version` to sanity-check.
 - Announce.
 
