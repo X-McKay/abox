@@ -143,9 +143,13 @@ pub enum GrantAction {
 
     /// List all available built-in provider shortcuts.
     Providers,
+
+    /// Manage MCP OAuth tokens (discover, authorize, list, remove).
+    #[command(subcommand)]
+    Mcp(crate::commands::grant_mcp::GrantMcpAction),
 }
 
-pub fn execute(args: &GrantArgs, config: &AboxConfig) -> Result<()> {
+pub async fn execute(args: &GrantArgs, config: &AboxConfig) -> Result<()> {
     match &args.action {
         GrantAction::Add { name, domain, header, env_var, template, policy } => {
             let policy_path = resolve_policy_path(policy.as_ref(), config);
@@ -162,6 +166,10 @@ pub fn execute(args: &GrantArgs, config: &AboxConfig) -> Result<()> {
         GrantAction::Providers => {
             list_providers();
             Ok(())
+        }
+        GrantAction::Mcp(action) => {
+            let mcp_args = crate::commands::grant_mcp::GrantMcpArgs { action: action.clone() };
+            crate::commands::grant_mcp::execute(&mcp_args, config).await
         }
     }
 }

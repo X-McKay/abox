@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
     // Grant command does not need the orchestrator
     if let Some(Commands::Grant(action)) = command.as_ref() {
         let args = commands::grant::GrantArgs { action: action.clone() };
-        return commands::grant::execute(&args, &config);
+        return commands::grant::execute(&args, &config).await;
     }
 
     // TUI command

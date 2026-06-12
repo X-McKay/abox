@@ -22,6 +22,7 @@ pub mod config;
 pub mod console;
 pub mod egress;
 pub mod error;
+pub mod mcp_oauth;
 pub mod policy;
 pub mod project;
 pub mod protocol;
