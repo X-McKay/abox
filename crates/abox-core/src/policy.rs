@@ -765,6 +765,7 @@ mod tests {
                 credential_file: None,
                 json_path: None,
                 header_template: "{value}".to_string(),
+                request_rules: vec![],
             }],
             default_cli_action: "deny".to_string(),
             default_egress_action: "deny".to_string(),
@@ -1245,6 +1246,7 @@ mod tests {
             credential_file: Some(tmp.path().display().to_string()),
             json_path: Some("claudeAiOauth.accessToken".into()),
             header_template: "Bearer {value}".into(),
+            request_rules: vec![],
         };
         assert_eq!(rule.resolve_credential(), Some("real-token-xyz".to_string()));
     }
@@ -1266,6 +1268,7 @@ mod tests {
             credential_file: Some("/nonexistent".into()),
             json_path: Some("a.b".into()),
             header_template: "{value}".into(),
+            request_rules: vec![],
         };
         assert_eq!(rule.resolve_credential(), Some("env-value".to_string()));
         unsafe {
@@ -1282,6 +1285,7 @@ mod tests {
             credential_file: Some("/definitely/does/not/exist.json".into()),
             json_path: Some("a".into()),
             header_template: "{value}".into(),
+            request_rules: vec![],
         };
         assert_eq!(rule.resolve_credential(), None);
     }
@@ -1297,6 +1301,7 @@ mod tests {
                 credential_file: Some("/some/file.json".into()),
                 json_path: None,
                 header_template: "Bearer {value}".into(),
+                request_rules: vec![],
             }],
             default_cli_action: "deny".into(),
             default_egress_action: "deny".into(),

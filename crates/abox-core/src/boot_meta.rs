@@ -233,6 +233,7 @@ mod tests {
             agent_command: vec!["claude".into(), "--model".into(), "opus".into()],
             env: vec![("FOO".into(), "bar".into())],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let json = meta.to_json().unwrap();
         let parsed = BootMeta::from_json(&json).unwrap();
@@ -249,6 +250,7 @@ mod tests {
             agent_command: vec!["/bin/echo".into(), "hello".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -266,6 +268,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![("TMPDIR".into(), "/workspace".into())],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
 
         let script = meta.runner_script();
@@ -279,6 +282,7 @@ mod tests {
             agent_command: vec!["echo".into(), "hello world".into(), "$HOME".into(), "it's".into()],
             env: vec![("MSG".into(), "a 'quote' here".into())],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         // Argument wrapping
@@ -299,6 +303,7 @@ mod tests {
             agent_command: vec!["true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         meta.stage(tmp.path()).unwrap();
 
@@ -329,6 +334,7 @@ mod tests {
                 guest_path: "/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
+        mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains("mkdir -p '/.claude'"));
@@ -347,6 +353,7 @@ mod tests {
             agent_command: vec!["echo".into(), "hi".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(!script.contains("/abox-meta/credentials"));
@@ -363,6 +370,7 @@ mod tests {
                 guest_path: "/root/.config/it's a test/creds.json".into(),
                 mode: "0600".into(),
             }],
+        mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains(r"'/root/.config/it'\''s a test/creds.json'"));
@@ -380,6 +388,7 @@ mod tests {
                 guest_path: "/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
+        mount_excludes: vec![],
         };
         meta.stage(tmp.path()).unwrap();
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
@@ -393,6 +402,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(
@@ -412,6 +422,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(
@@ -436,6 +447,7 @@ mod tests {
                 guest_path: "/home/abox/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
+        mount_excludes: vec![],
         };
         let script = meta.runner_script();
         // Directory under agent home gets chowned so tools can write config there.
@@ -459,6 +471,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains("grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.claude.json"));
@@ -472,6 +485,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(

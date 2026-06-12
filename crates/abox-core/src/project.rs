@@ -1381,6 +1381,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1398,6 +1399,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         config.validate(Path::new(".")).unwrap();
@@ -1423,6 +1425,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1439,8 +1442,10 @@ mod tests {
                 caches: vec!["cargo".into()],
                 prepare: None,
                 watch: vec![],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1464,8 +1469,10 @@ mod tests {
                 caches: vec!["cargo".into()],
                 prepare: None,
                 watch: vec![],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1490,8 +1497,10 @@ mod tests {
                 caches: vec!["cargo".into()],
                 prepare: None,
                 watch: vec![],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1509,6 +1518,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let temp = tempdir().unwrap();
@@ -1594,6 +1604,7 @@ mod tests {
             agent: Some(AgentConfig {
                 default_prompt_file: Some(PathBuf::from(".abox/prompt.md")),
             }),
+            services: std::collections::HashMap::new(),
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -1619,6 +1630,7 @@ mod tests {
             agent: Some(AgentConfig {
                 default_prompt_file: Some(PathBuf::from("../outside-secret.txt")),
             }),
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(&repo_root).expect_err("prompt path should be rejected");
@@ -1646,9 +1658,11 @@ mod tests {
                     caches: vec!["npm".into()],
                     prepare: Some(PathBuf::from(".abox/prepare.sh")),
                     watch: vec![],
+                    mount_excludes: Vec::new(),
                 }),
                 agent: None,
-            };
+                services: std::collections::HashMap::new(),
+        };
 
             let err = config.validate(&repo_root).expect_err("symlink escape should be rejected");
             assert!(format!("{err:#}").contains("must stay within repo root"));
@@ -1669,8 +1683,10 @@ mod tests {
                 caches: vec!["npm".into()],
                 prepare: None,
                 watch: vec![PathBuf::from("../outside-lock.json")],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(&repo_root).expect_err("watch escape should be rejected");
@@ -1695,8 +1711,10 @@ mod tests {
                 caches: vec!["npm".into()],
                 prepare: Some(PathBuf::from(".abox/prepare.sh")),
                 watch: vec![PathBuf::from("package-lock.json")],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();

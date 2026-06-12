@@ -289,7 +289,13 @@ fn list_grants(policy_path: &PathBuf) -> Result<()> {
     let egress = policy.get("egress").and_then(|v| v.as_array());
 
     match egress {
-        None | Some([]) => {
+        None => {
+            println!("No credential injection rules configured.");
+            println!();
+            println!("Add one with: abox grant add <provider>");
+            println!("See available providers with: abox grant providers");
+        }
+        Some(rules) if rules.is_empty() => {
             println!("No credential injection rules configured.");
             println!();
             println!("Add one with: abox grant add <provider>");
