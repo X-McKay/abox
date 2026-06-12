@@ -86,6 +86,9 @@ enum Commands {
     #[command(subcommand)]
     Grant(commands::grant::GrantAction),
 
+    /// Manage ephemeral service sidecars (postgres, redis, ollama).
+    Services(commands::services::ServicesArgs),
+
     /// Open the TUI dashboard.
     Tui,
     /// Verify and inspect the audit log.
@@ -160,6 +163,11 @@ async fn main() -> Result<()> {
     if let Some(Commands::Grant(action)) = command.as_ref() {
         let args = commands::grant::GrantArgs { action: action.clone() };
         return commands::grant::execute(&args, &config).await;
+    }
+
+    // Services command does not need the orchestrator
+    if let Some(Commands::Services(args)) = command.as_ref() {
+        return commands::services::execute(args, &config, &repo_path);
     }
 
     // TUI command
@@ -263,6 +271,7 @@ async fn main() -> Result<()> {
         }
         Commands::Ca(_)
         | Commands::Grant(_)
+        | Commands::Services(_)
         | Commands::Tui
         | Commands::Audit(_)
         | Commands::Init(_)

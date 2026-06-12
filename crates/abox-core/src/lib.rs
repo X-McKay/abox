@@ -28,6 +28,7 @@ pub mod project;
 pub mod protocol;
 pub mod proxy_bridge;
 pub mod sandbox;
+pub mod services;
 pub mod snapshot;
 pub mod util;
 pub mod vm;

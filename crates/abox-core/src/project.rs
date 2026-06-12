@@ -227,6 +227,22 @@ pub struct ProjectConfig {
     /// Optional agent defaults.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
+    /// Optional ephemeral service sidecars (postgres, redis, ollama).
+    ///
+    /// Services are started as Docker containers on the host before the
+    /// sandbox VM boots. Connection URLs are injected as environment
+    /// variables (ABOX_POSTGRES_URL, ABOX_REDIS_URL, ABOX_OLLAMA_URL).
+    /// All services are stopped and removed when the sandbox exits.
+    ///
+    /// Example:
+    /// ```toml
+    /// [services]
+    /// postgres = { version = "17" }
+    /// redis = { version = "7" }
+    /// ollama = { models = ["qwen2.5-coder:7b"] }
+    /// ```
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub services: std::collections::HashMap<String, crate::services::ServiceConfig>,
 }
 
 /// The normalized scoped network input used by policy compilation.
