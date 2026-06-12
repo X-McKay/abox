@@ -1,4 +1,5 @@
 pub mod attach;
+pub mod audit;
 pub mod ca;
 pub mod capabilities;
 pub mod divergence;

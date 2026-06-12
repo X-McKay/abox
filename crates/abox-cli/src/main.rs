@@ -81,6 +81,9 @@ enum Commands {
 
     /// Open the TUI dashboard.
     Tui,
+    /// Verify and inspect the audit log.
+    #[command(subcommand)]
+    Audit(commands::audit::AuditAction),
 }
 
 #[tokio::main]
@@ -150,6 +153,12 @@ async fn main() -> Result<()> {
     if let Some(Commands::Tui) = command.as_ref() {
         let mut state = tui::dashboard::DashboardState::new();
         return tui::dashboard::run_dashboard(&mut state);
+    }
+
+    // Audit command does not need the orchestrator
+    if let Some(Commands::Audit(action)) = command.as_ref() {
+        let args = commands::audit::AuditArgs { action: action.clone() };
+        return commands::audit::execute(&args, &config);
     }
 
     // Load the policy engine. Fail fast with an actionable message if the
@@ -230,6 +239,7 @@ async fn main() -> Result<()> {
         },
         Commands::Ca(_)
         | Commands::Tui
+        | Commands::Audit(_)
         | Commands::Init(_)
         | Commands::Doctor
         | Commands::Project(_) => unreachable!(),
