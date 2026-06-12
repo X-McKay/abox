@@ -5,6 +5,7 @@ pub mod capabilities;
 pub mod divergence;
 pub mod doctor;
 pub mod env;
+pub mod grant;
 pub mod init;
 pub mod list;
 pub mod merge;

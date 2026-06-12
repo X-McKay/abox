@@ -82,6 +82,10 @@ enum Commands {
     #[command(subcommand)]
     Ca(commands::ca::CaCommand),
 
+    /// Manage credential injection rules for transparent HTTP auth.
+    #[command(subcommand)]
+    Grant(commands::grant::GrantAction),
+
     /// Open the TUI dashboard.
     Tui,
     /// Verify and inspect the audit log.
@@ -150,6 +154,12 @@ async fn main() -> Result<()> {
     // CA command does not need the orchestrator
     if let Some(Commands::Ca(cmd)) = command.as_ref() {
         return commands::ca::execute(cmd);
+    }
+
+    // Grant command does not need the orchestrator
+    if let Some(Commands::Grant(action)) = command.as_ref() {
+        let args = commands::grant::GrantArgs { action: action.clone() };
+        return commands::grant::execute(&args, &config);
     }
 
     // TUI command
@@ -252,6 +262,7 @@ async fn main() -> Result<()> {
             commands::snapshot::execute_with_orchestrator(args, &orchestrator, &config).await
         }
         Commands::Ca(_)
+        | Commands::Grant(_)
         | Commands::Tui
         | Commands::Audit(_)
         | Commands::Init(_)
