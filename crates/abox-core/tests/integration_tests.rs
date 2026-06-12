@@ -268,6 +268,7 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "{value}".to_string(),
+                request_rules: vec![],
             },
             EgressRule {
                 domain: "api.openai.com".to_string(),
@@ -276,6 +277,7 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "Bearer {value}".to_string(),
+                request_rules: vec![],
             },
             EgressRule {
                 domain: "*.amazonaws.com".to_string(),
@@ -284,6 +286,7 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "AWS4-HMAC-SHA256 {value}".to_string(),
+                request_rules: vec![],
             },
         ],
         default_cli_action: "deny".to_string(),
@@ -780,6 +783,7 @@ async fn test_orchestrator_create_sandbox() {
             timeout_secs: None,
             ephemeral: false,
             ca_cert_pem: None,
+            mount_excludes: vec![],
         })
         .await
         .unwrap();
@@ -819,6 +823,7 @@ async fn test_orchestrator_create_multiple_sandboxes() {
             timeout_secs: None,
             ephemeral: false,
             ca_cert_pem: None,
+            mount_excludes: vec![],
         })
         .await
         .unwrap();
@@ -942,6 +947,7 @@ async fn test_orchestrator_divergence() {
             timeout_secs: None,
             ephemeral: false,
             ca_cert_pem: None,
+            mount_excludes: vec![],
         })
         .await
         .unwrap();

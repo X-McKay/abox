@@ -6,8 +6,8 @@
 use abox_core::config::AboxConfig;
 use abox_core::project::ProjectConfig;
 use abox_core::services::{
-    docker_available, find_service_def, pull_ollama_models, start_service,
-    stop_sandbox_services, wait_for_service_ready, ServiceConfig, SERVICE_DEFS,
+    docker_available, find_service_def, pull_ollama_models, start_service, stop_sandbox_services,
+    wait_for_service_ready, ServiceConfig, SERVICE_DEFS,
 };
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -52,7 +52,7 @@ pub enum ServicesAction {
     Show,
 }
 
-pub fn execute(args: &ServicesArgs, config: &AboxConfig, repo_root: &Path) -> Result<()> {
+pub fn execute(args: &ServicesArgs, _config: &AboxConfig, repo_root: &Path) -> Result<()> {
     match &args.action {
         ServicesAction::Available => list_available_services(),
         ServicesAction::Start { service, sandbox, version, models, no_wait } => {
@@ -66,14 +66,11 @@ pub fn execute(args: &ServicesArgs, config: &AboxConfig, repo_root: &Path) -> Re
 fn list_available_services() -> Result<()> {
     println!("Available service sidecars:");
     println!();
-    println!("{:<12} {:<10} {:<30} {}", "NAME", "DEFAULT", "IMAGE", "DESCRIPTION");
+    println!("{:<12} {:<10} {:<30} DESCRIPTION", "NAME", "DEFAULT", "IMAGE");
     println!("{}", "-".repeat(80));
     for def in SERVICE_DEFS {
         let image = def.image_template.replace("{version}", def.default_version);
-        println!(
-            "{:<12} {:<10} {:<30} {}",
-            def.name, def.default_version, image, def.description
-        );
+        println!("{:<12} {:<10} {:<30} {}", def.name, def.default_version, image, def.description);
     }
     println!();
     println!("Configure in .abox/project.toml:");
@@ -105,11 +102,12 @@ fn start_service_cmd(
         );
     }
 
-    let def = find_service_def(service_name)
-        .ok_or_else(|| anyhow::anyhow!(
+    let def = find_service_def(service_name).ok_or_else(|| {
+        anyhow::anyhow!(
             "Unknown service '{service_name}'.\n\
              Run 'abox services available' to see supported services."
-        ))?;
+        )
+    })?;
 
     let models_vec: Vec<String> = models
         .unwrap_or("")
@@ -122,7 +120,7 @@ fn start_service_cmd(
     let config = ServiceConfig {
         version: version.map(str::to_string),
         models: models_vec.clone(),
-        env: Default::default(),
+        env: std::collections::HashMap::default(),
         wait: !no_wait,
     };
 

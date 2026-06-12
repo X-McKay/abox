@@ -56,8 +56,7 @@ pub enum GrantMcpAction {
 pub async fn execute(args: &GrantMcpArgs, config: &AboxConfig) -> Result<()> {
     match &args.action {
         GrantMcpAction::Auth { server_url, name, client_id, scopes } => {
-            auth(server_url, name.as_deref(), client_id.as_deref(), scopes.as_deref(), config)
-                .await
+            auth(server_url, name.as_deref(), client_id.as_deref(), scopes.as_deref(), config).await
         }
         GrantMcpAction::List => list_mcp_tokens(config),
         GrantMcpAction::Show { name } => show_token(name, config),
@@ -73,17 +72,20 @@ async fn auth(
     config: &AboxConfig,
 ) -> Result<()> {
     // Derive name from server URL if not provided
-    let token_name = name.map(str::to_string).unwrap_or_else(|| {
-        server_url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or(server_url)
-            .replace('.', "-")
-    });
+    let token_name = name.map_or_else(
+        || {
+            server_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or(server_url)
+                .replace('.', "-")
+        },
+        str::to_string,
+    );
 
-    println!("Discovering OAuth endpoints for {}...", server_url);
+    println!("Discovering OAuth endpoints for {server_url}...");
 
     let metadata = discover_oauth_metadata(server_url).await?;
 
@@ -98,10 +100,9 @@ async fn auth(
         }
         None => {
             anyhow::bail!(
-                "Server at {} does not support OAuth 2.0 discovery.\n\
+                "Server at {server_url} does not support OAuth 2.0 discovery.\n\
                  The server must expose /.well-known/oauth-authorization-server\n\
-                 as per RFC 8414.",
-                server_url
+                 as per RFC 8414."
             );
         }
     };
@@ -143,9 +144,10 @@ async fn auth(
     println!();
     println!("Token stored as '{token_name}' at {}", path.display());
     if let Some(exp) = expires_at {
-        let dt = chrono::DateTime::from_timestamp(exp, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let dt = chrono::DateTime::from_timestamp(exp, 0).map_or_else(
+            || "unknown".to_string(),
+            |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        );
         println!("Expires: {dt}");
     }
     println!();
@@ -176,15 +178,12 @@ fn list_mcp_tokens(config: &AboxConfig) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<24} {:<40} {:<10} {}", "NAME", "SERVER", "STATUS", "SCOPES");
+    println!("{:<24} {:<40} {:<10} SCOPES", "NAME", "SERVER", "STATUS");
     println!("{}", "-".repeat(90));
     for token in &tokens {
         let status = if token.is_expired() { "expired" } else { "valid" };
-        let scopes = if token.scopes.is_empty() {
-            "(none)".to_string()
-        } else {
-            token.scopes.join(", ")
-        };
+        let scopes =
+            if token.scopes.is_empty() { "(none)".to_string() } else { token.scopes.join(", ") };
         let server = if token.server_url.len() > 38 {
             format!("{}…", &token.server_url[..37])
         } else {
@@ -207,9 +206,10 @@ fn show_token(name: &str, config: &AboxConfig) -> Result<()> {
     println!("Type: {}", token.token_type);
     println!("Status: {}", if token.is_expired() { "EXPIRED" } else { "valid" });
     if let Some(exp) = token.expires_at {
-        let dt = chrono::DateTime::from_timestamp(exp, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let dt = chrono::DateTime::from_timestamp(exp, 0).map_or_else(
+            || "unknown".to_string(),
+            |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        );
         println!("Expires: {dt}");
     }
     println!("Stored: {}", token.stored_at);

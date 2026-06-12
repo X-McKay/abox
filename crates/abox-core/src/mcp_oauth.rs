@@ -8,9 +8,8 @@
 //!
 //! 1. Fetch `<server-url>/.well-known/oauth-authorization-server`
 //! 2. Parse the metadata to find `authorization_endpoint` and `token_endpoint`
-//! 3. If Dynamic Client Registration (DCR) is supported, register a client
-//! 4. Perform the authorization code flow with PKCE
-//! 5. Store the resulting token for use by the egress proxy
+//! 3. Perform the authorization code flow with PKCE
+//! 4. Store the resulting token for use by the egress proxy
 //!
 //! # Token Storage
 //!
@@ -19,6 +18,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// OAuth 2.0 Authorization Server Metadata (RFC 8414).
@@ -80,8 +80,7 @@ impl McpToken {
         if let Some(exp) = self.expires_at {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_secs().cast_signed());
             now >= exp
         } else {
             false
@@ -107,12 +106,10 @@ pub fn token_path(state_dir: &Path, name: &str) -> PathBuf {
 /// Save an MCP token to disk.
 pub fn save_token(state_dir: &Path, token: &McpToken) -> Result<PathBuf> {
     let dir = tokens_dir(state_dir);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("Creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("Creating {}", dir.display()))?;
     let path = token_path(state_dir, &token.name);
     let json = serde_json::to_string_pretty(token).context("Serializing token")?;
-    std::fs::write(&path, json)
-        .with_context(|| format!("Writing token to {}", path.display()))?;
+    std::fs::write(&path, json).with_context(|| format!("Writing token to {}", path.display()))?;
     Ok(path)
 }
 
@@ -122,10 +119,10 @@ pub fn load_token(state_dir: &Path, name: &str) -> Result<Option<McpToken>> {
     if !path.exists() {
         return Ok(None);
     }
-    let json = std::fs::read_to_string(&path)
-        .with_context(|| format!("Reading {}", path.display()))?;
-    let token: McpToken = serde_json::from_str(&json)
-        .with_context(|| format!("Parsing {}", path.display()))?;
+    let json =
+        std::fs::read_to_string(&path).with_context(|| format!("Reading {}", path.display()))?;
+    let token: McpToken =
+        serde_json::from_str(&json).with_context(|| format!("Parsing {}", path.display()))?;
     Ok(Some(token))
 }
 
@@ -158,8 +155,7 @@ pub fn delete_token(state_dir: &Path, name: &str) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    std::fs::remove_file(&path)
-        .with_context(|| format!("Removing {}", path.display()))?;
+    std::fs::remove_file(&path).with_context(|| format!("Removing {}", path.display()))?;
     Ok(true)
 }
 
@@ -206,11 +202,14 @@ fn build_http_client() -> Result<reqwest::Client> {
 }
 
 /// Generate a PKCE code verifier and challenge.
+///
+/// Uses `/dev/urandom` on Unix for cryptographically secure randomness.
 pub fn generate_pkce() -> (String, String) {
     use sha2::{Digest, Sha256};
 
-    // Generate 32 random bytes for the verifier
-    let verifier_bytes: Vec<u8> = (0..32).map(|_| rand_byte()).collect();
+    // Generate 32 cryptographically random bytes for the verifier.
+    // We read from /dev/urandom directly to avoid adding a rand crate dependency.
+    let verifier_bytes = read_random_bytes(32);
     let verifier = base64_url_encode(&verifier_bytes);
 
     // Challenge = BASE64URL(SHA256(verifier))
@@ -221,30 +220,53 @@ pub fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-/// Simple random byte generator (no external rand crate needed).
-fn rand_byte() -> u8 {
-    // Use the system time as a simple entropy source for PKCE
-    // In production this would use a proper CSPRNG, but for PKCE
-    // the verifier just needs to be unpredictable enough for the flow
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(42);
-    (nanos & 0xFF) as u8
+/// Read `n` cryptographically random bytes from the OS.
+fn read_random_bytes(n: usize) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut buf = vec![0u8; n];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(&mut buf).is_ok() {
+                return buf;
+            }
+        }
+        // Fallback: use time-based seed (less secure but functional)
+        time_based_random(n)
+    }
+    #[cfg(not(unix))]
+    {
+        time_based_random(n)
+    }
 }
 
-/// Base64-URL encode bytes (no padding).
+/// Fallback random byte generation using time-based entropy.
+/// Only used when /dev/urandom is unavailable.
+fn time_based_random(n: usize) -> Vec<u8> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(42, |d| d.subsec_nanos());
+    // Simple LCG: multiply by a prime and add the index for variation
+    (0..n)
+        .map(|i| {
+            let mixed = seed
+                .wrapping_mul(1_664_525_u32)
+                .wrapping_add(1_013_904_223_u32)
+                .wrapping_add(i as u32 * 6_971_u32);
+            (mixed >> 8) as u8
+        })
+        .collect()
+}
+
+/// Base64-URL encode bytes (no padding, RFC 4648 §5).
 fn base64_url_encode(bytes: &[u8]) -> String {
-    // Simple base64-url encoding without external crate
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut result = String::new();
+    let mut result = String::with_capacity((bytes.len() * 4).div_ceil(3));
     let mut i = 0;
     while i < bytes.len() {
         let b0 = bytes[i] as usize;
         let b1 = if i + 1 < bytes.len() { bytes[i + 1] as usize } else { 0 };
         let b2 = if i + 2 < bytes.len() { bytes[i + 2] as usize } else { 0 };
-        result.push(CHARS[(b0 >> 2)] as char);
+        result.push(CHARS[b0 >> 2] as char);
         result.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
         if i + 1 < bytes.len() {
             result.push(CHARS[((b1 & 0xF) << 2) | (b2 >> 6)] as char);
@@ -347,15 +369,13 @@ pub async fn run_auth_flow(
     let expires_at = token_response["expires_in"].as_i64().map(|secs| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs().cast_signed());
         now + secs
     });
 
     let granted_scopes: Vec<String> = token_response["scope"]
         .as_str()
-        .map(|s| s.split_whitespace().map(str::to_string).collect())
-        .unwrap_or_else(|| scopes.to_vec());
+        .map_or_else(|| scopes.to_vec(), |s| s.split_whitespace().map(str::to_string).collect());
 
     let _ = server_url; // used for context in error messages
     Ok((access_token, refresh_token, expires_at, granted_scopes))
@@ -374,13 +394,11 @@ async fn wait_for_callback(port: u16) -> Result<String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    let (mut stream, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        listener.accept(),
-    )
-    .await
-    .context("Timed out waiting for OAuth callback (120s)")?
-    .context("Failed to accept connection")?;
+    let (mut stream, _) =
+        tokio::time::timeout(std::time::Duration::from_mins(2), listener.accept())
+            .await
+            .context("Timed out waiting for OAuth callback (120s)")?
+            .context("Failed to accept connection")?;
 
     let (reader, mut writer) = stream.split();
     let mut reader = BufReader::new(reader);
@@ -393,9 +411,10 @@ async fn wait_for_callback(port: u16) -> Result<String> {
         .nth(1)
         .and_then(|path| {
             path.split('?').nth(1).and_then(|query| {
-                query.split('&').find(|p| p.starts_with("code=")).map(|p| {
-                    p.strip_prefix("code=").unwrap_or("").to_string()
-                })
+                query
+                    .split('&')
+                    .find(|p| p.starts_with("code="))
+                    .map(|p| p.strip_prefix("code=").unwrap_or("").to_string())
             })
         })
         .ok_or_else(|| anyhow::anyhow!("No authorization code in callback URL: {request_line}"))?;
@@ -427,7 +446,7 @@ fn open_browser(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Simple URL encoding for query parameters.
+/// Percent-encode a string for use in a URL query parameter (RFC 3986).
 fn urlencoded(s: &str) -> String {
     let mut result = String::new();
     for c in s.chars() {
@@ -436,7 +455,7 @@ fn urlencoded(s: &str) -> String {
             ' ' => result.push('+'),
             c => {
                 for byte in c.to_string().as_bytes() {
-                    result.push_str(&format!("%{byte:02X}"));
+                    let _ = write!(result, "%{byte:02X}");
                 }
             }
         }
@@ -450,9 +469,9 @@ mod tests {
 
     #[test]
     fn test_base64_url_encode() {
-        // Known test vector: empty input
+        // Empty input
         assert_eq!(base64_url_encode(b""), "");
-        // "Man" -> "TWFu"
+        // "Man" -> "TWFu" (standard base64 test vector)
         assert_eq!(base64_url_encode(b"Man"), "TWFu");
     }
 
@@ -519,5 +538,18 @@ mod tests {
 
         let not_found = load_token(state_dir, "test-service").unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_generate_pkce_produces_valid_base64url() {
+        let (verifier, challenge) = generate_pkce();
+        // Verifier should be non-empty and only contain base64url chars
+        assert!(!verifier.is_empty());
+        assert!(verifier.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        // Challenge should also be valid base64url
+        assert!(!challenge.is_empty());
+        assert!(challenge.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        // Verifier and challenge should differ
+        assert_ne!(verifier, challenge);
     }
 }

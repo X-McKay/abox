@@ -410,11 +410,8 @@ impl ProjectConfig {
             }
         }
         let watch_paths = infer_watch_paths(self.environment.as_ref(), &caches);
-        let mount_excludes = self
-            .environment
-            .as_ref()
-            .map(|env| env.mount_excludes.clone())
-            .unwrap_or_default();
+        let mount_excludes =
+            self.environment.as_ref().map(|env| env.mount_excludes.clone()).unwrap_or_default();
 
         let default_prompt_path =
             self.agent.as_ref().and_then(|agent| agent.default_prompt_file.clone());
@@ -1129,8 +1126,7 @@ fn validate_mount_excludes(excludes: &[String]) -> Result<()> {
                 "environment.mount_excludes: path {path:?} must not escape the workspace (no '..')"
             );
         }
-        if path.contains("/../") || path.ends_with("/..")
-        {
+        if path.contains("/../") || path.ends_with("/..") {
             anyhow::bail!(
                 "environment.mount_excludes: path {path:?} must not escape the workspace (no '..')"
             );
@@ -1662,7 +1658,7 @@ mod tests {
                 }),
                 agent: None,
                 services: std::collections::HashMap::new(),
-        };
+            };
 
             let err = config.validate(&repo_root).expect_err("symlink escape should be rejected");
             assert!(format!("{err:#}").contains("must stay within repo root"));

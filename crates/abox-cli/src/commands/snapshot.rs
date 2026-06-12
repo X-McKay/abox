@@ -143,12 +143,7 @@ fn list_snapshots(snap_mgr: &SnapshotManager) -> Result<()> {
     println!("{:<24} {:<12} PATH", "NAME", "SIZE");
     println!("{}", "-".repeat(70));
     for snap in &snapshots {
-        println!(
-            "{:<24} {:<12} {}",
-            snap.name,
-            format_size(snap.size_bytes),
-            snap.path.display()
-        );
+        println!("{:<24} {:<12} {}", snap.name, format_size(snap.size_bytes), snap.path.display());
     }
     println!();
     println!("{} snapshot(s) total", snapshots.len());
@@ -185,15 +180,10 @@ async fn create_snapshot<W: WorkspacePort, V: VmPort>(
     match snap_mgr.create_snapshot(&info.api_socket, name, virtiofs_sockets).await {
         Ok(path) => {
             orchestrator.resume_sandbox(from).await?;
-            let size = abox_core::snapshot::dir_size_public(&path).unwrap_or(0);
+            let size = abox_core::snapshot::dir_size(&path).unwrap_or(0);
             println!("  Resuming sandbox...");
             println!();
-            println!(
-                "Snapshot '{}' created ({}) from sandbox '{}'",
-                name,
-                format_size(size),
-                from
-            );
+            println!("Snapshot '{}' created ({}) from sandbox '{}'", name, format_size(size), from);
             println!("Restore with: abox snapshot restore {name} --as <new-sandbox-id>");
             Ok(())
         }
@@ -276,9 +266,8 @@ fn prune_snapshots(snap_mgr: &SnapshotManager, keep: usize, dry_run: bool) -> Re
     if failed > 0 {
         println!("Pruned {deleted} snapshot(s) ({failed} failed).");
         anyhow::bail!("Failed to delete {failed} snapshot(s)");
-    } else {
-        println!("Pruned {deleted} snapshot(s).");
     }
+    println!("Pruned {deleted} snapshot(s).");
 
     Ok(())
 }

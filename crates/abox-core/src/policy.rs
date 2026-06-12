@@ -78,11 +78,7 @@ impl EgressRequestRule {
                 "Invalid egress request rule {s:?}: action must be 'allow' or 'deny', got {action:?}"
             );
         }
-        Ok(Self {
-            action,
-            method: parts[1].to_uppercase(),
-            path_pattern: parts[2].to_string(),
-        })
+        Ok(Self { action, method: parts[1].to_uppercase(), path_pattern: parts[2].to_string() })
     }
 
     /// Check if this rule matches the given method and path.
@@ -488,15 +484,12 @@ impl PolicyEngine {
         // If there's a matching rule with per-request rules, apply them
         if let Some(rule) = evaluation.rule {
             if !rule.request_rules.is_empty() {
-                match rule.evaluate_request_rules(method, path) {
-                    Some(true) => {} // explicitly allowed
-                    Some(false) => {
-                        return Err(Decision::Deny(format!(
-                            "Request {method} {path} denied by per-request rule for domain '{domain}'"
-                        )));
-                    }
-                    None => {} // no rule matched; fall through (domain-level allow stands)
+                if let Some(false) = rule.evaluate_request_rules(method, path) {
+                    return Err(Decision::Deny(format!(
+                        "Request {method} {path} denied by per-request rule for domain '{domain}'"
+                    )));
                 }
+                // Some(true) or None: allowed or no rule matched; fall through
             }
         }
 
@@ -668,15 +661,15 @@ pub(crate) fn path_matches(pattern: &str, path: &str) -> bool {
 
 fn path_matches_recursive(pattern: &str, path: &str) -> bool {
     // Split into segments and match
-    let pat_parts: Vec<&str> = pattern.split('/').collect();
-    let path_parts: Vec<&str> = path.split('/').collect();
-    path_parts_match(&pat_parts, &path_parts)
+    let pattern_segs: Vec<&str> = pattern.split('/').collect();
+    let path_segs: Vec<&str> = path.split('/').collect();
+    path_segs_match(&pattern_segs, &path_segs)
 }
 
-fn path_parts_match(pat: &[&str], path: &[&str]) -> bool {
+fn path_segs_match(pat: &[&str], path: &[&str]) -> bool {
     match (pat.first(), path.first()) {
         (None, None) => true,
-        (None, _) => false,
+        (None, _) | (Some(_), None) => false,
         (Some(&"**"), _) => {
             // ** matches zero or more segments
             if pat.len() == 1 {
@@ -684,7 +677,7 @@ fn path_parts_match(pat: &[&str], path: &[&str]) -> bool {
             }
             // Try matching ** against 0, 1, 2, ... path segments
             for i in 0..=path.len() {
-                if path_parts_match(&pat[1..], &path[i..]) {
+                if path_segs_match(&pat[1..], &path[i..]) {
                     return true;
                 }
             }
@@ -692,16 +685,15 @@ fn path_parts_match(pat: &[&str], path: &[&str]) -> bool {
         }
         (Some(&"*"), Some(_)) => {
             // * matches exactly one non-empty segment
-            path_parts_match(&pat[1..], &path[1..])
+            path_segs_match(&pat[1..], &path[1..])
         }
         (Some(p), Some(s)) => {
             if p == s {
-                path_parts_match(&pat[1..], &path[1..])
+                path_segs_match(&pat[1..], &path[1..])
             } else {
                 false
             }
         }
-        (Some(_), None) => false,
     }
 }
 
@@ -1167,10 +1159,7 @@ mod tests {
             credential_file: None,
             json_path: None,
             header_template: "{value}".into(),
-            request_rules: vec![
-                "allow GET /repos/**".into(),
-                "deny * /**".into(),
-            ],
+            request_rules: vec!["allow GET /repos/**".into(), "deny * /**".into()],
         };
         assert_eq!(rule.evaluate_request_rules("GET", "/repos/owner/repo"), Some(true));
         assert_eq!(rule.evaluate_request_rules("POST", "/repos/owner/repo"), Some(false));

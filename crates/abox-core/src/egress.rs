@@ -245,25 +245,23 @@ async fn handle_mitm_with_injection(
                 if !rule.request_rules.is_empty() {
                     let method = req.method().as_str();
                     let path = req.uri().path();
-                    match rule.evaluate_request_rules(method, path) {
-                        Some(false) => {
-                            tracing::warn!(
-                                domain = %rule.domain,
-                                method = %method,
-                                path = %path,
-                                "Request denied by per-request egress rule"
-                            );
-                            let msg = format!(
-                                "Request {method} {path} denied by egress policy for domain '{}'",
-                                rule.domain
-                            );
-                            return Ok(Response::builder()
-                                .status(StatusCode::FORBIDDEN)
-                                .body(full_body(&msg))
-                                .unwrap());
-                        }
-                        Some(true) | None => {} // allowed or no matching rule
+                    if let Some(false) = rule.evaluate_request_rules(method, path) {
+                        tracing::warn!(
+                            domain = %rule.domain,
+                            method = %method,
+                            path = %path,
+                            "Request denied by per-request egress rule"
+                        );
+                        let msg = format!(
+                            "Request {method} {path} denied by egress policy for domain '{}'",
+                            rule.domain
+                        );
+                        return Ok(Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(full_body(&msg))
+                            .unwrap());
                     }
+                    // Some(true) or None: allowed or no matching rule
                 }
             }
 

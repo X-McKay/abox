@@ -92,14 +92,17 @@ fn resolve_log_path(log_override: Option<PathBuf>, config: &AboxConfig) -> PathB
 
 pub fn execute(args: &AuditArgs, config: &AboxConfig) -> Result<()> {
     match &args.action {
-        AuditAction::Verify { log } => verify(resolve_log_path(log.clone(), config)),
-        AuditAction::Show { log, count, sandbox, request_type } => {
-            show(resolve_log_path(log.clone(), config), *count, sandbox.as_deref(), request_type.as_deref())
-        }
+        AuditAction::Verify { log } => verify(&resolve_log_path(log.clone(), config)),
+        AuditAction::Show { log, count, sandbox, request_type } => show(
+            &resolve_log_path(log.clone(), config),
+            *count,
+            sandbox.as_deref(),
+            request_type.as_deref(),
+        ),
     }
 }
 
-fn verify(path: PathBuf) -> Result<()> {
+fn verify(path: &std::path::Path) -> Result<()> {
     if !path.exists() {
         anyhow::bail!(
             "Audit log not found at {}\n\n\
@@ -112,7 +115,7 @@ fn verify(path: PathBuf) -> Result<()> {
     println!("Verifying audit log: {}", path.display());
     println!("{}", "=".repeat(60));
 
-    let content = std::fs::read_to_string(&path)?;
+    let content = std::fs::read_to_string(path)?;
     let mut errors: Vec<String> = Vec::new();
     let mut prev_hash = ZERO_HASH.to_string();
     let mut expected_seq = 0u64;
@@ -169,7 +172,7 @@ fn verify(path: PathBuf) -> Result<()> {
             ));
         }
 
-        prev_hash = entry.hash.clone();
+        prev_hash.clone_from(&entry.hash);
         expected_seq = entry.seq + 1;
         total += 1;
     }
@@ -194,7 +197,7 @@ fn verify(path: PathBuf) -> Result<()> {
 }
 
 fn show(
-    path: PathBuf,
+    path: &std::path::Path,
     count: usize,
     sandbox_filter: Option<&str>,
     type_filter: Option<&str>,
@@ -205,14 +208,14 @@ fn show(
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(&path)?;
+    let content = std::fs::read_to_string(path)?;
     let entries: Vec<AuditEntry> = content
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(l).ok())
         .filter(|e: &AuditEntry| {
-            sandbox_filter.map_or(true, |s| e.sandbox_id.contains(s))
-                && type_filter.map_or(true, |t| e.request_type == t)
+            sandbox_filter.is_none_or(|s| e.sandbox_id.contains(s))
+                && type_filter.is_none_or(|t| e.request_type == t)
         })
         .collect();
 
@@ -224,8 +227,8 @@ fn show(
     }
 
     println!(
-        "{:<6} {:<26} {:<14} {:<10} {:<8} {}",
-        "SEQ", "TIMESTAMP", "SANDBOX", "TYPE", "DECISION", "TARGET"
+        "{:<6} {:<26} {:<14} {:<10} {:<8} TARGET",
+        "SEQ", "TIMESTAMP", "SANDBOX", "TYPE", "DECISION"
     );
     println!("{}", "-".repeat(90));
 

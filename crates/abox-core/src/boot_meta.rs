@@ -334,7 +334,7 @@ mod tests {
                 guest_path: "/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
-        mount_excludes: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains("mkdir -p '/.claude'"));
@@ -370,7 +370,7 @@ mod tests {
                 guest_path: "/root/.config/it's a test/creds.json".into(),
                 mode: "0600".into(),
             }],
-        mount_excludes: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains(r"'/root/.config/it'\''s a test/creds.json'"));
@@ -388,7 +388,7 @@ mod tests {
                 guest_path: "/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
-        mount_excludes: vec![],
+            mount_excludes: vec![],
         };
         meta.stage(tmp.path()).unwrap();
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
@@ -447,7 +447,7 @@ mod tests {
                 guest_path: "/home/abox/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
-        mount_excludes: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         // Directory under agent home gets chowned so tools can write config there.

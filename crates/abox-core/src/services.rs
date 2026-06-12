@@ -90,7 +90,7 @@ pub struct ServiceDef {
     pub image_template: &'static str, // {version} is replaced
     pub default_port: u16,
     pub env_vars: &'static [(&'static str, &'static str)], // (name, value_template)
-    pub connection_url_template: &'static str, // {host}, {port}, {password}
+    pub connection_url_template: &'static str,             // {host}, {port}, {password}
     pub env_var_name: &'static str,
     pub readiness_command: &'static [&'static str],
     pub description: &'static str,
@@ -157,20 +157,36 @@ pub fn find_service_def(name: &str) -> Option<&'static ServiceDef> {
     SERVICE_DEFS.iter().find(|s| s.name == name)
 }
 
-/// Generate a random alphanumeric password.
+/// Generate a cryptographically random alphanumeric password.
+///
+/// Uses `/dev/urandom` on Unix for secure randomness.
 pub fn generate_password() -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let random_bytes = read_random_bytes(32);
+    random_bytes.iter().map(|&b| CHARS[b as usize % CHARS.len()] as char).collect()
+}
+
+/// Read `n` cryptographically random bytes from the OS.
+fn read_random_bytes(n: usize) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut buf = vec![0u8; n];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(&mut buf).is_ok() {
+                return buf;
+            }
+        }
+    }
+    // Fallback: time-based (less secure, only used if /dev/urandom unavailable)
     use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(42);
-    let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        .chars()
-        .collect();
-    (0..32)
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(42, |d| d.subsec_nanos());
+    // Simple LCG for fallback randomness
+    (0..n)
         .map(|i| {
-            let idx = (seed.wrapping_add(i * 7919) as usize) % chars.len();
-            chars[idx]
+            seed.wrapping_mul(1_664_525_u32)
+                .wrapping_add(1_013_904_223_u32)
+                .wrapping_add(i as u32 * 6_971_u32) as u8
         })
         .collect()
 }
@@ -182,8 +198,7 @@ pub fn docker_available() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Find a free port on the host.
@@ -236,9 +251,8 @@ pub fn start_service(
 
     cmd.arg(&image);
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to start {service_name} container"))?;
+    let output =
+        cmd.output().with_context(|| format!("Failed to start {service_name} container"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -292,7 +306,7 @@ pub fn wait_for_service_ready(
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        if cmd.status().map(|s| s.success()).unwrap_or(false) {
+        if cmd.status().is_ok_and(|s| s.success()) {
             return Ok(());
         }
 
@@ -381,7 +395,7 @@ mod tests {
     fn test_generate_password_length() {
         let pw = generate_password();
         assert_eq!(pw.len(), 32);
-        assert!(pw.chars().all(|c| c.is_alphanumeric()));
+        assert!(pw.chars().all(char::is_alphanumeric));
     }
 
     #[test]

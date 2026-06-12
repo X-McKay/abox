@@ -153,7 +153,14 @@ pub async fn execute(args: &GrantArgs, config: &AboxConfig) -> Result<()> {
     match &args.action {
         GrantAction::Add { name, domain, header, env_var, template, policy } => {
             let policy_path = resolve_policy_path(policy.as_ref(), config);
-            add_grant(name, domain.as_deref(), header.as_deref(), env_var.as_deref(), template, &policy_path)
+            add_grant(
+                name,
+                domain.as_deref(),
+                header.as_deref(),
+                env_var.as_deref(),
+                template,
+                &policy_path,
+            )
         }
         GrantAction::List { policy } => {
             let policy_path = resolve_policy_path(policy.as_ref(), config);
@@ -283,8 +290,8 @@ fn list_grants(policy_path: &PathBuf) -> Result<()> {
         .with_context(|| format!("Reading {}", policy_path.display()))?;
 
     // Parse the TOML to extract egress rules
-    let policy: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("Parsing {}", policy_path.display()))?;
+    let policy: toml::Value =
+        toml::from_str(&content).with_context(|| format!("Parsing {}", policy_path.display()))?;
 
     let egress = policy.get("egress").and_then(|v| v.as_array());
 
@@ -316,7 +323,7 @@ fn list_grants(policy_path: &PathBuf) -> Result<()> {
                 } else {
                     "?".to_string()
                 };
-                println!("{:<30} {:<20} {:<20}", domain, header, source);
+                println!("{domain:<30} {header:<20} {source:<20}");
             }
             println!();
             println!("{} rule(s) configured.", rules.len());
@@ -342,19 +349,16 @@ fn remove_grant(name: &str, policy_path: &PathBuf) -> Result<()> {
     let content = std::fs::read_to_string(policy_path)
         .with_context(|| format!("Reading {}", policy_path.display()))?;
 
-    let policy: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("Parsing {}", policy_path.display()))?;
+    let policy: toml::Value =
+        toml::from_str(&content).with_context(|| format!("Parsing {}", policy_path.display()))?;
 
     let egress = policy.get("egress").and_then(|v| v.as_array());
-    let found = egress.map_or(false, |rules| {
+    let found = egress.is_some_and(|rules| {
         rules.iter().any(|r| r.get("domain").and_then(|v| v.as_str()) == Some(&domain))
     });
 
     if !found {
-        anyhow::bail!(
-            "No egress rule found for domain '{domain}' in {}",
-            policy_path.display()
-        );
+        anyhow::bail!("No egress rule found for domain '{domain}' in {}", policy_path.display());
     }
 
     // Remove the [[egress]] block for this domain by rewriting the TOML
@@ -368,68 +372,72 @@ fn remove_grant(name: &str, policy_path: &PathBuf) -> Result<()> {
 }
 
 /// Remove an [[egress]] block for a specific domain from TOML content.
-/// This is a simple text-based approach that handles the common case.
+///
+/// Scans line-by-line, buffering each `[[egress]]` block. When the block's
+/// `domain` field matches the target, the buffered block is discarded.
+/// All other lines are emitted unchanged.
 fn remove_egress_block(content: &str, domain: &str) -> String {
-    let mut result = Vec::new();
-    let mut in_target_block = false;
-    let mut skip_blank = false;
+    let mut output = String::with_capacity(content.len());
+    let mut block_buf: Vec<&str> = Vec::new();
+    let mut in_egress_block = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
 
         if trimmed == "[[egress]]" {
-            // Start of a new egress block — peek ahead to check if it's the target
-            in_target_block = false;
-            // We'll decide when we see the domain line
-            result.push(("[[egress]]", line));
+            // Flush any previously buffered block that was not the target
+            for buffered in block_buf.drain(..) {
+                output.push_str(buffered);
+                output.push('\n');
+            }
+            in_egress_block = true;
+            block_buf.push(line);
             continue;
         }
 
-        if trimmed.starts_with("domain = ") {
-            let line_domain = trimmed
-                .strip_prefix("domain = \"")
-                .and_then(|s| s.strip_suffix('"'))
-                .unwrap_or("");
-            if line_domain == domain {
-                // This is the target block — remove the [[egress]] line we just pushed
-                if let Some(last) = result.last() {
-                    if last.0 == "[[egress]]" {
-                        result.pop();
-                        in_target_block = true;
-                        skip_blank = true;
-                        continue;
-                    }
+        if in_egress_block {
+            if trimmed.starts_with("[[") {
+                // New section — flush the buffered block and start fresh
+                for buffered in block_buf.drain(..) {
+                    output.push_str(buffered);
+                    output.push('\n');
+                }
+                in_egress_block = true;
+                block_buf.push(line);
+            } else {
+                // Check if this is the domain line for the target
+                let is_target_domain = trimmed
+                    .strip_prefix("domain = \"")
+                    .and_then(|s| s.strip_suffix('"'))
+                    .is_some_and(|d| d == domain);
+                if is_target_domain {
+                    // Discard the buffered block (it's the one to remove)
+                    block_buf.clear();
+                    in_egress_block = false;
+                } else {
+                    block_buf.push(line);
                 }
             }
-        }
-
-        if in_target_block {
-            // Skip lines until we hit the next [[egress]] or end of file
-            if trimmed.starts_with("[[") {
-                in_target_block = false;
-                skip_blank = false;
-                result.push(("other", line));
-            }
-            // else skip this line
             continue;
         }
 
-        if skip_blank && trimmed.is_empty() {
-            skip_blank = false;
-            continue;
-        }
-        skip_blank = false;
-
-        result.push(("other", line));
+        output.push_str(line);
+        output.push('\n');
     }
 
-    result.iter().map(|(_, line)| *line).collect::<Vec<_>>().join("\n") + "\n"
+    // Flush any remaining buffered block
+    for buffered in block_buf {
+        output.push_str(buffered);
+        output.push('\n');
+    }
+
+    output
 }
 
 fn list_providers() {
     println!("Built-in provider shortcuts:");
     println!();
-    println!("{:<16} {:<30} {:<20} {}", "NAME", "DOMAIN", "ENV VAR", "DESCRIPTION");
+    println!("{:<16} {:<30} {:<20} DESCRIPTION", "NAME", "DOMAIN", "ENV VAR");
     println!("{}", "-".repeat(90));
     for p in BUILTIN_PROVIDERS {
         println!("{:<16} {:<30} {:<20} {}", p.name, p.domain, p.env_var, p.description);

@@ -70,7 +70,9 @@ pub struct AuditEntry {
 }
 
 /// Result of verifying an audit log file.
+/// Used by `abox audit verify` in the CLI crate.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct VerifyResult {
     pub total_entries: usize,
     pub ok: bool,
@@ -78,6 +80,7 @@ pub struct VerifyResult {
 }
 
 impl VerifyResult {
+    #[allow(dead_code)]
     pub fn is_ok(&self) -> bool {
         self.ok
     }
@@ -86,6 +89,7 @@ impl VerifyResult {
 /// Thread-safe audit logger that writes hash-chained JSON lines to a file.
 pub struct AuditLog {
     inner: Mutex<AuditLogInner>,
+    #[allow(dead_code)]
     path: PathBuf,
 }
 
@@ -106,11 +110,8 @@ impl AuditLog {
         }
 
         // Read existing entries to find the current chain tip.
-        let (next_seq, last_hash) = if path.exists() {
-            Self::read_chain_tip(path)?
-        } else {
-            (0, ZERO_HASH.to_string())
-        };
+        let (next_seq, last_hash) =
+            if path.exists() { Self::read_chain_tip(path)? } else { (0, ZERO_HASH.to_string()) };
 
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
@@ -137,7 +138,7 @@ impl AuditLog {
             }
             if let Ok(entry) = serde_json::from_str::<AuditEntry>(line) {
                 last_seq = entry.seq;
-                last_hash = entry.hash.clone();
+                last_hash.clone_from(&entry.hash);
                 found_any = true;
             }
         }
@@ -245,6 +246,7 @@ impl AuditLog {
     }
 
     /// Return the path to the audit log file.
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -255,6 +257,7 @@ impl AuditLog {
     /// 1. Each entry's `prev_hash` matches the previous entry's `hash`.
     /// 2. Each entry's `hash` matches the computed hash of `prev_hash || core_json`.
     /// 3. Sequence numbers are contiguous starting from 0.
+    #[allow(dead_code)]
     pub fn verify(path: &Path) -> anyhow::Result<VerifyResult> {
         let content = std::fs::read_to_string(path)?;
         let mut errors = Vec::new();
@@ -329,7 +332,7 @@ impl AuditLog {
                 ));
             }
 
-            prev_hash = entry.hash.clone();
+            prev_hash.clone_from(&entry.hash);
             expected_seq = entry.seq + 1;
             total += 1;
         }

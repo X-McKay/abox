@@ -192,10 +192,7 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
 
     // ── Section 5: CA Certificate ────────────────────────────────────────────
     print_section("CA Certificate (HTTPS Credential Injection)");
-    let ca_checks = [
-        check_ca_files(config),
-        check_ca_trust(config),
-    ];
+    let ca_checks = [check_ca_files(config), check_ca_trust(config)];
     for c in &ca_checks {
         c.print();
     }
@@ -203,10 +200,16 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
     // ── Section 6: Agent-Specific Validation ─────────────────────────────────
     print_section("Agent Validation");
     let agent_checks = [
-        check_agent_credential_injection("Claude Code", config.auth.claude_enabled(),
-            &abox_core::config::default_claude_host_credential_file()),
-        check_agent_credential_injection("Codex", config.auth.codex_enabled(),
-            &abox_core::config::default_codex_host_credential_file()),
+        check_agent_credential_injection(
+            "Claude Code",
+            config.auth.claude_enabled(),
+            &abox_core::config::default_claude_host_credential_file(),
+        ),
+        check_agent_credential_injection(
+            "Codex",
+            config.auth.codex_enabled(),
+            &abox_core::config::default_codex_host_credential_file(),
+        ),
     ];
     for c in &agent_checks {
         c.print();
@@ -647,7 +650,7 @@ fn check_managed_provider(
 }
 
 /// Check that the root CA key and certificate files exist.
-fn check_ca_files(config: &AboxConfig) -> Check {
+fn check_ca_files(_config: &AboxConfig) -> Check {
     let label = "Root CA files";
     let ca_dir = match abox_core::ca::RootCa::default_dir() {
         Ok(d) => d,
@@ -684,9 +687,8 @@ fn check_ca_files(config: &AboxConfig) -> Check {
 fn check_ca_trust(config: &AboxConfig) -> Check {
     let _ = config;
     let label = "Root CA trusted by host OS";
-    let ca_dir = match abox_core::ca::RootCa::default_dir() {
-        Ok(d) => d,
-        Err(_) => return Check::warn(label, "Cannot determine CA directory."),
+    let Ok(ca_dir) = abox_core::ca::RootCa::default_dir() else {
+        return Check::warn(label, "Cannot determine CA directory.");
     };
     let cert_path = ca_dir.join("root.crt");
     if !cert_path.exists() {
@@ -739,7 +741,9 @@ fn check_agent_credential_injection(agent: &str, enabled: bool, host_cred_file: 
     match (enabled, cred_exists) {
         (true, true) => Check::ok_with(
             label,
-            format!("enabled — host credential at {expanded} will be injected at the network layer"),
+            format!(
+                "enabled — host credential at {expanded} will be injected at the network layer"
+            ),
         ),
         (true, false) => Check::fail(
             label,
@@ -758,10 +762,9 @@ fn check_agent_credential_injection(agent: &str, enabled: bool, host_cred_file: 
                 agent.to_lowercase().replace(' ', "_")
             ),
         ),
-        (false, false) => Check::ok_with(
-            label,
-            format!("not configured — {agent} not detected on host"),
-        ),
+        (false, false) => {
+            Check::ok_with(label, format!("not configured — {agent} not detected on host"))
+        }
     }
 }
 
@@ -789,7 +792,7 @@ fn check_audit_log(config: &AboxConfig) -> Check {
     let first_entry = content.lines().find(|l| !l.trim().is_empty());
     let has_hash_chain = first_entry
         .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .map_or(false, |v| v.get("hash").is_some());
+        .is_some_and(|v| v.get("hash").is_some());
 
     if !has_hash_chain {
         return Check::warn(
@@ -859,10 +862,15 @@ fn verify_audit_chain(content: &str) -> Result<Vec<String>> {
 
     for (i, line) in content.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         let entry: Entry = match serde_json::from_str(line) {
             Ok(e) => e,
-            Err(e) => { errors.push(format!("line {}: parse error: {e}", i + 1)); continue; }
+            Err(e) => {
+                errors.push(format!("line {}: parse error: {e}", i + 1));
+                continue;
+            }
         };
         if entry.seq != expected_seq {
             errors.push(format!("seq={}: expected {expected_seq}", entry.seq));
@@ -871,10 +879,14 @@ fn verify_audit_chain(content: &str) -> Result<Vec<String>> {
             errors.push(format!("seq={}: prev_hash mismatch", entry.seq));
         }
         let core = Core {
-            seq: entry.seq, timestamp: entry.timestamp.clone(),
-            sandbox_id: entry.sandbox_id.clone(), request_type: entry.request_type.clone(),
-            target: entry.target.clone(), detail: entry.detail.clone(),
-            decision: entry.decision.clone(), result_code: entry.result_code,
+            seq: entry.seq,
+            timestamp: entry.timestamp.clone(),
+            sandbox_id: entry.sandbox_id.clone(),
+            request_type: entry.request_type.clone(),
+            target: entry.target.clone(),
+            detail: entry.detail.clone(),
+            decision: entry.decision.clone(),
+            result_code: entry.result_code,
         };
         let canonical = serde_json::to_string(&core)?;
         let mut hasher = Sha256::new();
@@ -885,7 +897,7 @@ fn verify_audit_chain(content: &str) -> Result<Vec<String>> {
         if entry.hash != expected_hash {
             errors.push(format!("seq={}: hash mismatch", entry.seq));
         }
-        prev_hash = entry.hash.clone();
+        prev_hash.clone_from(&entry.hash);
         expected_seq = entry.seq + 1;
     }
     Ok(errors)
