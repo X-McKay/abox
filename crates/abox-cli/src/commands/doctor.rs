@@ -190,7 +190,34 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
         c.print();
     }
 
-    // ── Section 5: Environment ───────────────────────────────────────────────
+    // ── Section 5: CA Certificate ────────────────────────────────────────────
+    print_section("CA Certificate (HTTPS Credential Injection)");
+    let ca_checks = [
+        check_ca_files(config),
+        check_ca_trust(config),
+    ];
+    for c in &ca_checks {
+        c.print();
+    }
+
+    // ── Section 6: Agent-Specific Validation ─────────────────────────────────
+    print_section("Agent Validation");
+    let agent_checks = [
+        check_agent_credential_injection("Claude Code", config.auth.claude_enabled(),
+            &abox_core::config::default_claude_host_credential_file()),
+        check_agent_credential_injection("Codex", config.auth.codex_enabled(),
+            &abox_core::config::default_codex_host_credential_file()),
+    ];
+    for c in &agent_checks {
+        c.print();
+    }
+
+    // ── Section 7: Audit Log ─────────────────────────────────────────────────
+    print_section("Audit Log");
+    let audit_check = check_audit_log(config);
+    audit_check.print();
+
+    // ── Section 8: Environment ───────────────────────────────────────────────
     print_section("Environment");
     let env_check = check_local_bin_on_path(&vm_dir);
     env_check.print();
@@ -204,6 +231,9 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
         .chain(vm_checks.iter())
         .chain(cfg_checks.iter())
         .chain(auth_checks.iter())
+        .chain(ca_checks.iter())
+        .chain(agent_checks.iter())
+        .chain(std::iter::once(&audit_check))
         .chain(std::iter::once(&env_check))
         .chain(std::iter::once(&installed_profiles))
         .chain(std::iter::once(&repo_profile))
@@ -614,6 +644,251 @@ fn check_managed_provider(
                 .to_string(),
         ),
     }
+}
+
+/// Check that the root CA key and certificate files exist.
+fn check_ca_files(config: &AboxConfig) -> Check {
+    let label = "Root CA files";
+    let ca_dir = match abox_core::ca::RootCa::default_dir() {
+        Ok(d) => d,
+        Err(e) => return Check::fail(label, format!("Cannot determine CA directory: {e}")),
+    };
+    let cert = ca_dir.join("root.crt");
+    let key = ca_dir.join("root.key");
+
+    match (cert.exists(), key.exists()) {
+        (true, true) => Check::ok_with(label, format!("cert + key in {}", ca_dir.display())),
+        (false, _) => Check::warn(
+            label,
+            format!(
+                "Root CA not yet generated (expected at {})\n\
+                 The CA is created automatically on the first 'abox run'.\n\
+                 Run 'abox ca init' to generate it now.",
+                ca_dir.display()
+            ),
+        ),
+        (true, false) => Check::fail(
+            label,
+            format!(
+                "CA certificate found but private key is missing at {}\n\
+                 Delete {} and run 'abox ca init' to regenerate.",
+                key.display(),
+                ca_dir.display()
+            ),
+        ),
+    }
+}
+
+/// Check that the root CA certificate is trusted by the host OS.
+/// This is a best-effort check using the system CA bundle.
+fn check_ca_trust(config: &AboxConfig) -> Check {
+    let _ = config;
+    let label = "Root CA trusted by host OS";
+    let ca_dir = match abox_core::ca::RootCa::default_dir() {
+        Ok(d) => d,
+        Err(_) => return Check::warn(label, "Cannot determine CA directory."),
+    };
+    let cert_path = ca_dir.join("root.crt");
+    if !cert_path.exists() {
+        return Check::warn(
+            label,
+            "Root CA not yet generated — trust check skipped.\n\
+             Run 'abox ca init' then add the CA to your system trust store.",
+        );
+    }
+
+    // Check if the CA cert is in the system trust store by looking for the
+    // cert file in common trust store locations.
+    let trust_locations = [
+        "/etc/ssl/certs/abox-ca.pem",
+        "/usr/local/share/ca-certificates/abox.crt",
+        "/etc/pki/ca-trust/source/anchors/abox.crt",
+    ];
+    let trusted = trust_locations.iter().any(|p| std::path::Path::new(p).exists());
+
+    if trusted {
+        Check::ok_with(label, "abox CA found in system trust store")
+    } else {
+        Check::warn(
+            label,
+            format!(
+                "Root CA at {} is not yet trusted by the host OS.\n\
+                 Without this, HTTPS credential injection will fail for tools\n\
+                 that use the system CA bundle.\n\
+                 \n\
+                 To trust the CA:\n\
+                 \x20 macOS:  sudo security add-trusted-cert -d -r trustRoot \\\n\
+                 \x20         -k /Library/Keychains/System.keychain {}\n\
+                 \x20 Linux:  sudo cp {} /usr/local/share/ca-certificates/abox.crt\n\
+                 \x20         && sudo update-ca-certificates",
+                cert_path.display(),
+                cert_path.display(),
+                cert_path.display(),
+            ),
+        )
+    }
+}
+
+/// Check that a managed agent's credential injection chain is complete:
+/// enabled in config AND host credential file exists.
+fn check_agent_credential_injection(agent: &str, enabled: bool, host_cred_file: &str) -> Check {
+    let label = format!("{agent} credential injection");
+    let expanded = abox_core::policy::expand_tilde(host_cred_file);
+    let cred_exists = std::path::Path::new(&expanded).exists();
+
+    match (enabled, cred_exists) {
+        (true, true) => Check::ok_with(
+            label,
+            format!("enabled — host credential at {expanded} will be injected at the network layer"),
+        ),
+        (true, false) => Check::fail(
+            label,
+            format!(
+                "Enabled in config but host credential not found at {expanded}.\n\
+                 Log in to {agent} on the host first, or disable the provider in\n\
+                 ~/.abox/config.toml."
+            ),
+        ),
+        (false, true) => Check::warn(
+            label,
+            format!(
+                "Host credential found at {expanded} but provider is not enabled in config.\n\
+                 To enable: add [auth.providers.{}] / enabled = true to ~/.abox/config.toml,\n\
+                 or run 'abox init' to auto-detect and enable it.",
+                agent.to_lowercase().replace(' ', "_")
+            ),
+        ),
+        (false, false) => Check::ok_with(
+            label,
+            format!("not configured — {agent} not detected on host"),
+        ),
+    }
+}
+
+/// Check the audit log status: whether it exists and whether its chain is intact.
+fn check_audit_log(config: &AboxConfig) -> Check {
+    let label = "Audit log integrity";
+    let log_path = config.logs_dir().join("audit.jsonl");
+
+    if !log_path.exists() {
+        return Check::ok_with(
+            label,
+            format!("no audit log yet (will be created at {})", log_path.display()),
+        );
+    }
+
+    // Read the file to count entries and check chain
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(e) => return Check::fail(label, format!("Cannot read audit log: {e}")),
+    };
+
+    let entry_count = content.lines().filter(|l| !l.trim().is_empty()).count();
+
+    // Check if entries have hash fields (new format) or are old format
+    let first_entry = content.lines().find(|l| !l.trim().is_empty());
+    let has_hash_chain = first_entry
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .map_or(false, |v| v.get("hash").is_some());
+
+    if !has_hash_chain {
+        return Check::warn(
+            label,
+            format!(
+                "Audit log at {} has {entry_count} entries in legacy format (no hash chain).\n\
+                 New entries will use the hash-chained format automatically.\n\
+                 Run 'abox audit verify' after the next sandbox run to confirm.",
+                log_path.display()
+            ),
+        );
+    }
+
+    // Verify the hash chain
+    match verify_audit_chain(&content) {
+        Ok(errors) if errors.is_empty() => Check::ok_with(
+            label,
+            format!("{entry_count} entries, hash chain intact ({})", log_path.display()),
+        ),
+        Ok(errors) => Check::fail(
+            label,
+            format!(
+                "Hash chain integrity failure in {} ({} error(s)):\n{}",
+                log_path.display(),
+                errors.len(),
+                errors.join("\n")
+            ),
+        ),
+        Err(e) => Check::fail(label, format!("Verification error: {e}")),
+    }
+}
+
+/// Minimal hash-chain verification (mirrors abox-proxyd's AuditLog::verify).
+fn verify_audit_chain(content: &str) -> Result<Vec<String>> {
+    use sha2::{Digest, Sha256};
+
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        seq: u64,
+        timestamp: String,
+        sandbox_id: String,
+        request_type: String,
+        target: String,
+        detail: String,
+        decision: String,
+        result_code: i32,
+        prev_hash: String,
+        hash: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Core {
+        seq: u64,
+        timestamp: String,
+        sandbox_id: String,
+        request_type: String,
+        target: String,
+        detail: String,
+        decision: String,
+        result_code: i32,
+    }
+
+    let zero_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    let mut errors = Vec::new();
+    let mut prev_hash = zero_hash.to_string();
+    let mut expected_seq = 0u64;
+
+    for (i, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let entry: Entry = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(e) => { errors.push(format!("line {}: parse error: {e}", i + 1)); continue; }
+        };
+        if entry.seq != expected_seq {
+            errors.push(format!("seq={}: expected {expected_seq}", entry.seq));
+        }
+        if entry.prev_hash != prev_hash {
+            errors.push(format!("seq={}: prev_hash mismatch", entry.seq));
+        }
+        let core = Core {
+            seq: entry.seq, timestamp: entry.timestamp.clone(),
+            sandbox_id: entry.sandbox_id.clone(), request_type: entry.request_type.clone(),
+            target: entry.target.clone(), detail: entry.detail.clone(),
+            decision: entry.decision.clone(), result_code: entry.result_code,
+        };
+        let canonical = serde_json::to_string(&core)?;
+        let mut hasher = Sha256::new();
+        hasher.update(entry.prev_hash.as_bytes());
+        hasher.update(b"||");
+        hasher.update(canonical.as_bytes());
+        let expected_hash = format!("{:x}", hasher.finalize());
+        if entry.hash != expected_hash {
+            errors.push(format!("seq={}: hash mismatch", entry.seq));
+        }
+        prev_hash = entry.hash.clone();
+        expected_seq = entry.seq + 1;
+    }
+    Ok(errors)
 }
 
 fn check_socket_path_length(config: &AboxConfig) -> Check {
