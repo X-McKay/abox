@@ -222,6 +222,12 @@ impl SnapshotManager {
 }
 
 /// Recursively compute the size of a directory.
+/// Public alias for use by the CLI snapshot command.
+pub fn dir_size_public(path: &Path) -> Result<u64> {
+    dir_size(path)
+}
+
+/// Recursively compute the size of a directory.
 fn dir_size(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     for entry in std::fs::read_dir(path)? {

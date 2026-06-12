@@ -75,6 +75,9 @@ enum Commands {
     /// Manage VM snapshot templates.
     Template(commands::template::TemplateArgs),
 
+    /// Manage sandbox snapshots (create, restore, list, prune).
+    Snapshot(commands::snapshot::SnapshotArgs),
+
     /// Manage the root CA for HTTPS credential injection.
     #[command(subcommand)]
     Ca(commands::ca::CaCommand),
@@ -153,6 +156,14 @@ async fn main() -> Result<()> {
     if let Some(Commands::Tui) = command.as_ref() {
         let mut state = tui::dashboard::DashboardState::new();
         return tui::dashboard::run_dashboard(&mut state);
+    }
+
+    // Snapshot list/delete/prune do not need the orchestrator.
+    // Snapshot create/restore do — they fall through to the orchestrator block.
+    if let Some(Commands::Snapshot(args)) = command.as_ref() {
+        if commands::snapshot::execute_without_orchestrator(args, &config)? {
+            return Ok(());
+        }
     }
 
     // Audit command does not need the orchestrator
@@ -237,6 +248,9 @@ async fn main() -> Result<()> {
             }
             _ => unreachable!(),
         },
+        Commands::Snapshot(ref args) => {
+            commands::snapshot::execute_with_orchestrator(args, &orchestrator, &config).await
+        }
         Commands::Ca(_)
         | Commands::Tui
         | Commands::Audit(_)

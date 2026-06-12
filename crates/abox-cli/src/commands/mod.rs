@@ -10,6 +10,7 @@ pub mod list;
 pub mod merge;
 pub mod project;
 pub mod run;
+pub mod snapshot;
 pub mod stop;
 pub mod template;
 
