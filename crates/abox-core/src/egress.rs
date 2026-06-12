@@ -238,6 +238,35 @@ async fn handle_mitm_with_injection(
         let rule_owned = rule_owned.clone();
         let inject_header_name = inject_header_name.clone();
         async move {
+            // Per-request rule evaluation: if the matched domain rule has
+            // request_rules, evaluate them against the HTTP method and path.
+            // A deny decision returns 403 immediately without forwarding.
+            if let Some(ref rule) = rule_owned {
+                if !rule.request_rules.is_empty() {
+                    let method = req.method().as_str();
+                    let path = req.uri().path();
+                    match rule.evaluate_request_rules(method, path) {
+                        Some(false) => {
+                            tracing::warn!(
+                                domain = %rule.domain,
+                                method = %method,
+                                path = %path,
+                                "Request denied by per-request egress rule"
+                            );
+                            let msg = format!(
+                                "Request {method} {path} denied by egress policy for domain '{}'",
+                                rule.domain
+                            );
+                            return Ok(Response::builder()
+                                .status(StatusCode::FORBIDDEN)
+                                .body(full_body(&msg))
+                                .unwrap());
+                        }
+                        Some(true) | None => {} // allowed or no matching rule
+                    }
+                }
+            }
+
             // Credential injection: if a rule matches and a credential
             // resolves, insert-or-replace the target header. This matches
             // the original proxy contract: the proxy's job is to *provide*

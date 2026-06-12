@@ -40,6 +40,61 @@ pub struct CliPolicy {
     pub forward_ssh_agent: bool,
 }
 
+/// A per-request rule for an egress domain.
+///
+/// Format: `"<allow|deny> <METHOD|*> <path-pattern>"`
+///
+/// Examples:
+///   `"allow GET /repos/**"`
+///   `"deny * /admin/**"`
+///   `"allow POST /v1/messages"`
+///
+/// Rules are evaluated top-to-bottom; the first match wins.
+/// `*` in the method position matches any HTTP method.
+/// `*` in the path matches a single path segment.
+/// `**` in the path matches zero or more path segments.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EgressRequestRule {
+    /// "allow" or "deny".
+    pub action: String,
+    /// HTTP method or "*" for any.
+    pub method: String,
+    /// Path pattern (supports `*` and `**` wildcards).
+    pub path_pattern: String,
+}
+
+impl EgressRequestRule {
+    /// Parse a rule string like `"allow GET /repos/**"`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let parts: Vec<&str> = s.splitn(3, ' ').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid egress request rule {s:?}: expected \"<allow|deny> <METHOD|*> <path>\""
+            );
+        }
+        let action = parts[0].to_lowercase();
+        if action != "allow" && action != "deny" {
+            anyhow::bail!(
+                "Invalid egress request rule {s:?}: action must be 'allow' or 'deny', got {action:?}"
+            );
+        }
+        Ok(Self {
+            action,
+            method: parts[1].to_uppercase(),
+            path_pattern: parts[2].to_string(),
+        })
+    }
+
+    /// Check if this rule matches the given method and path.
+    pub fn matches(&self, method: &str, path: &str) -> bool {
+        let method_matches = self.method == "*" || self.method == method.to_uppercase();
+        if !method_matches {
+            return false;
+        }
+        path_matches(&self.path_pattern, path)
+    }
+}
+
 /// An HTTP egress proxy rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EgressRule {
@@ -65,9 +120,52 @@ pub struct EgressRule {
     /// Default: just the raw value.
     #[serde(default = "default_header_template")]
     pub header_template: String,
+
+    /// Optional per-request rules that filter by HTTP method and path.
+    ///
+    /// Rules are evaluated top-to-bottom; the first match wins. If no rule
+    /// matches, the request falls through to the default egress action.
+    ///
+    /// Each rule is a string in the format:
+    ///   `"<allow|deny> <METHOD|*> <path-pattern>"`
+    ///
+    /// Example:
+    /// ```toml
+    /// [[egress]]
+    /// domain = "api.github.com"
+    /// inject_header = "Authorization"
+    /// env_var = "GITHUB_TOKEN"
+    /// header_template = "Bearer {value}"
+    /// request_rules = [
+    ///   "allow GET /repos/**",
+    ///   "deny * /**",
+    /// ]
+    /// ```
+    #[serde(default)]
+    pub request_rules: Vec<String>,
 }
 
 impl EgressRule {
+    /// Evaluate per-request rules against a method and path.
+    ///
+    /// Returns `Some(true)` if a rule allows the request,
+    /// `Some(false)` if a rule denies it, or `None` if no rule matches.
+    pub fn evaluate_request_rules(&self, method: &str, path: &str) -> Option<bool> {
+        for rule_str in &self.request_rules {
+            let rule = match EgressRequestRule::parse(rule_str) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(rule = rule_str, error = %e, "Skipping invalid request rule");
+                    continue;
+                }
+            };
+            if rule.matches(method, path) {
+                return Some(rule.action == "allow");
+            }
+        }
+        None
+    }
+
     /// Resolve the credential value for this rule.
     ///
     /// - If `env_var` is Some, reads from the environment.
@@ -372,6 +470,39 @@ impl PolicyEngine {
         self.evaluate_egress_request(domain, 443).map(|evaluation| evaluation.rule)
     }
 
+    /// Evaluate an HTTP egress request with method and path for per-request rules.
+    ///
+    /// When a domain matches an egress rule that has `request_rules`, those rules
+    /// are evaluated against the HTTP method and path. If no request rule matches,
+    /// the request is allowed (the domain-level match already passed).
+    ///
+    /// Returns `Ok(evaluation)` if allowed, `Err(Decision::Deny(...))` if denied.
+    pub fn evaluate_egress_with_path(
+        &self,
+        domain: &str,
+        method: &str,
+        path: &str,
+    ) -> Result<EgressEvaluation<'_>, Decision> {
+        let evaluation = self.evaluate_egress_request(domain, 443)?;
+
+        // If there's a matching rule with per-request rules, apply them
+        if let Some(rule) = evaluation.rule {
+            if !rule.request_rules.is_empty() {
+                match rule.evaluate_request_rules(method, path) {
+                    Some(true) => {} // explicitly allowed
+                    Some(false) => {
+                        return Err(Decision::Deny(format!(
+                            "Request {method} {path} denied by per-request rule for domain '{domain}'"
+                        )));
+                    }
+                    None => {} // no rule matched; fall through (domain-level allow stands)
+                }
+            }
+        }
+
+        Ok(evaluation)
+    }
+
     /// Evaluate a CONNECT request against host-managed rules and any active
     /// repo-level network scope.
     pub fn evaluate_egress_request(
@@ -512,6 +643,66 @@ fn strip_global_options(command: &str, args: &[String]) -> Result<Vec<String>, S
 
     // No subcommand at all — treat as deny.
     Err("git invocation has no subcommand".to_string())
+}
+
+/// Match a URL path pattern against a path.
+///
+/// Pattern syntax:
+/// - `*` matches exactly one path segment (no slashes)
+/// - `**` matches zero or more path segments (including slashes)
+/// - `/**` matches any path with one or more segments after the prefix
+/// - Literal characters match exactly
+///
+/// The root wildcard `/**` matches all paths including `/`.
+pub(crate) fn path_matches(pattern: &str, path: &str) -> bool {
+    // Fast path: exact match
+    if pattern == path {
+        return true;
+    }
+    // Root wildcard matches everything
+    if pattern == "/**" {
+        return true;
+    }
+    path_matches_recursive(pattern, path)
+}
+
+fn path_matches_recursive(pattern: &str, path: &str) -> bool {
+    // Split into segments and match
+    let pat_parts: Vec<&str> = pattern.split('/').collect();
+    let path_parts: Vec<&str> = path.split('/').collect();
+    path_parts_match(&pat_parts, &path_parts)
+}
+
+fn path_parts_match(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first(), path.first()) {
+        (None, None) => true,
+        (None, _) => false,
+        (Some(&"**"), _) => {
+            // ** matches zero or more segments
+            if pat.len() == 1 {
+                return true; // ** at end matches everything remaining
+            }
+            // Try matching ** against 0, 1, 2, ... path segments
+            for i in 0..=path.len() {
+                if path_parts_match(&pat[1..], &path[i..]) {
+                    return true;
+                }
+            }
+            false
+        }
+        (Some(&"*"), Some(_)) => {
+            // * matches exactly one non-empty segment
+            path_parts_match(&pat[1..], &path[1..])
+        }
+        (Some(p), Some(s)) => {
+            if p == s {
+                path_parts_match(&pat[1..], &path[1..])
+            } else {
+                false
+            }
+        }
+        (Some(_), None) => false,
+    }
 }
 
 /// Match a domain pattern against a domain.
@@ -914,11 +1105,97 @@ mod tests {
     }
 
     #[test]
+    fn test_path_matches_exact() {
+        assert!(path_matches("/repos/owner/repo", "/repos/owner/repo"));
+        assert!(!path_matches("/repos/owner/repo", "/repos/owner/other"));
+    }
+
+    #[test]
+    fn test_path_matches_single_wildcard() {
+        assert!(path_matches("/repos/*", "/repos/owner"));
+        assert!(!path_matches("/repos/*", "/repos/owner/repo"));
+    }
+
+    #[test]
+    fn test_path_matches_double_wildcard() {
+        assert!(path_matches("/repos/**", "/repos/owner/repo"));
+        assert!(path_matches("/repos/**", "/repos/owner/repo/branches"));
+        assert!(path_matches("/repos/**", "/repos/owner"));
+    }
+
+    #[test]
+    fn test_path_matches_root_wildcard() {
+        assert!(path_matches("/**", "/"));
+        assert!(path_matches("/**", "/anything"));
+        assert!(path_matches("/**", "/a/b/c"));
+    }
+
+    #[test]
+    fn test_egress_request_rule_parse() {
+        let rule = EgressRequestRule::parse("allow GET /repos/**").unwrap();
+        assert_eq!(rule.action, "allow");
+        assert_eq!(rule.method, "GET");
+        assert_eq!(rule.path_pattern, "/repos/**");
+
+        let rule = EgressRequestRule::parse("deny * /**").unwrap();
+        assert_eq!(rule.action, "deny");
+        assert_eq!(rule.method, "*");
+
+        assert!(EgressRequestRule::parse("bad format").is_err());
+        assert!(EgressRequestRule::parse("invalid GET /path").is_err());
+    }
+
+    #[test]
+    fn test_egress_request_rule_matches() {
+        let rule = EgressRequestRule::parse("allow GET /repos/**").unwrap();
+        assert!(rule.matches("GET", "/repos/owner/repo"));
+        assert!(!rule.matches("POST", "/repos/owner/repo"));
+        assert!(!rule.matches("GET", "/users/me"));
+
+        let wildcard_rule = EgressRequestRule::parse("deny * /**").unwrap();
+        assert!(wildcard_rule.matches("GET", "/anything"));
+        assert!(wildcard_rule.matches("DELETE", "/admin"));
+    }
+
+    #[test]
+    fn test_evaluate_request_rules_allow_then_deny() {
+        let rule = EgressRule {
+            domain: "api.github.com".into(),
+            inject_header: "Authorization".into(),
+            env_var: None,
+            credential_file: None,
+            json_path: None,
+            header_template: "{value}".into(),
+            request_rules: vec![
+                "allow GET /repos/**".into(),
+                "deny * /**".into(),
+            ],
+        };
+        assert_eq!(rule.evaluate_request_rules("GET", "/repos/owner/repo"), Some(true));
+        assert_eq!(rule.evaluate_request_rules("POST", "/repos/owner/repo"), Some(false));
+        assert_eq!(rule.evaluate_request_rules("DELETE", "/admin"), Some(false));
+    }
+
+    #[test]
+    fn test_evaluate_request_rules_no_match_returns_none() {
+        let rule = EgressRule {
+            domain: "api.example.com".into(),
+            inject_header: "Authorization".into(),
+            env_var: None,
+            credential_file: None,
+            json_path: None,
+            header_template: "{value}".into(),
+            request_rules: vec!["allow GET /specific".into()],
+        };
+        // No rule matches POST /other
+        assert_eq!(rule.evaluate_request_rules("POST", "/other"), None);
+    }
+
+    #[test]
     fn test_egress_rule_with_env_var_still_works() {
         let toml_str = r#"
             default_cli_action = "deny"
             default_egress_action = "deny"
-
             [[egress]]
             domain = "api.openai.com"
             inject_header = "Authorization"
@@ -929,6 +1206,26 @@ mod tests {
         let rule = &policy.egress[0];
         assert_eq!(rule.env_var.as_deref(), Some("OPENAI_API_KEY"));
         assert!(rule.credential_file.is_none());
+        assert!(rule.request_rules.is_empty());
+    }
+
+    #[test]
+    fn test_egress_rule_with_request_rules_parses() {
+        let toml_str = r#"
+            default_cli_action = "deny"
+            default_egress_action = "deny"
+            [[egress]]
+            domain = "api.github.com"
+            inject_header = "Authorization"
+            env_var = "GITHUB_TOKEN"
+            header_template = "Bearer {value}"
+            request_rules = ["allow GET /repos/**", "deny * /**"]
+        "#;
+        let policy: PolicyFile = toml::from_str(toml_str).unwrap();
+        let rule = &policy.egress[0];
+        assert_eq!(rule.request_rules.len(), 2);
+        assert_eq!(rule.evaluate_request_rules("GET", "/repos/owner/repo"), Some(true));
+        assert_eq!(rule.evaluate_request_rules("POST", "/repos/owner/repo"), Some(false));
     }
 
     #[test]
