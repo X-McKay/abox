@@ -140,6 +140,7 @@ fn set_profile(repo_root: &Path, profile: EnvironmentProfile) -> Result<()> {
             if environment.caches.is_empty()
                 && environment.prepare.is_none()
                 && environment.watch.is_empty()
+                && environment.mount_excludes.is_empty()
             {
                 config.environment = None;
             }
@@ -150,6 +151,7 @@ fn set_profile(repo_root: &Path, profile: EnvironmentProfile) -> Result<()> {
             caches: Vec::new(),
             prepare: None,
             watch: Vec::new(),
+            mount_excludes: Vec::new(),
         });
         environment.profile = Some(profile);
     }

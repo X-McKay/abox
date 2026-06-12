@@ -861,6 +861,7 @@ async fn test_orchestrator_stop_sandbox() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     })
     .await
     .unwrap();
@@ -900,6 +901,7 @@ async fn test_orchestrator_stop_with_clean() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     })
     .await
     .unwrap();
@@ -990,6 +992,7 @@ async fn test_orchestrator_vm_config_overrides() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     })
     .await
     .unwrap();
@@ -1098,6 +1101,7 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     };
 
     let policy = std::sync::Arc::new(
@@ -1213,6 +1217,7 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     };
 
     let policy = std::sync::Arc::new(
@@ -1352,6 +1357,7 @@ async fn test_run_sandbox_timeout_returns_124() {
         timeout_secs: Some(1), // 1-second timeout
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     };
 
     let policy = std::sync::Arc::new(
@@ -1464,6 +1470,7 @@ async fn test_run_sandbox_exits_before_timeout() {
         timeout_secs: Some(60), // generous timeout — should not fire
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     };
 
     let policy = std::sync::Arc::new(
@@ -1576,6 +1583,7 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
         timeout_secs: None,
         ephemeral: true,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     };
 
     let policy = std::sync::Arc::new(
@@ -1689,6 +1697,7 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
     };
 
     let policy = std::sync::Arc::new(

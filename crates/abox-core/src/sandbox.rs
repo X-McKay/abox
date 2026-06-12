@@ -47,6 +47,10 @@ pub struct CreateSandboxParams {
     /// Set by `run_sandbox` from the loaded `RootCa`; `None` for tests or
     /// callers that don't need MITM proxy support.
     pub ca_cert_pem: Option<String>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    /// Sourced from `ResolvedProjectConfig.mount_excludes` and passed through
+    /// to `VmConfig` and ultimately `BootMeta`.
+    pub mount_excludes: Vec<String>,
 }
 
 /// Full sandbox status combining workspace and VM info.
@@ -269,6 +273,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             start_mode,
             credential_files,
             ca_cert_pem: params.ca_cert_pem.clone(),
+            mount_excludes: params.mount_excludes.clone(),
         };
 
         // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just

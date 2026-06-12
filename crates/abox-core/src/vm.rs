@@ -71,6 +71,11 @@ pub struct VmConfig {
     /// Staged as `root.crt` in the boot metadata directory so `guest/init.sh`
     /// can rebuild the system CA bundle with it at boot time.
     pub ca_cert_pem: Option<String>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    /// Passed through to [`crate::boot_meta::BootMeta`] and enforced by
+    /// `guest/init.sh` after the workspace virtiofs share is mounted.
+    #[allow(dead_code)]
+    pub mount_excludes: Vec<String>,
 }
 
 /// Information about a running or stopped VM.

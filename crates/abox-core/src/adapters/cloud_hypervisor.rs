@@ -241,6 +241,7 @@ impl VmPort for CloudHypervisorAdapter {
             agent_command: config.agent_command.clone(),
             env: config.env_vars.clone(),
             credential_files: staged_creds,
+            mount_excludes: config.mount_excludes.clone(),
         };
         meta.stage(&meta_dir)
             .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
@@ -287,6 +288,16 @@ impl VmPort for CloudHypervisorAdapter {
                     format!("Failed to write credential file {}", dest.display())
                 })?;
             }
+        }
+
+        // Stage mount-excludes file so guest/init.sh can overlay workspace
+        // subdirectories with empty tmpfs mounts (e.g. node_modules, .venv).
+        if !config.mount_excludes.is_empty() {
+            let excludes_content = config.mount_excludes.join("\n") + "\n";
+            let excludes_path = meta_dir.join("mount-excludes");
+            std::fs::write(&excludes_path, excludes_content).with_context(|| {
+                format!("Failed to write mount-excludes to {}", excludes_path.display())
+            })?;
         }
 
         // Stage the root CA certificate so guest/init.sh can inject it

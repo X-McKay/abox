@@ -278,6 +278,9 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         timeout_secs: args.timeout,
         ephemeral: args.ephemeral,
         ca_cert_pem: None, // Populated by run_sandbox from the loaded RootCa.
+        mount_excludes: resolved_project
+            .as_ref()
+            .map_or_else(Vec::new, |resolved| resolved.mount_excludes.clone()),
     };
 
     println!("Sandbox '{}' starting...", args.task);
@@ -661,6 +664,7 @@ mod tests {
             watch_paths: vec![],
             default_prompt_path: Some(PathBuf::from(".abox/prompt.md")),
             default_prompt_bytes: Some(b"hello from repo prompt".to_vec()),
+            mount_excludes: vec![],
             notes: vec![],
             approval_fingerprint: "abc".into(),
         };

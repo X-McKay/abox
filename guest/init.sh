@@ -63,6 +63,34 @@ chmod 0700 "$ABOX_TMPDIR" 2>/dev/null || true
 mount -t virtiofs -o nodev,nosuid workspace /workspace 2>/dev/null || \
     boot_fail 71 "failed to mount workspace virtiofs"
 
+# ── Mount exclusions: tmpfs overlays for platform-specific dependency dirs ──
+# The host stages /abox-meta/mount-excludes (one relative path per line) to
+# list workspace subdirectories that should be hidden from the guest with an
+# empty tmpfs mount. This prevents macOS-native binaries (e.g. node_modules,
+# .venv, target/) from being visible inside the Linux guest. The host copy is
+# untouched; only the guest view is shadowed.
+if [ -f /abox-meta/mount-excludes ]; then
+    while IFS= read -r excl_path || [ -n "$excl_path" ]; do
+        # Skip empty lines and comments
+        case "$excl_path" in
+            ''|'#'*) continue ;;
+        esac
+        # Reject paths that escape the workspace
+        case "$excl_path" in
+            /*|../*|*/../*)
+                echo "WARNING: skipping unsafe mount-exclude path: $excl_path" >&2
+                continue
+                ;;
+        esac
+        excl_abs="/workspace/$excl_path"
+        mkdir -p "$excl_abs" 2>/dev/null || true
+        if ! grep -Fqs " $excl_abs tmpfs " /proc/mounts; then
+            mount -t tmpfs -o nodev,nosuid tmpfs "$excl_abs" 2>/dev/null || \
+                echo "WARNING: failed to mount tmpfs over $excl_abs" >&2
+        fi
+    done < /abox-meta/mount-excludes
+fi
+
 # Boot metadata share — mounted read-only at the guest kernel level.
 # The host stages runner.sh and credentials here before boot; the guest
 # should never need to write back to this share. Enforcing ro at the

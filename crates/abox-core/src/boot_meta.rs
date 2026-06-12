@@ -62,6 +62,15 @@ pub struct BootMeta {
     /// Credential files staged in `<meta_dir>/credentials/`.
     #[serde(default)]
     pub credential_files: Vec<StagedCredential>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    ///
+    /// Each entry is a path relative to `/workspace`. The guest `init.sh`
+    /// mounts a fresh tmpfs over each path immediately after mounting the
+    /// virtiofs workspace share, so the Linux guest sees a clean directory
+    /// instead of the host's platform-specific binaries (e.g. macOS
+    /// `node_modules`). The host copy is untouched.
+    #[serde(default)]
+    pub mount_excludes: Vec<String>,
 }
 
 impl BootMeta {

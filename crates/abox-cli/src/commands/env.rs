@@ -367,6 +367,7 @@ async fn warm_environment<W: WorkspacePort, V: VmPort>(
         timeout_secs: None,
         ephemeral: true,
         ca_cert_pem: None,
+        mount_excludes: resolved.mount_excludes.clone(),
     };
 
     let exit_code = orchestrator.run_sandbox(params, policy, root_ca).await?;
@@ -814,6 +815,7 @@ mod tests {
             watch_paths: vec![],
             default_prompt_path: None,
             default_prompt_bytes: None,
+            mount_excludes: vec![],
             notes: vec![],
             approval_fingerprint: "abc".into(),
         };

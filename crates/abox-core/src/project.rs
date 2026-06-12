@@ -189,6 +189,17 @@ pub struct EnvironmentConfig {
     /// Optional additional files that influence environment freshness.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watch: Vec<PathBuf>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    ///
+    /// Use this to prevent platform-specific dependency directories (e.g.
+    /// `node_modules`, `.venv`, `target`) from leaking from a macOS host into
+    /// the Linux guest. Each excluded path receives an empty tmpfs mount so
+    /// the guest sees a clean directory; the host copy is untouched.
+    ///
+    /// Paths must be relative to the workspace root, must not start with `/`
+    /// or `..`, and must not overlap with each other.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mount_excludes: Vec<String>,
 }
 
 /// Optional agent defaults.
@@ -256,6 +267,8 @@ pub struct ResolvedProjectConfig {
     pub default_prompt_path: Option<PathBuf>,
     /// Immutable bytes loaded during resolution for trust and later staging.
     pub default_prompt_bytes: Option<Vec<u8>>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    pub mount_excludes: Vec<String>,
     /// Human-readable normalization notes.
     pub notes: Vec<String>,
     /// Current approval fingerprint for this repo-owned behavior.
@@ -381,6 +394,11 @@ impl ProjectConfig {
             }
         }
         let watch_paths = infer_watch_paths(self.environment.as_ref(), &caches);
+        let mount_excludes = self
+            .environment
+            .as_ref()
+            .map(|env| env.mount_excludes.clone())
+            .unwrap_or_default();
 
         let default_prompt_path =
             self.agent.as_ref().and_then(|agent| agent.default_prompt_file.clone());
@@ -418,6 +436,7 @@ impl ProjectConfig {
             watch_paths,
             default_prompt_path,
             default_prompt_bytes,
+            mount_excludes,
             notes,
             approval_fingerprint,
         })
@@ -499,6 +518,10 @@ impl ProjectConfig {
             if let Some(prompt_file) = &agent.default_prompt_file {
                 ensure_repo_owned_path(repo_root, prompt_file, "agent.default_prompt_file", true)?;
             }
+        }
+
+        if let Some(environment) = &self.environment {
+            validate_mount_excludes(&environment.mount_excludes)?;
         }
 
         Ok(())
@@ -1067,6 +1090,55 @@ fn infer_watch_paths(environment: Option<&EnvironmentConfig>, caches: &[String])
     }
 
     paths.into_iter().collect()
+}
+
+/// Validate that mount exclusion paths are safe relative paths.
+///
+/// Rules:
+/// - Must not be empty
+/// - Must not start with `/` or `..`
+/// - Must not overlap with each other (neither is a prefix of the other)
+fn validate_mount_excludes(excludes: &[String]) -> Result<()> {
+    for path in excludes {
+        if path.is_empty() {
+            anyhow::bail!("environment.mount_excludes: empty path is not allowed");
+        }
+        if path.starts_with('/') {
+            anyhow::bail!(
+                "environment.mount_excludes: path {path:?} must be relative (no leading '/')"
+            );
+        }
+        if path.starts_with("..") {
+            anyhow::bail!(
+                "environment.mount_excludes: path {path:?} must not escape the workspace (no '..')"
+            );
+        }
+        if path.contains("/../") || path.ends_with("/..")
+        {
+            anyhow::bail!(
+                "environment.mount_excludes: path {path:?} must not escape the workspace (no '..')"
+            );
+        }
+    }
+
+    // Check for overlapping paths (one is a prefix of another)
+    for (i, a) in excludes.iter().enumerate() {
+        for (j, b) in excludes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let a_prefix = format!("{a}/");
+            let b_prefix = format!("{b}/");
+            if b.starts_with(&a_prefix) || a.starts_with(&b_prefix) {
+                anyhow::bail!(
+                    "environment.mount_excludes: paths {a:?} and {b:?} overlap; \
+                     one is a prefix of the other"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_rust_profile_repo_compatibility(repo_root: &Path) -> Result<()> {
@@ -1638,6 +1710,7 @@ mod tests {
             watch_paths: vec![],
             default_prompt_path: None,
             default_prompt_bytes: None,
+            mount_excludes: vec![],
             notes: vec![],
             approval_fingerprint: "abc".into(),
         };
