@@ -159,36 +159,31 @@ pub fn find_service_def(name: &str) -> Option<&'static ServiceDef> {
 
 /// Generate a cryptographically random alphanumeric password.
 ///
-/// Uses `/dev/urandom` on Unix for secure randomness.
-pub fn generate_password() -> String {
+/// Uses the OS CSPRNG. Returns an error rather than falling back to a weak
+/// source — a predictable database password would be a real (if narrow)
+/// vulnerability. To avoid modulo bias we draw extra bytes and reject those in
+/// the biased tail of the byte range.
+pub fn generate_password() -> Result<String> {
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let random_bytes = read_random_bytes(32);
-    random_bytes.iter().map(|&b| CHARS[b as usize % CHARS.len()] as char).collect()
-}
-
-/// Read `n` cryptographically random bytes from the OS.
-fn read_random_bytes(n: usize) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let mut buf = vec![0u8; n];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            if f.read_exact(&mut buf).is_ok() {
-                return buf;
+    const TARGET_LEN: usize = 32;
+    // Largest multiple of CHARS.len() that fits in a byte; bytes >= this are
+    // rejected to keep the distribution uniform.
+    let limit = (256 / CHARS.len()) * CHARS.len();
+    let mut out = String::with_capacity(TARGET_LEN);
+    let mut buf = [0u8; 64];
+    while out.len() < TARGET_LEN {
+        crate::util::secure_random_bytes(&mut buf)
+            .map_err(|e| anyhow::anyhow!("Cannot generate service password: {e}"))?;
+        for &b in &buf {
+            if (b as usize) < limit {
+                out.push(CHARS[b as usize % CHARS.len()] as char);
+                if out.len() == TARGET_LEN {
+                    break;
+                }
             }
         }
     }
-    // Fallback: time-based (less secure, only used if /dev/urandom unavailable)
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(42, |d| d.subsec_nanos());
-    // Simple LCG for fallback randomness
-    (0..n)
-        .map(|i| {
-            seed.wrapping_mul(1_664_525_u32)
-                .wrapping_add(1_013_904_223_u32)
-                .wrapping_add(i as u32 * 6_971_u32) as u8
-        })
-        .collect()
+    Ok(out)
 }
 
 /// Check if Docker is available on the host.
@@ -221,7 +216,7 @@ pub fn start_service(
     let version = config.version.as_deref().unwrap_or(def.default_version);
     let image = def.image_template.replace("{version}", version);
     let host_port = find_free_port()?;
-    let password = generate_password();
+    let password = generate_password()?;
 
     let container_name = format!("abox-{service_name}-{sandbox_id}");
 
@@ -299,6 +294,15 @@ pub fn wait_for_service_ready(
             );
         }
 
+        // Detect a container that died during startup instead of polling a
+        // dead container until the full timeout elapses.
+        if !container_is_running(container_name) {
+            anyhow::bail!(
+                "{service_name} container '{container_name}' exited during startup.\n\
+                 Check logs with: docker logs {container_name}"
+            );
+        }
+
         let mut cmd = std::process::Command::new("docker");
         cmd.arg("exec")
             .arg(container_name)
@@ -314,19 +318,35 @@ pub fn wait_for_service_ready(
     }
 }
 
+/// Return whether a container is currently in the `running` state.
+fn container_is_running(container_name: &str) -> bool {
+    std::process::Command::new("docker")
+        .arg("inspect")
+        .arg("--format")
+        .arg("{{.State.Running}}")
+        .arg(container_name)
+        .output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+}
+
 /// Stop and remove a service container.
+///
+/// Uses `docker rm --force`, which stops a running container and removes it in
+/// one step. This also reaps a container that has already exited but lingers
+/// (e.g. if its `--rm` auto-removal did not fire), avoiding orphans.
 pub fn stop_service(container_id: &str) -> Result<()> {
     let status = std::process::Command::new("docker")
-        .arg("stop")
+        .arg("rm")
+        .arg("--force")
         .arg(container_id)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .with_context(|| format!("Failed to stop container {container_id}"))?;
+        .with_context(|| format!("Failed to remove container {container_id}"))?;
 
     if !status.success() {
-        // Container may have already stopped — not a fatal error
-        tracing::warn!(container_id, "Failed to stop service container (may already be stopped)");
+        // Container may have already been removed — not a fatal error.
+        tracing::warn!(container_id, "Failed to remove service container (may already be gone)");
     }
 
     Ok(())
@@ -334,9 +354,12 @@ pub fn stop_service(container_id: &str) -> Result<()> {
 
 /// Stop all service containers for a sandbox.
 pub fn stop_sandbox_services(sandbox_id: &str) -> Result<()> {
-    // Find all containers with the sandbox label
+    // Find all containers with the sandbox label. `--all` so that a container
+    // which has already exited (e.g. crashed) is still found and force-removed,
+    // rather than being left behind because `docker ps` only lists running ones.
     let output = std::process::Command::new("docker")
         .arg("ps")
+        .arg("--all")
         .arg("--filter")
         .arg(format!("label=abox.sandbox-id={sandbox_id}"))
         .arg("--filter")
@@ -393,9 +416,15 @@ mod tests {
 
     #[test]
     fn test_generate_password_length() {
-        let pw = generate_password();
+        let pw = generate_password().unwrap();
         assert_eq!(pw.len(), 32);
         assert!(pw.chars().all(char::is_alphanumeric));
+    }
+
+    #[test]
+    fn test_generate_password_is_random() {
+        // Two passwords must differ; a constant would indicate a broken RNG.
+        assert_ne!(generate_password().unwrap(), generate_password().unwrap());
     }
 
     #[test]

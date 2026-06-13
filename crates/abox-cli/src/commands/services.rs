@@ -128,20 +128,29 @@ fn start_service_cmd(
 
     let running = start_service(service_name, &config, sandbox_id)?;
 
-    println!("  Container: {}", &running.container_id[..12.min(running.container_id.len())]);
+    let preview: String = running.container_id.chars().take(12).collect();
+    println!("  Container: {preview}");
     println!("  Host port: {}", running.host_port);
 
-    if config.wait {
-        println!("  Waiting for {service_name} to be ready...");
-        let container_name = format!("abox-{service_name}-{sandbox_id}");
-        wait_for_service_ready(service_name, &container_name, 30)?;
-        println!("  {service_name} is ready.");
-    }
-
-    // Pull Ollama models if specified
-    if service_name == "ollama" && !models_vec.is_empty() {
-        let container_name = format!("abox-{service_name}-{sandbox_id}");
-        pull_ollama_models(&container_name, &models_vec)?;
+    // If readiness or model-pull fails after the container is up, tear it down
+    // so we don't leak an orphaned container on the error path.
+    let container_name = format!("abox-{service_name}-{sandbox_id}");
+    let post_start = (|| -> Result<()> {
+        if config.wait {
+            println!("  Waiting for {service_name} to be ready...");
+            wait_for_service_ready(service_name, &container_name, 30)?;
+            println!("  {service_name} is ready.");
+        }
+        if service_name == "ollama" && !models_vec.is_empty() {
+            pull_ollama_models(&container_name, &models_vec)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = post_start {
+        let _ = abox_core::services::stop_service(&running.container_id);
+        return Err(e.context(format!(
+            "Service '{service_name}' failed to become ready; the container was removed"
+        )));
     }
 
     println!();
