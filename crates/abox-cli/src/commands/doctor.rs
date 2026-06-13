@@ -699,35 +699,86 @@ fn check_ca_trust(config: &AboxConfig) -> Check {
         );
     }
 
-    // Check if the CA cert is in the system trust store by looking for the
-    // cert file in common trust store locations.
+    // Compare the abox CA *content* against common trust-store locations,
+    // rather than merely checking that some file exists at those paths. This
+    // avoids a false "trusted" when an unrelated cert sits at the path, and
+    // detects a stale copy left behind after the CA was rotated.
+    let Some(abox_body) = std::fs::read_to_string(&cert_path).ok().and_then(|s| pem_cert_body(&s))
+    else {
+        return Check::warn(label, "Could not read the abox CA certificate for comparison.");
+    };
+
     let trust_locations = [
         "/etc/ssl/certs/abox-ca.pem",
         "/usr/local/share/ca-certificates/abox.crt",
         "/etc/pki/ca-trust/source/anchors/abox.crt",
     ];
-    let trusted = trust_locations.iter().any(|p| std::path::Path::new(p).exists());
 
-    if trusted {
-        Check::ok_with(label, "abox CA found in system trust store")
-    } else {
-        Check::warn(
+    let mut stale_at: Option<&str> = None;
+    for path in trust_locations {
+        let Some(body) =
+            std::fs::read_to_string(path).ok().and_then(|s| pem_cert_body(&s))
+        else {
+            continue;
+        };
+        if body == abox_body {
+            return Check::ok_with(label, format!("abox CA installed and current at {path}"));
+        }
+        stale_at = Some(path);
+    }
+
+    if let Some(path) = stale_at {
+        return Check::fail(
             label,
             format!(
-                "Root CA at {} is not yet trusted by the host OS.\n\
-                 Without this, HTTPS credential injection will fail for tools\n\
-                 that use the system CA bundle.\n\
-                 \n\
-                 To trust the CA:\n\
-                 \x20 macOS:  sudo security add-trusted-cert -d -r trustRoot \\\n\
-                 \x20         -k /Library/Keychains/System.keychain {}\n\
-                 \x20 Linux:  sudo cp {} /usr/local/share/ca-certificates/abox.crt\n\
-                 \x20         && sudo update-ca-certificates",
-                cert_path.display(),
-                cert_path.display(),
+                "A different certificate is installed at {path} — it does not match the current\n\
+                 abox CA at {}. The CA was likely rotated. Re-copy the current CA and refresh the\n\
+                 trust store (Linux: update-ca-certificates; macOS: re-add to the keychain).",
                 cert_path.display(),
             ),
-        )
+        );
+    }
+
+    // On macOS, trust lives in the keychain, which these file paths can't see.
+    let macos_note = if cfg!(target_os = "macos") {
+        "\n\nNote: on macOS the CA is trusted via the keychain, which this file-based check\n\
+         cannot inspect. If you already ran the `security add-trusted-cert` command below,\n\
+         this warning is expected and can be ignored."
+    } else {
+        ""
+    };
+
+    Check::warn(
+        label,
+        format!(
+            "Root CA at {} is not yet trusted by the host OS.\n\
+             Without this, HTTPS credential injection will fail for tools\n\
+             that use the system CA bundle.\n\
+             \n\
+             To trust the CA:\n\
+             \x20 macOS:  sudo security add-trusted-cert -d -r trustRoot \\\n\
+             \x20         -k /Library/Keychains/System.keychain {}\n\
+             \x20 Linux:  sudo cp {} /usr/local/share/ca-certificates/abox.crt\n\
+             \x20         && sudo update-ca-certificates{macos_note}",
+            cert_path.display(),
+            cert_path.display(),
+            cert_path.display(),
+        ),
+    )
+}
+
+/// Extract the base64 body of the first PEM CERTIFICATE block, stripping the
+/// header/footer and all whitespace, so two encodings of the same certificate
+/// compare equal regardless of line wrapping or trailing newlines.
+fn pem_cert_body(pem: &str) -> Option<String> {
+    let start = pem.find("-----BEGIN CERTIFICATE-----")?;
+    let after = &pem[start + "-----BEGIN CERTIFICATE-----".len()..];
+    let end = after.find("-----END CERTIFICATE-----")?;
+    let body: String = after[..end].chars().filter(|c| !c.is_whitespace()).collect();
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
     }
 }
 
@@ -877,5 +928,24 @@ fn check_socket_path_length(config: &AboxConfig) -> Check {
         )
     } else {
         Check::ok("Runtime dir socket path length")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pem_cert_body;
+
+    #[test]
+    fn pem_cert_body_normalizes_whitespace() {
+        let a = "-----BEGIN CERTIFICATE-----\nAAAB\nCCDD\n-----END CERTIFICATE-----\n";
+        let b = "noise\n-----BEGIN CERTIFICATE-----\r\nAAABCCDD\r\n-----END CERTIFICATE-----";
+        assert_eq!(pem_cert_body(a), Some("AAABCCDD".to_string()));
+        assert_eq!(pem_cert_body(a), pem_cert_body(b));
+    }
+
+    #[test]
+    fn pem_cert_body_rejects_non_pem() {
+        assert_eq!(pem_cert_body("not a certificate"), None);
+        assert_eq!(pem_cert_body("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----"), None);
     }
 }
