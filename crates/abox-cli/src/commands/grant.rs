@@ -234,34 +234,49 @@ fn add_egress_rule(
     policy_path: &PathBuf,
     display_name: &str,
 ) -> Result<()> {
-    // Read existing policy
+    // Read and parse the existing policy as an editable TOML document so we
+    // never build TOML by string interpolation (which would corrupt the file
+    // or allow injection via a crafted --header/--template) and so we don't
+    // mangle the user's comments and formatting.
     let content = if policy_path.exists() {
         std::fs::read_to_string(policy_path)
             .with_context(|| format!("Reading {}", policy_path.display()))?
     } else {
         String::new()
     };
+    let mut doc = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("Parsing {}", policy_path.display()))?;
 
-    // Check if a rule for this domain already exists
-    if content.contains(&format!("domain = \"{domain}\"")) {
+    // Ensure `egress` is an array-of-tables.
+    let egress = doc.entry("egress").or_insert_with(|| {
+        toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new())
+    });
+    let egress = egress.as_array_of_tables_mut().ok_or_else(|| {
+        anyhow::anyhow!("`egress` in {} is not an array of tables", policy_path.display())
+    })?;
+
+    // Reject a duplicate domain by structurally inspecting the parsed rules.
+    let exists = egress.iter().any(|t| t.get("domain").and_then(|v| v.as_str()) == Some(domain));
+    if exists {
         println!("A rule for domain '{domain}' already exists in {}", policy_path.display());
         println!("Remove it first with: abox grant remove {display_name}");
         return Ok(());
     }
 
-    // Append the new egress rule
-    let new_rule = format!(
-        "\n[[egress]]\ndomain = \"{domain}\"\ninject_header = \"{header}\"\nenv_var = \"{env_var}\"\nheader_template = \"{template}\"\n"
-    );
-
-    let mut updated = content;
-    updated.push_str(&new_rule);
+    // Build the new rule as a structured table; toml_edit escapes the values.
+    let mut table = toml_edit::Table::new();
+    table["domain"] = toml_edit::value(domain);
+    table["inject_header"] = toml_edit::value(header);
+    table["env_var"] = toml_edit::value(env_var);
+    table["header_template"] = toml_edit::value(template);
+    egress.push(table);
 
     if let Some(parent) = policy_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Creating {}", parent.display()))?;
     }
-    std::fs::write(policy_path, &updated)
+    std::fs::write(policy_path, doc.to_string())
         .with_context(|| format!("Writing {}", policy_path.display()))?;
 
     println!("Grant '{display_name}' added to {}", policy_path.display());
@@ -311,8 +326,8 @@ fn list_grants(policy_path: &PathBuf) -> Result<()> {
         Some(rules) => {
             println!("Credential injection rules in {}:", policy_path.display());
             println!();
-            println!("{:<30} {:<20} {:<20}", "DOMAIN", "HEADER", "SOURCE");
-            println!("{}", "-".repeat(75));
+            println!("{:<30} {:<20} {:<20} REQUEST RULES", "DOMAIN", "HEADER", "SOURCE");
+            println!("{}", "-".repeat(90));
             for rule in rules {
                 let domain = rule.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
                 let header = rule.get("inject_header").and_then(|v| v.as_str()).unwrap_or("?");
@@ -323,7 +338,18 @@ fn list_grants(policy_path: &PathBuf) -> Result<()> {
                 } else {
                     "?".to_string()
                 };
-                println!("{domain:<30} {header:<20} {source:<20}");
+                // Surface per-request path restrictions so a path-scoped grant
+                // is never silently hidden from the operator.
+                let req_rules = rule
+                    .get("request_rules")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, toml::value::Array::len);
+                let rules_col = if req_rules == 0 {
+                    "(none)".to_string()
+                } else {
+                    format!("{req_rules} rule(s)")
+                };
+                println!("{domain:<30} {header:<20} {source:<20} {rules_col}");
             }
             println!();
             println!("{} rule(s) configured.", rules.len());
@@ -348,90 +374,30 @@ fn remove_grant(name: &str, policy_path: &PathBuf) -> Result<()> {
 
     let content = std::fs::read_to_string(policy_path)
         .with_context(|| format!("Reading {}", policy_path.display()))?;
+    let mut doc = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("Parsing {}", policy_path.display()))?;
 
-    let policy: toml::Value =
-        toml::from_str(&content).with_context(|| format!("Parsing {}", policy_path.display()))?;
+    let Some(egress) = doc.get_mut("egress").and_then(toml_edit::Item::as_array_of_tables_mut)
+    else {
+        anyhow::bail!("No egress rules configured in {}", policy_path.display());
+    };
 
-    let egress = policy.get("egress").and_then(|v| v.as_array());
-    let found = egress.is_some_and(|rules| {
-        rules.iter().any(|r| r.get("domain").and_then(|v| v.as_str()) == Some(&domain))
-    });
+    // Structurally remove the matching rule(s). retain() preserves the
+    // surrounding document, comments, and other rules.
+    let before = egress.len();
+    egress.retain(|t| t.get("domain").and_then(|v| v.as_str()) != Some(domain.as_str()));
+    let removed = before - egress.len();
 
-    if !found {
+    if removed == 0 {
         anyhow::bail!("No egress rule found for domain '{domain}' in {}", policy_path.display());
     }
 
-    // Remove the [[egress]] block for this domain by rewriting the TOML
-    // We do a simple text-based removal of the [[egress]] block
-    let updated = remove_egress_block(&content, &domain);
-    std::fs::write(policy_path, &updated)
+    std::fs::write(policy_path, doc.to_string())
         .with_context(|| format!("Writing {}", policy_path.display()))?;
 
     println!("Grant for '{domain}' removed from {}", policy_path.display());
     Ok(())
-}
-
-/// Remove an [[egress]] block for a specific domain from TOML content.
-///
-/// Scans line-by-line, buffering each `[[egress]]` block. When the block's
-/// `domain` field matches the target, the buffered block is discarded.
-/// All other lines are emitted unchanged.
-fn remove_egress_block(content: &str, domain: &str) -> String {
-    let mut output = String::with_capacity(content.len());
-    let mut block_buf: Vec<&str> = Vec::new();
-    let mut in_egress_block = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed == "[[egress]]" {
-            // Flush any previously buffered block that was not the target
-            for buffered in block_buf.drain(..) {
-                output.push_str(buffered);
-                output.push('\n');
-            }
-            in_egress_block = true;
-            block_buf.push(line);
-            continue;
-        }
-
-        if in_egress_block {
-            if trimmed.starts_with("[[") {
-                // New section — flush the buffered block and start fresh
-                for buffered in block_buf.drain(..) {
-                    output.push_str(buffered);
-                    output.push('\n');
-                }
-                in_egress_block = true;
-                block_buf.push(line);
-            } else {
-                // Check if this is the domain line for the target
-                let is_target_domain = trimmed
-                    .strip_prefix("domain = \"")
-                    .and_then(|s| s.strip_suffix('"'))
-                    .is_some_and(|d| d == domain);
-                if is_target_domain {
-                    // Discard the buffered block (it's the one to remove)
-                    block_buf.clear();
-                    in_egress_block = false;
-                } else {
-                    block_buf.push(line);
-                }
-            }
-            continue;
-        }
-
-        output.push_str(line);
-        output.push('\n');
-    }
-
-    // Flush any remaining buffered block
-    for buffered in block_buf {
-        output.push_str(buffered);
-        output.push('\n');
-    }
-
-    output
 }
 
 fn list_providers() {
@@ -445,4 +411,78 @@ fn list_providers() {
     println!();
     println!("Usage: abox grant add <name>");
     println!("Example: abox grant add openai");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_then_remove_round_trips_via_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("default.toml");
+        std::fs::write(&policy_path, "# my policy\ndefault_egress_action = \"deny\"\n").unwrap();
+
+        add_egress_rule(
+            "api.example.com",
+            "Authorization",
+            "EXAMPLE_TOKEN",
+            "Bearer {value}",
+            &policy_path,
+            "example",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&policy_path).unwrap();
+        // The user's leading comment must be preserved.
+        assert!(content.contains("# my policy"));
+        // The rule parses back as valid structured TOML.
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        let egress = parsed.get("egress").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(egress.len(), 1);
+        assert_eq!(egress[0].get("domain").and_then(|v| v.as_str()), Some("api.example.com"));
+
+        remove_grant("api.example.com", &policy_path).unwrap();
+        let content = std::fs::read_to_string(&policy_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        let egress = parsed.get("egress").and_then(|v| v.as_array());
+        assert!(egress.is_none_or(Vec::is_empty));
+        assert!(content.contains("# my policy"));
+    }
+
+    #[test]
+    fn add_escapes_injection_in_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("default.toml");
+
+        // A template containing quotes and newlines must not corrupt the file
+        // or inject extra TOML keys — toml_edit escapes it.
+        add_egress_rule(
+            "api.example.com",
+            "Authorization",
+            "TOK",
+            "Bearer \"{value}\"\ninjected = true",
+            &policy_path,
+            "example",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&policy_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        // No top-level `injected` key should have been smuggled in.
+        assert!(parsed.get("injected").is_none());
+        let egress = parsed.get("egress").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            egress[0].get("header_template").and_then(|v| v.as_str()),
+            Some("Bearer \"{value}\"\ninjected = true")
+        );
+    }
+
+    #[test]
+    fn remove_missing_domain_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("default.toml");
+        std::fs::write(&policy_path, "default_egress_action = \"deny\"\n").unwrap();
+        assert!(remove_grant("nope.example.com", &policy_path).is_err());
+    }
 }
