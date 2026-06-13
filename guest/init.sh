@@ -182,6 +182,26 @@ if [ -x "$SOCAT_BIN" ]; then
         chown 1000:1000 /run/abox-proxy.sock
         chmod 0600 /run/abox-proxy.sock
     fi
+    # ── Bridge service sidecars: guest TCP port → host container via vsock ──
+    # The host stages /abox-meta/services with one line per service:
+    #   <name> <guest_port> <vsock_port>
+    # For each, expose a guest-local TCP listener that tunnels to the host's
+    # Docker container (published on the host) over the matching vsock port,
+    # so e.g. ABOX_POSTGRES_URL=postgresql://...@127.0.0.1:5432/... works.
+    if [ -f /abox-meta/services ]; then
+        while read -r svc_name guest_port vsock_port || [ -n "$svc_name" ]; do
+            case "$svc_name" in
+                ''|'#'*) continue ;;
+            esac
+            # Only accept numeric ports; skip malformed lines defensively.
+            case "$guest_port$vsock_port" in
+                *[!0-9]*) echo "WARNING: skipping malformed service line: $svc_name" >&2; continue ;;
+            esac
+            "$SOCAT_BIN" "TCP-LISTEN:$guest_port,fork,reuseaddr" \
+                         "VSOCK-CONNECT:2:$vsock_port" 2>/dev/null &
+            echo "    service bridge: $svc_name 127.0.0.1:$guest_port -> vsock:$vsock_port"
+        done < /abox-meta/services
+    fi
 else
     echo "WARNING: $SOCAT_BIN not found; proxy bridge unavailable"
 fi

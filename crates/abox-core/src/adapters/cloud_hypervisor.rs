@@ -300,6 +300,25 @@ impl VmPort for CloudHypervisorAdapter {
             })?;
         }
 
+        // Stage the services file so guest/init.sh can bridge guest loopback
+        // ports to host service containers over vsock. Each line is
+        // `<name> <guest_port> <vsock_port>`.
+        if !config.services.is_empty() {
+            let mut services_content = String::new();
+            for svc in &config.services {
+                use std::fmt::Write as _;
+                let _ = writeln!(
+                    services_content,
+                    "{} {} {}",
+                    svc.name, svc.guest_port, svc.vsock_port
+                );
+            }
+            let services_path = meta_dir.join("services");
+            std::fs::write(&services_path, services_content).with_context(|| {
+                format!("Failed to write services file to {}", services_path.display())
+            })?;
+        }
+
         // Stage the root CA certificate so guest/init.sh can inject it
         // into the guest trust store at boot. This decouples the rootfs
         // image from any specific CA, enabling CI-built rootfs distribution.

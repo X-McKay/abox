@@ -76,6 +76,11 @@ pub struct VmConfig {
     /// `guest/init.sh` after the workspace virtiofs share is mounted.
     #[allow(dead_code)]
     pub mount_excludes: Vec<String>,
+    /// Service sidecar bridges to expose inside the guest. The adapter stages a
+    /// `services` file that `guest/init.sh` reads to set up socat tunnels from
+    /// guest loopback ports to the host's Docker containers over vsock.
+    #[allow(dead_code)]
+    pub services: Vec<crate::services::GuestServiceBridge>,
 }
 
 /// Information about a running or stopped VM.

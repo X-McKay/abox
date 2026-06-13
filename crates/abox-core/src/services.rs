@@ -34,7 +34,14 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
+
+/// Base guest vsock port for service bridges.
+///
+/// Ports 5000 (CLI proxy) and 5001 (egress proxy) are already in use, so
+/// service bridges start at 5100. Each service gets `BASE + index`.
+pub const SERVICE_VSOCK_BASE: u32 = 5100;
 
 /// Configuration for a single service sidecar.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +87,117 @@ pub struct RunningService {
     pub connection_url: String,
     /// Environment variable name for the connection URL.
     pub env_var: String,
+}
+
+/// A planned host↔guest bridge for one running service.
+///
+/// The host runs the service as a Docker container published on
+/// `127.0.0.1:host_port`. Inside the microVM, `127.0.0.1` is the guest's own
+/// loopback, so the container is unreachable directly. To connect them, the
+/// orchestrator binds a host listener at `vsock-<id>.sock_<vsock_port>` (Cloud
+/// Hypervisor routes the guest's vsock port `vsock_port` there) that forwards
+/// to `127.0.0.1:host_port`, and the guest's init script runs
+/// `socat TCP-LISTEN:<guest_port> VSOCK-CONNECT:2:<vsock_port>`. The connection
+/// URL handed to the agent therefore points at `127.0.0.1:<guest_port>`.
+#[derive(Debug, Clone)]
+pub struct ServiceBridge {
+    pub name: String,
+    /// Docker-published port on the host loopback.
+    pub host_port: u16,
+    /// Port the guest listens on (and that appears in the connection URL).
+    pub guest_port: u16,
+    /// vsock port tunneling host↔guest for this service.
+    pub vsock_port: u32,
+    /// Environment variable carrying the connection URL.
+    pub env_var: String,
+    /// Connection URL rewritten to use the guest port.
+    pub guest_url: String,
+    /// Docker container ID, for teardown.
+    pub container_id: String,
+}
+
+/// The guest-visible subset of a [`ServiceBridge`], staged into boot metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestServiceBridge {
+    pub name: String,
+    pub guest_port: u16,
+    pub vsock_port: u32,
+}
+
+impl ServiceBridge {
+    /// Project the host-side bridge to the guest-visible subset.
+    pub fn guest(&self) -> GuestServiceBridge {
+        GuestServiceBridge {
+            name: self.name.clone(),
+            guest_port: self.guest_port,
+            vsock_port: self.vsock_port,
+        }
+    }
+}
+
+/// Plan a [`ServiceBridge`] for a running service at a given bridge index.
+///
+/// The guest port defaults to the service's well-known port (e.g. 5432 for
+/// Postgres) so connection URLs look conventional; the vsock port is allocated
+/// from [`SERVICE_VSOCK_BASE`]. The connection URL is rewritten from the random
+/// host port to the stable guest port.
+pub fn plan_service_bridge(running: &RunningService, index: usize) -> ServiceBridge {
+    let guest_port =
+        find_service_def(&running.name).map_or(running.host_port, |d| d.default_port);
+    let vsock_port = SERVICE_VSOCK_BASE + index as u32;
+    let guest_url = running.connection_url.replace(
+        &format!("127.0.0.1:{}", running.host_port),
+        &format!("127.0.0.1:{guest_port}"),
+    );
+    ServiceBridge {
+        name: running.name.clone(),
+        host_port: running.host_port,
+        guest_port,
+        vsock_port,
+        env_var: running.env_var.clone(),
+        guest_url,
+        container_id: running.container_id.clone(),
+    }
+}
+
+/// Run a host-side bridge: accept connections on a Unix socket (the Cloud
+/// Hypervisor vsock backend path) and splice each to `127.0.0.1:host_port`.
+///
+/// Loops until the listener errors or the task is aborted (on sandbox
+/// teardown). Each accepted connection is handled on its own task.
+pub async fn serve_service_bridge(socket_path: PathBuf, host_port: u16) -> Result<()> {
+    use tokio::net::{TcpStream, UnixListener};
+
+    // Cloud Hypervisor creates the `_<port>` socket lazily; remove any stale
+    // one from a previous run before binding.
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("Binding service bridge socket {}", socket_path.display()))?;
+    tracing::info!(socket = %socket_path.display(), host_port, "Service bridge listening");
+
+    loop {
+        let (mut guest, _) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "Service bridge accept error");
+                continue;
+            }
+        };
+        tokio::spawn(async move {
+            match TcpStream::connect(("127.0.0.1", host_port)).await {
+                Ok(mut upstream) => {
+                    if let Err(e) =
+                        tokio::io::copy_bidirectional(&mut guest, &mut upstream).await
+                    {
+                        tracing::debug!(error = %e, host_port, "Service bridge copy ended");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, host_port, "Service bridge could not reach container");
+                }
+            }
+        });
+    }
 }
 
 /// Built-in service definitions.
@@ -444,5 +562,59 @@ mod tests {
     fn test_service_config_default_wait() {
         let config = ServiceConfig::default();
         assert!(config.wait);
+    }
+
+    #[test]
+    fn test_plan_service_bridge_rewrites_url_to_guest_port() {
+        let running = RunningService {
+            name: "postgres".into(),
+            container_id: "abc123".into(),
+            host_port: 49201,
+            connection_url: "postgresql://abox:pw@127.0.0.1:49201/abox".into(),
+            env_var: "ABOX_POSTGRES_URL".into(),
+        };
+        let bridge = plan_service_bridge(&running, 0);
+        assert_eq!(bridge.guest_port, 5432); // postgres default
+        assert_eq!(bridge.vsock_port, SERVICE_VSOCK_BASE);
+        assert_eq!(bridge.guest_url, "postgresql://abox:pw@127.0.0.1:5432/abox");
+        assert_eq!(bridge.guest().vsock_port, SERVICE_VSOCK_BASE);
+    }
+
+    #[tokio::test]
+    async fn test_serve_service_bridge_forwards_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A fake "container": a TCP echo server on the host loopback.
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host_port = upstream.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = upstream.accept().await {
+                let mut buf = [0u8; 5];
+                let _ = s.read_exact(&mut buf).await;
+                let _ = s.write_all(&buf).await; // echo
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("vsock-test.sock_5100");
+        let sock2 = sock.clone();
+        let bridge = tokio::spawn(async move {
+            let _ = serve_service_bridge(sock2, host_port).await;
+        });
+
+        // Give the bridge a moment to bind.
+        for _ in 0..100 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut out = [0u8; 5];
+        client.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"hello");
+        bridge.abort();
     }
 }

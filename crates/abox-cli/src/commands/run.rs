@@ -126,6 +126,77 @@ fn parse_env_var(s: &str) -> Result<(String, String)> {
     Ok((key, value))
 }
 
+/// Start the project's declared service sidecars and return their host→guest
+/// bridges, injecting each connection URL into `env_vars`.
+///
+/// Returns an empty vec when no services are declared. Services are not
+/// supported alongside `--template` restores (the bridges/env are not captured
+/// in a snapshot); that combination is rejected. On any failure after a
+/// container has started, all of this sandbox's containers are torn down so we
+/// don't leak them.
+fn start_project_services(
+    services: &std::collections::HashMap<String, abox_core::services::ServiceConfig>,
+    task_id: &str,
+    template: Option<&str>,
+    env_vars: &mut Vec<(String, String)>,
+) -> Result<Vec<abox_core::services::ServiceBridge>> {
+    use abox_core::services::{
+        docker_available, plan_service_bridge, start_service, stop_sandbox_services,
+        wait_for_service_ready, RunningService,
+    };
+
+    if services.is_empty() {
+        return Ok(Vec::new());
+    }
+    if template.is_some() {
+        anyhow::bail!(
+            "Service sidecars are not supported with --template restores.\n\
+             Remove --template for this run, or remove [services] from .abox/project.toml."
+        );
+    }
+    if !docker_available() {
+        anyhow::bail!(
+            "This repo declares [services] in .abox/project.toml, but Docker is not available.\n\
+             Install Docker and ensure it is running, or remove the services."
+        );
+    }
+
+    // Deterministic ordering so vsock-port assignment is stable across runs.
+    let mut names: Vec<&String> = services.keys().collect();
+    names.sort();
+
+    let mut bridges = Vec::new();
+    let result = (|| -> Result<()> {
+        for (index, name) in names.iter().enumerate() {
+            let cfg = &services[*name];
+            println!("Starting service sidecar '{name}'...");
+            let running: RunningService = start_service(name, cfg, task_id)?;
+            if cfg.wait {
+                let container = format!("abox-{name}-{task_id}");
+                wait_for_service_ready(name, &container, 30)?;
+            }
+            if name.as_str() == "ollama" && !cfg.models.is_empty() {
+                abox_core::services::pull_ollama_models(
+                    &format!("abox-{name}-{task_id}"),
+                    &cfg.models,
+                )?;
+            }
+            let bridge = plan_service_bridge(&running, index);
+            println!("  {} → {} (guest 127.0.0.1:{})", name, bridge.env_var, bridge.guest_port);
+            env_vars.push((bridge.env_var.clone(), bridge.guest_url.clone()));
+            bridges.push(bridge);
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let _ = stop_sandbox_services(task_id);
+        return Err(e.context("Failed to start service sidecars; started containers were removed"));
+    }
+
+    Ok(bridges)
+}
+
 fn selected_managed_agent(command: &[String]) -> Option<&str> {
     command.first().map(String::as_str).and_then(|cmd| match cmd {
         "claude" => Some("claude"),
@@ -197,7 +268,10 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     ensure_managed_agent_ready(&args.command, orchestrator.config())?;
 
     let requested_network = args.network.map(Into::into);
-    let resolved_project = match ProjectConfig::load(repo_root)? {
+    let project_config = ProjectConfig::load(repo_root)?;
+    let project_services =
+        project_config.as_ref().map(|c| c.services.clone()).unwrap_or_default();
+    let resolved_project = match project_config {
         Some(config) => Some(config.resolve(repo_root)?),
         None => None,
     };
@@ -260,6 +334,12 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         .await?;
     }
 
+    // Start any declared service sidecars (postgres/redis/ollama/…), inject
+    // their connection URLs as env vars, and build host→guest bridges. The
+    // orchestrator tears the containers down when the sandbox exits.
+    let service_bridges =
+        start_project_services(&project_services, &args.task, args.template.as_deref(), &mut env_vars)?;
+
     let params = CreateSandboxParams {
         task_id: args.task.clone(),
         base_branch: args.base,
@@ -281,6 +361,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         mount_excludes: resolved_project
             .as_ref()
             .map_or_else(Vec::new, |resolved| resolved.mount_excludes.clone()),
+        service_bridges,
     };
 
     println!("Sandbox '{}' starting...", args.task);
