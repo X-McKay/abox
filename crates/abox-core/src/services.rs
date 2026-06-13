@@ -142,13 +142,11 @@ impl ServiceBridge {
 /// from [`SERVICE_VSOCK_BASE`]. The connection URL is rewritten from the random
 /// host port to the stable guest port.
 pub fn plan_service_bridge(running: &RunningService, index: usize) -> ServiceBridge {
-    let guest_port =
-        find_service_def(&running.name).map_or(running.host_port, |d| d.default_port);
+    let guest_port = find_service_def(&running.name).map_or(running.host_port, |d| d.default_port);
     let vsock_port = SERVICE_VSOCK_BASE + index as u32;
-    let guest_url = running.connection_url.replace(
-        &format!("127.0.0.1:{}", running.host_port),
-        &format!("127.0.0.1:{guest_port}"),
-    );
+    let guest_url = running
+        .connection_url
+        .replace(&format!("127.0.0.1:{}", running.host_port), &format!("127.0.0.1:{guest_port}"));
     ServiceBridge {
         name: running.name.clone(),
         host_port: running.host_port,
@@ -186,9 +184,7 @@ pub async fn serve_service_bridge(socket_path: PathBuf, host_port: u16) -> Resul
         tokio::spawn(async move {
             match TcpStream::connect(("127.0.0.1", host_port)).await {
                 Ok(mut upstream) => {
-                    if let Err(e) =
-                        tokio::io::copy_bidirectional(&mut guest, &mut upstream).await
-                    {
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut guest, &mut upstream).await {
                         tracing::debug!(error = %e, host_port, "Service bridge copy ended");
                     }
                 }

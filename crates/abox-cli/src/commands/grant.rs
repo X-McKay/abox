@@ -249,9 +249,9 @@ fn add_egress_rule(
         .with_context(|| format!("Parsing {}", policy_path.display()))?;
 
     // Ensure `egress` is an array-of-tables.
-    let egress = doc.entry("egress").or_insert_with(|| {
-        toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new())
-    });
+    let egress = doc
+        .entry("egress")
+        .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
     let egress = egress.as_array_of_tables_mut().ok_or_else(|| {
         anyhow::anyhow!("`egress` in {} is not an array of tables", policy_path.display())
     })?;

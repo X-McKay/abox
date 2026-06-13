@@ -716,9 +716,7 @@ fn check_ca_trust(config: &AboxConfig) -> Check {
 
     let mut stale_at: Option<&str> = None;
     for path in trust_locations {
-        let Some(body) =
-            std::fs::read_to_string(path).ok().and_then(|s| pem_cert_body(&s))
-        else {
+        let Some(body) = std::fs::read_to_string(path).ok().and_then(|s| pem_cert_body(&s)) else {
             continue;
         };
         if body == abox_body {

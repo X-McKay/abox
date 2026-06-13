@@ -503,7 +503,10 @@ pub async fn refresh_access_token(
 ///
 /// Validates the `state` parameter against `expected_state` (CSRF protection),
 /// surfaces an `error=` response from the IdP, and percent-decodes the code.
-async fn wait_for_callback(listener: tokio::net::TcpListener, expected_state: &str) -> Result<String> {
+async fn wait_for_callback(
+    listener: tokio::net::TcpListener,
+    expected_state: &str,
+) -> Result<String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (mut stream, _) =

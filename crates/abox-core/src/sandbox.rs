@@ -279,7 +279,11 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             credential_files,
             ca_cert_pem: params.ca_cert_pem.clone(),
             mount_excludes: params.mount_excludes.clone(),
-            services: params.service_bridges.iter().map(crate::services::ServiceBridge::guest).collect(),
+            services: params
+                .service_bridges
+                .iter()
+                .map(crate::services::ServiceBridge::guest)
+                .collect(),
         };
 
         // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just

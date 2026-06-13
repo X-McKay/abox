@@ -367,10 +367,7 @@ mod tests {
         // RFC 4231 test case 1: key = 0x0b*20, data = "Hi There".
         let key = [0x0bu8; 20];
         let mac = hmac_sha256(&key, b"Hi There");
-        assert_eq!(
-            hex(&mac),
-            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-        );
+        assert_eq!(hex(&mac), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
     }
 
     #[test]
@@ -436,10 +433,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(tmp.path().join(KEY_FILENAME))
-                .unwrap()
-                .permissions()
-                .mode();
+            let mode =
+                std::fs::metadata(tmp.path().join(KEY_FILENAME)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
     }

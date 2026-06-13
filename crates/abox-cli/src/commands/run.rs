@@ -269,8 +269,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
 
     let requested_network = args.network.map(Into::into);
     let project_config = ProjectConfig::load(repo_root)?;
-    let project_services =
-        project_config.as_ref().map(|c| c.services.clone()).unwrap_or_default();
+    let project_services = project_config.as_ref().map(|c| c.services.clone()).unwrap_or_default();
     let resolved_project = match project_config {
         Some(config) => Some(config.resolve(repo_root)?),
         None => None,
@@ -337,8 +336,12 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     // Start any declared service sidecars (postgres/redis/ollama/…), inject
     // their connection URLs as env vars, and build host→guest bridges. The
     // orchestrator tears the containers down when the sandbox exits.
-    let service_bridges =
-        start_project_services(&project_services, &args.task, args.template.as_deref(), &mut env_vars)?;
+    let service_bridges = start_project_services(
+        &project_services,
+        &args.task,
+        args.template.as_deref(),
+        &mut env_vars,
+    )?;
 
     let params = CreateSandboxParams {
         task_id: args.task.clone(),

@@ -358,10 +358,8 @@ impl PolicyEngine {
             // so the proxy never sees the method/path and could not enforce these
             // rules — fail loudly rather than give a false sense of restriction.
             if !rule.request_rules.is_empty() {
-                let bypassed = policy
-                    .bypass_tls
-                    .iter()
-                    .any(|pattern| domain_matches(pattern, &rule.domain));
+                let bypassed =
+                    policy.bypass_tls.iter().any(|pattern| domain_matches(pattern, &rule.domain));
                 if bypassed {
                     anyhow::bail!(
                         "Egress rule #{idx} ({domain}) defines `request_rules`, but the domain is \

@@ -9,9 +9,7 @@
 //! `abox doctor` share one implementation and cannot drift. See that module
 //! for the precise tamper-evidence guarantees.
 
-use abox_core::audit::{
-    self, compute_hash, AuditEntry, AuditEntryCore, ChainTip, ZERO_HASH,
-};
+use abox_core::audit::{self, compute_hash, AuditEntry, AuditEntryCore, ChainTip, ZERO_HASH};
 use chrono::Utc;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -43,19 +41,14 @@ impl AuditLog {
     /// advisory lock on the file so only one writer chains the log at a time,
     /// and reads existing entries to recover the current chain tip.
     pub fn new(path: &Path) -> anyhow::Result<Self> {
-        let logs_dir = path
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let logs_dir = path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         std::fs::create_dir_all(&logs_dir)?;
 
         let key = audit::load_or_create_key(&logs_dir)?;
 
         // Read existing entries to find the current chain tip.
-        let (next_seq, last_hash) = if path.exists() {
-            Self::read_chain_tip(path)?
-        } else {
-            (0, ZERO_HASH.to_string())
-        };
+        let (next_seq, last_hash) =
+            if path.exists() { Self::read_chain_tip(path)? } else { (0, ZERO_HASH.to_string()) };
 
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
 

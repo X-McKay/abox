@@ -98,10 +98,7 @@ fn verify(path: &Path, config: &AboxConfig) -> Result<()> {
 
     println!("Chain Integrity");
     if report.is_ok() {
-        println!(
-            "  [ok] Hash chain: {} entries, no gaps, all HMACs valid",
-            report.total_entries
-        );
+        println!("  [ok] Hash chain: {} entries, no gaps, all HMACs valid", report.total_entries);
         if let (Some(seq), Some(hash)) = (report.tip_seq, report.tip_hash.as_ref()) {
             println!("  tip: seq={seq} hash={}…", &hash[..8.min(hash.len())]);
         }
