@@ -81,9 +81,8 @@ async fn auth(
     // Derive name from server URL if not provided, then validate it: the name
     // becomes a filename under ~/.abox/mcp-tokens, so it must be a single safe
     // path component (no `/`, `..`, etc.).
-    let token_name = match name {
-        Some(n) => n.to_string(),
-        None => {
+    let token_name = name.map_or_else(
+        || {
             let host = server_url
                 .trim_start_matches("https://")
                 .trim_start_matches("http://")
@@ -91,8 +90,9 @@ async fn auth(
                 .next()
                 .unwrap_or(server_url);
             abox_core::util::sanitize_resource_name(host)
-        }
-    };
+        },
+        str::to_string,
+    );
     abox_core::util::validate_resource_name(&token_name)
         .map_err(|e| anyhow::anyhow!("Invalid --name {token_name:?}: {e}"))?;
 

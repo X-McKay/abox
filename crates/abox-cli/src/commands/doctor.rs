@@ -771,7 +771,8 @@ fn check_agent_credential_injection(agent: &str, enabled: bool, host_cred_file: 
 /// Check the audit log status: whether it exists and whether its chain is intact.
 fn check_audit_log(config: &AboxConfig) -> Check {
     let label = "Audit log integrity";
-    let log_path = config.logs_dir().join("audit.jsonl");
+    let logs_dir = config.logs_dir();
+    let log_path = abox_core::audit::default_log_path(&logs_dir);
 
     if !log_path.exists() {
         return Check::ok_with(
@@ -780,7 +781,6 @@ fn check_audit_log(config: &AboxConfig) -> Check {
         );
     }
 
-    // Read the file to count entries and check chain
     let content = match std::fs::read_to_string(&log_path) {
         Ok(c) => c,
         Err(e) => return Check::fail(label, format!("Cannot read audit log: {e}")),
@@ -788,7 +788,7 @@ fn check_audit_log(config: &AboxConfig) -> Check {
 
     let entry_count = content.lines().filter(|l| !l.trim().is_empty()).count();
 
-    // Check if entries have hash fields (new format) or are old format
+    // Check if entries have hash fields (new format) or are old format.
     let first_entry = content.lines().find(|l| !l.trim().is_empty());
     let has_hash_chain = first_entry
         .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
@@ -806,101 +806,42 @@ fn check_audit_log(config: &AboxConfig) -> Check {
         );
     }
 
-    // Verify the hash chain
-    match verify_audit_chain(&content) {
-        Ok(errors) if errors.is_empty() => Check::ok_with(
+    // The keyed chain requires the host-only key written by abox-proxyd.
+    let key_path = logs_dir.join(abox_core::audit::KEY_FILENAME);
+    if !key_path.exists() {
+        return Check::warn(
             label,
-            format!("{entry_count} entries, hash chain intact ({})", log_path.display()),
-        ),
-        Ok(errors) => Check::fail(
+            format!(
+                "Audit log at {} is hash-chained but the host key {} is missing, so the chain \
+                 cannot be authenticated. Was the key deleted?",
+                log_path.display(),
+                key_path.display()
+            ),
+        );
+    }
+    let key = match abox_core::audit::load_or_create_key(&logs_dir) {
+        Ok(k) => k,
+        Err(e) => return Check::fail(label, format!("Cannot load audit key: {e}")),
+    };
+    let tip = abox_core::audit::load_tip(&logs_dir);
+    let report = abox_core::audit::verify_chain(&content, &key, tip.as_ref());
+
+    if report.is_ok() {
+        Check::ok_with(
+            label,
+            format!("{entry_count} entries, keyed hash chain intact ({})", log_path.display()),
+        )
+    } else {
+        Check::fail(
             label,
             format!(
                 "Hash chain integrity failure in {} ({} error(s)):\n{}",
                 log_path.display(),
-                errors.len(),
-                errors.join("\n")
+                report.errors.len(),
+                report.errors.join("\n")
             ),
-        ),
-        Err(e) => Check::fail(label, format!("Verification error: {e}")),
+        )
     }
-}
-
-/// Minimal hash-chain verification (mirrors abox-proxyd's AuditLog::verify).
-fn verify_audit_chain(content: &str) -> Result<Vec<String>> {
-    use sha2::{Digest, Sha256};
-
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        seq: u64,
-        timestamp: String,
-        sandbox_id: String,
-        request_type: String,
-        target: String,
-        detail: String,
-        decision: String,
-        result_code: i32,
-        prev_hash: String,
-        hash: String,
-    }
-
-    #[derive(serde::Serialize)]
-    struct Core {
-        seq: u64,
-        timestamp: String,
-        sandbox_id: String,
-        request_type: String,
-        target: String,
-        detail: String,
-        decision: String,
-        result_code: i32,
-    }
-
-    let zero_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let mut errors = Vec::new();
-    let mut prev_hash = zero_hash.to_string();
-    let mut expected_seq = 0u64;
-
-    for (i, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: Entry = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("line {}: parse error: {e}", i + 1));
-                continue;
-            }
-        };
-        if entry.seq != expected_seq {
-            errors.push(format!("seq={}: expected {expected_seq}", entry.seq));
-        }
-        if entry.prev_hash != prev_hash {
-            errors.push(format!("seq={}: prev_hash mismatch", entry.seq));
-        }
-        let core = Core {
-            seq: entry.seq,
-            timestamp: entry.timestamp.clone(),
-            sandbox_id: entry.sandbox_id.clone(),
-            request_type: entry.request_type.clone(),
-            target: entry.target.clone(),
-            detail: entry.detail.clone(),
-            decision: entry.decision.clone(),
-            result_code: entry.result_code,
-        };
-        let canonical = serde_json::to_string(&core)?;
-        let mut hasher = Sha256::new();
-        hasher.update(entry.prev_hash.as_bytes());
-        hasher.update(b"||");
-        hasher.update(canonical.as_bytes());
-        let expected_hash = format!("{:x}", hasher.finalize());
-        if entry.hash != expected_hash {
-            errors.push(format!("seq={}: hash mismatch", entry.seq));
-        }
-        prev_hash.clone_from(&entry.hash);
-        expected_seq = entry.seq + 1;
-    }
-    Ok(errors)
 }
 
 fn check_socket_path_length(config: &AboxConfig) -> Check {

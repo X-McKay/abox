@@ -37,6 +37,9 @@ webpki-roots = "0.26"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [lints]
 workspace = true
 

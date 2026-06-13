@@ -2,89 +2,20 @@
 //!
 //! Every proxied request (CLI and HTTP) is logged to a structured JSON file
 //! for post-hoc review. The audit log captures the sandbox ID, timestamp,
-//! command/URL, policy decision, and exit code.
+//! command/URL, policy decision, and result code.
 //!
-//! # Tamper-Evidence
-//!
-//! Each entry carries a `hash` field that is the SHA-256 of:
-//!   `prev_hash || entry_json_without_hash_field`
-//!
-//! The first entry uses a zero hash as the predecessor. This creates a
-//! linked chain: any modification, insertion, or deletion of an entry
-//! changes all subsequent hashes, making tampering detectable by
-//! `abox audit verify`.
-//!
-//! # Format
-//!
-//! Each line in `audit.jsonl` is a JSON object with the fields:
-//!   - `seq`: monotonically increasing sequence number (u64)
-//!   - `timestamp`: ISO 8601 UTC timestamp
-//!   - `sandbox_id`: the sandbox that made the request
-//!   - `request_type`: `"cli"` or `"egress"`
-//!   - `target`: the command or URL
-//!   - `detail`: full args (CLI) or empty string (egress)
-//!   - `decision`: `"allowed"` or `"denied"`
-//!   - `result_code`: exit code (CLI) or HTTP status (egress); 0 if not yet completed
-//!   - `prev_hash`: hex SHA-256 of the previous entry (or 64 zeros for the first)
-//!   - `hash`: hex SHA-256 of `prev_hash || canonical_entry_json`
+//! The entry format, canonicalization, keyed hashing, and verification all
+//! live in [`abox_core::audit`] so this writer, `abox audit verify`, and
+//! `abox doctor` share one implementation and cannot drift. See that module
+//! for the precise tamper-evidence guarantees.
 
+use abox_core::audit::{
+    self, compute_hash, AuditEntry, AuditEntryCore, ChainTip, ZERO_HASH,
+};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-
-/// The zero hash used as the predecessor of the first entry.
-const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-
-/// A single audit log entry (without the chaining hash fields).
-/// Used as the canonical input to the hash computation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AuditEntryCore {
-    pub seq: u64,
-    pub timestamp: String,
-    pub sandbox_id: String,
-    pub request_type: String,
-    pub target: String,
-    pub detail: String,
-    pub decision: String,
-    pub result_code: i32,
-}
-
-/// A complete audit log entry including hash-chain fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEntry {
-    pub seq: u64,
-    pub timestamp: String,
-    pub sandbox_id: String,
-    pub request_type: String,
-    pub target: String,
-    pub detail: String,
-    pub decision: String,
-    pub result_code: i32,
-    /// Hex SHA-256 of the previous entry's canonical JSON (or ZERO_HASH for seq=0).
-    pub prev_hash: String,
-    /// Hex SHA-256 of `prev_hash || canonical_entry_json`.
-    pub hash: String,
-}
-
-/// Result of verifying an audit log file.
-/// Used by `abox audit verify` in the CLI crate.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct VerifyResult {
-    pub total_entries: usize,
-    pub ok: bool,
-    pub errors: Vec<String>,
-}
-
-impl VerifyResult {
-    #[allow(dead_code)]
-    pub fn is_ok(&self) -> bool {
-        self.ok
-    }
-}
 
 /// Thread-safe audit logger that writes hash-chained JSON lines to a file.
 pub struct AuditLog {
@@ -95,6 +26,10 @@ pub struct AuditLog {
 
 struct AuditLogInner {
     writer: std::io::BufWriter<std::fs::File>,
+    /// Directory holding the log, key, and tip files.
+    logs_dir: PathBuf,
+    /// Host-only HMAC key for the chain.
+    key: Vec<u8>,
     /// Sequence counter for the next entry.
     next_seq: u64,
     /// Hash of the last written entry (or ZERO_HASH if empty).
@@ -103,20 +38,44 @@ struct AuditLogInner {
 
 impl AuditLog {
     /// Create a new audit log, appending to the given file.
-    /// Reads existing entries to establish the current chain state.
+    ///
+    /// Loads (or creates) the host-only HMAC key, acquires an exclusive
+    /// advisory lock on the file so only one writer chains the log at a time,
+    /// and reads existing entries to recover the current chain tip.
     pub fn new(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let logs_dir = path
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        std::fs::create_dir_all(&logs_dir)?;
+
+        let key = audit::load_or_create_key(&logs_dir)?;
 
         // Read existing entries to find the current chain tip.
-        let (next_seq, last_hash) =
-            if path.exists() { Self::read_chain_tip(path)? } else { (0, ZERO_HASH.to_string()) };
+        let (next_seq, last_hash) = if path.exists() {
+            Self::read_chain_tip(path)?
+        } else {
+            (0, ZERO_HASH.to_string())
+        };
 
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+
+        // Single-writer guard: a non-blocking exclusive advisory lock. Two
+        // proxyd processes sharing one audit file would otherwise interleave
+        // writes and fork the chain, producing spurious "tampered" verdicts on
+        // an honest system.
+        acquire_exclusive_lock(&file).map_err(|e| {
+            anyhow::anyhow!(
+                "Another process is already writing the audit log at {} ({e}). \
+                 Only one abox-proxyd may own an audit log.",
+                path.display()
+            )
+        })?;
+
         Ok(Self {
             inner: Mutex::new(AuditLogInner {
                 writer: std::io::BufWriter::new(file),
+                logs_dir,
+                key,
                 next_seq,
                 last_hash,
             }),
@@ -145,16 +104,6 @@ impl AuditLog {
 
         let next_seq = if found_any { last_seq + 1 } else { 0 };
         Ok((next_seq, last_hash))
-    }
-
-    /// Compute the hash for a new entry given the previous hash and core fields.
-    fn compute_hash(prev_hash: &str, core: &AuditEntryCore) -> anyhow::Result<String> {
-        let canonical = serde_json::to_string(core)?;
-        let mut hasher = Sha256::new();
-        hasher.update(prev_hash.as_bytes());
-        hasher.update(b"||");
-        hasher.update(canonical.as_bytes());
-        Ok(format!("{:x}", hasher.finalize()))
     }
 
     /// Write an audit entry with hash chaining.
@@ -186,7 +135,7 @@ impl AuditLog {
             result_code,
         };
 
-        let hash = match Self::compute_hash(&inner.last_hash, &core) {
+        let hash = match compute_hash(&inner.key, &inner.last_hash, &core) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to compute audit entry hash");
@@ -223,9 +172,22 @@ impl AuditLog {
             tracing::error!(error = %e, "Failed to flush audit log");
             return;
         }
+        // Durability: push the record to stable storage before we treat it as
+        // committed. Without fsync a crash could lose entries that flush()
+        // already acknowledged.
+        if let Err(e) = inner.writer.get_ref().sync_data() {
+            tracing::warn!(error = %e, "Failed to fsync audit log");
+        }
 
-        inner.last_hash = hash;
+        inner.last_hash.clone_from(&hash);
         inner.next_seq += 1;
+
+        // Persist the chain tip so truncation of the log tail is detectable.
+        let tip = ChainTip { seq: entry.seq, hash };
+        let logs_dir = inner.logs_dir.clone();
+        if let Err(e) = audit::save_tip(&logs_dir, &tip) {
+            tracing::warn!(error = %e, "Failed to persist audit chain tip");
+        }
     }
 
     /// Log a CLI proxy request.
@@ -250,178 +212,104 @@ impl AuditLog {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
 
-    /// Verify the integrity of an audit log file.
-    ///
-    /// Checks:
-    /// 1. Each entry's `prev_hash` matches the previous entry's `hash`.
-    /// 2. Each entry's `hash` matches the computed hash of `prev_hash || core_json`.
-    /// 3. Sequence numbers are contiguous starting from 0.
-    #[allow(dead_code)]
-    pub fn verify(path: &Path) -> anyhow::Result<VerifyResult> {
-        let content = std::fs::read_to_string(path)?;
-        let mut errors = Vec::new();
-        let mut prev_hash = ZERO_HASH.to_string();
-        let mut expected_seq = 0u64;
-        let mut total = 0usize;
+/// Acquire a non-blocking exclusive advisory lock (`flock`) on the file.
+///
+/// Uses `rustix`'s safe wrapper (no `unsafe`); the lock is released
+/// automatically when the file is closed (i.e. when `AuditLog` is dropped).
+#[cfg(unix)]
+fn acquire_exclusive_lock(file: &std::fs::File) -> std::io::Result<()> {
+    use rustix::fs::{flock, FlockOperation};
+    flock(file, FlockOperation::NonBlockingLockExclusive).map_err(std::io::Error::from)
+}
 
-        for (line_num, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            let entry: AuditEntry = match serde_json::from_str(line) {
-                Ok(e) => e,
-                Err(e) => {
-                    errors.push(format!("Line {}: JSON parse error: {e}", line_num + 1));
-                    continue;
-                }
-            };
-
-            // Check sequence continuity
-            if entry.seq != expected_seq {
-                errors.push(format!(
-                    "Line {}: sequence gap — expected seq={expected_seq}, got seq={}",
-                    line_num + 1,
-                    entry.seq
-                ));
-            }
-
-            // Check prev_hash linkage
-            if entry.prev_hash != prev_hash {
-                let prev_short = &prev_hash[..8.min(prev_hash.len())];
-                let got_short = &entry.prev_hash[..8.min(entry.prev_hash.len())];
-                errors.push(format!(
-                    "Line {} (seq={}): prev_hash mismatch — expected {prev_short}…, got {got_short}…",
-                    line_num + 1,
-                    entry.seq,
-                ));
-            }
-
-            // Recompute hash from core fields
-            let core = AuditEntryCore {
-                seq: entry.seq,
-                timestamp: entry.timestamp.clone(),
-                sandbox_id: entry.sandbox_id.clone(),
-                request_type: entry.request_type.clone(),
-                target: entry.target.clone(),
-                detail: entry.detail.clone(),
-                decision: entry.decision.clone(),
-                result_code: entry.result_code,
-            };
-            let expected_hash = match Self::compute_hash(&entry.prev_hash, &core) {
-                Ok(h) => h,
-                Err(e) => {
-                    errors.push(format!(
-                        "Line {} (seq={}): hash computation error: {e}",
-                        line_num + 1,
-                        entry.seq
-                    ));
-                    continue;
-                }
-            };
-
-            if entry.hash != expected_hash {
-                let claimed_short = &entry.hash[..8.min(entry.hash.len())];
-                let computed_short = &expected_hash[..8.min(expected_hash.len())];
-                errors.push(format!(
-                    "Line {} (seq={}): hash mismatch — entry claims {claimed_short}…, computed {computed_short}…",
-                    line_num + 1,
-                    entry.seq,
-                ));
-            }
-
-            prev_hash.clone_from(&entry.hash);
-            expected_seq = entry.seq + 1;
-            total += 1;
-        }
-
-        let ok = errors.is_empty();
-        Ok(VerifyResult { total_entries: total, ok, errors })
-    }
+#[cfg(not(unix))]
+fn acquire_exclusive_lock(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
+    use abox_core::audit::{load_or_create_key, load_tip, verify_chain};
+    use tempfile::tempdir;
+
+    fn log_path(dir: &Path) -> PathBuf {
+        dir.join("audit.jsonl")
+    }
 
     #[test]
     fn test_audit_log_creates_chained_entries() {
-        let tmp = NamedTempFile::new().unwrap();
-        let log = AuditLog::new(tmp.path()).unwrap();
+        let dir = tempdir().unwrap();
+        let path = log_path(dir.path());
+        let log = AuditLog::new(&path).unwrap();
 
         log.log_cli("sandbox1", "git", &["status".to_string()], "allowed", 0);
         log.log_egress("sandbox1", "api.anthropic.com", "allowed", 200);
         log.log_cli("sandbox1", "curl", &["https://example.com".to_string()], "denied", -1);
+        drop(log);
 
-        let result = AuditLog::verify(tmp.path()).unwrap();
-        assert!(result.is_ok(), "Errors: {:?}", result.errors);
-        assert_eq!(result.total_entries, 3);
+        let key = load_or_create_key(dir.path()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let report = verify_chain(&content, &key, load_tip(dir.path()).as_ref());
+        assert!(report.is_ok(), "Errors: {:?}", report.errors);
+        assert_eq!(report.total_entries, 3);
     }
 
     #[test]
     fn test_audit_log_detects_tampering() {
-        let tmp = NamedTempFile::new().unwrap();
-        let log = AuditLog::new(tmp.path()).unwrap();
+        let dir = tempdir().unwrap();
+        let path = log_path(dir.path());
+        let log = AuditLog::new(&path).unwrap();
         log.log_cli("sandbox1", "git", &["status".to_string()], "allowed", 0);
         log.log_egress("sandbox1", "api.openai.com", "allowed", 200);
         drop(log);
 
-        // Tamper with the file: modify the first entry's decision
-        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
         let tampered = content.replacen("\"allowed\"", "\"denied\"", 1);
-        std::fs::write(tmp.path(), tampered).unwrap();
+        std::fs::write(&path, tampered).unwrap();
 
-        let result = AuditLog::verify(tmp.path()).unwrap();
-        assert!(!result.is_ok(), "Should have detected tampering");
-        assert!(!result.errors.is_empty());
+        let key = load_or_create_key(dir.path()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let report = verify_chain(&content, &key, None);
+        assert!(!report.is_ok(), "Should have detected tampering");
     }
 
     #[test]
     fn test_audit_log_first_entry_uses_zero_hash() {
-        let tmp = NamedTempFile::new().unwrap();
-        let log = AuditLog::new(tmp.path()).unwrap();
+        let dir = tempdir().unwrap();
+        let path = log_path(dir.path());
+        let log = AuditLog::new(&path).unwrap();
         log.log_cli("s", "echo", &[], "allowed", 0);
         drop(log);
 
-        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
         let entry: AuditEntry = serde_json::from_str(content.trim()).unwrap();
         assert_eq!(entry.seq, 0);
         assert_eq!(entry.prev_hash, ZERO_HASH);
     }
 
     #[test]
-    fn test_audit_log_verify_empty_file() {
-        let tmp = NamedTempFile::new().unwrap();
-        let result = AuditLog::verify(tmp.path()).unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.total_entries, 0);
-    }
-
-    #[test]
     fn test_audit_log_resumes_chain_after_reopen() {
-        let tmp = NamedTempFile::new().unwrap();
+        let dir = tempdir().unwrap();
+        let path = log_path(dir.path());
 
-        // First session
         {
-            let log = AuditLog::new(tmp.path()).unwrap();
+            let log = AuditLog::new(&path).unwrap();
             log.log_cli("s", "git", &["status".to_string()], "allowed", 0);
         }
-
-        // Second session — should continue the chain
         {
-            let log = AuditLog::new(tmp.path()).unwrap();
+            let log = AuditLog::new(&path).unwrap();
             log.log_egress("s", "api.github.com", "allowed", 200);
         }
 
-        let result = AuditLog::verify(tmp.path()).unwrap();
-        assert!(result.is_ok(), "Errors: {:?}", result.errors);
-        assert_eq!(result.total_entries, 2);
+        let key = load_or_create_key(dir.path()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let report = verify_chain(&content, &key, load_tip(dir.path()).as_ref());
+        assert!(report.is_ok(), "Errors: {:?}", report.errors);
+        assert_eq!(report.total_entries, 2);
 
-        // Check seq numbers are 0 and 1
-        let content = std::fs::read_to_string(tmp.path()).unwrap();
         let entries: Vec<AuditEntry> = content
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -430,5 +318,27 @@ mod tests {
         assert_eq!(entries[0].seq, 0);
         assert_eq!(entries[1].seq, 1);
         assert_eq!(entries[1].prev_hash, entries[0].hash);
+    }
+
+    #[test]
+    fn test_truncation_detected_via_tip() {
+        let dir = tempdir().unwrap();
+        let path = log_path(dir.path());
+        let log = AuditLog::new(&path).unwrap();
+        for i in 0..4 {
+            log.log_cli("s", "git", &[format!("op{i}")], "allowed", 0);
+        }
+        drop(log);
+
+        // Truncate the log to the first entry, leaving the tip recording seq=3.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let first_line = content.lines().next().unwrap();
+        std::fs::write(&path, format!("{first_line}\n")).unwrap();
+
+        let key = load_or_create_key(dir.path()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let report = verify_chain(&content, &key, load_tip(dir.path()).as_ref());
+        assert!(!report.is_ok(), "truncation should be detected");
+        assert!(report.errors.iter().any(|e| e.contains("truncated")));
     }
 }

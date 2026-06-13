@@ -1,21 +1,18 @@
-//! `abox audit` — Verify the integrity of the audit log.
+//! `abox audit` — Verify and inspect the audit log.
 //!
 //! The audit log at `~/.abox/logs/audit.jsonl` uses a hash-chained format
-//! where each entry includes the SHA-256 of the previous entry. This command
-//! verifies the chain, detecting any tampering, deletion, or insertion of
-//! entries.
+//! where each entry includes an HMAC of the previous entry (keyed with a
+//! host-only secret). This command verifies the chain — detecting tampering,
+//! deletion, insertion, or truncation — and prints recent entries.
+//!
+//! All format, hashing, and verification logic lives in [`abox_core::audit`],
+//! shared with `abox-proxyd` (the writer) and `abox doctor`.
 
+use abox_core::audit::{self, AuditEntry};
 use abox_core::config::AboxConfig;
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
-
-// Re-export the verify logic from abox-proxyd's audit module via a thin
-// wrapper so the CLI does not depend on abox-proxyd as a library crate.
-// Instead, we duplicate the minimal verification logic here.
-
-/// The zero hash used as the predecessor of the first entry.
-const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Args)]
 pub struct AuditArgs {
@@ -48,51 +45,13 @@ pub enum AuditAction {
     },
 }
 
-/// Minimal audit entry for verification (mirrors abox-proxyd's AuditEntry).
-#[derive(Debug, serde::Deserialize)]
-struct AuditEntry {
-    pub seq: u64,
-    pub timestamp: String,
-    pub sandbox_id: String,
-    pub request_type: String,
-    pub target: String,
-    pub detail: String,
-    pub decision: String,
-    pub result_code: i32,
-    pub prev_hash: String,
-    pub hash: String,
-}
-
-/// Core fields used for hash computation (must match abox-proxyd's AuditEntryCore).
-#[derive(Debug, serde::Serialize)]
-struct AuditEntryCore {
-    pub seq: u64,
-    pub timestamp: String,
-    pub sandbox_id: String,
-    pub request_type: String,
-    pub target: String,
-    pub detail: String,
-    pub decision: String,
-    pub result_code: i32,
-}
-
-fn compute_hash(prev_hash: &str, core: &AuditEntryCore) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let canonical = serde_json::to_string(core)?;
-    let mut hasher = Sha256::new();
-    hasher.update(prev_hash.as_bytes());
-    hasher.update(b"||");
-    hasher.update(canonical.as_bytes());
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 fn resolve_log_path(log_override: Option<PathBuf>, config: &AboxConfig) -> PathBuf {
-    log_override.unwrap_or_else(|| config.logs_dir().join("audit.jsonl"))
+    log_override.unwrap_or_else(|| audit::default_log_path(&config.logs_dir()))
 }
 
 pub fn execute(args: &AuditArgs, config: &AboxConfig) -> Result<()> {
     match &args.action {
-        AuditAction::Verify { log } => verify(&resolve_log_path(log.clone(), config)),
+        AuditAction::Verify { log } => verify(&resolve_log_path(log.clone(), config), config),
         AuditAction::Show { log, count, sandbox, request_type } => show(
             &resolve_log_path(log.clone(), config),
             *count,
@@ -102,7 +61,12 @@ pub fn execute(args: &AuditArgs, config: &AboxConfig) -> Result<()> {
     }
 }
 
-fn verify(path: &std::path::Path) -> Result<()> {
+/// Resolve the logs directory that holds the key and tip for a given log path.
+fn logs_dir_for(path: &Path, config: &AboxConfig) -> PathBuf {
+    path.parent().map_or_else(|| config.logs_dir(), Path::to_path_buf)
+}
+
+fn verify(path: &Path, config: &AboxConfig) -> Result<()> {
     if !path.exists() {
         anyhow::bail!(
             "Audit log not found at {}\n\n\
@@ -112,92 +76,53 @@ fn verify(path: &std::path::Path) -> Result<()> {
         );
     }
 
+    let logs_dir = logs_dir_for(path, config);
+    let key_path = logs_dir.join(audit::KEY_FILENAME);
+    if !key_path.exists() {
+        anyhow::bail!(
+            "Audit key not found at {}\n\n\
+             The keyed hash chain cannot be verified without the host-only key \
+             that abox-proxyd created. If this key was lost, the chain's \
+             authenticity cannot be established.",
+            key_path.display()
+        );
+    }
+    let key = audit::load_or_create_key(&logs_dir)?;
+    let recorded_tip = audit::load_tip(&logs_dir);
+
     println!("Verifying audit log: {}", path.display());
     println!("{}", "=".repeat(60));
 
     let content = std::fs::read_to_string(path)?;
-    let mut errors: Vec<String> = Vec::new();
-    let mut prev_hash = ZERO_HASH.to_string();
-    let mut expected_seq = 0u64;
-    let mut total = 0usize;
-
-    for (line_num, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let entry: AuditEntry = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Line {}: JSON parse error: {e}", line_num + 1));
-                continue;
-            }
-        };
-
-        if entry.seq != expected_seq {
-            errors.push(format!(
-                "seq={}: sequence gap — expected {expected_seq}, got {}",
-                entry.seq, entry.seq
-            ));
-        }
-
-        if entry.prev_hash != prev_hash {
-            let prev_short = &prev_hash[..8.min(prev_hash.len())];
-            let got_short = &entry.prev_hash[..8.min(entry.prev_hash.len())];
-            errors.push(format!(
-                "seq={}: prev_hash mismatch — expected {prev_short}…, got {got_short}…",
-                entry.seq
-            ));
-        }
-
-        let core = AuditEntryCore {
-            seq: entry.seq,
-            timestamp: entry.timestamp.clone(),
-            sandbox_id: entry.sandbox_id.clone(),
-            request_type: entry.request_type.clone(),
-            target: entry.target.clone(),
-            detail: entry.detail.clone(),
-            decision: entry.decision.clone(),
-            result_code: entry.result_code,
-        };
-
-        let expected_hash = compute_hash(&entry.prev_hash, &core)?;
-        if entry.hash != expected_hash {
-            let claimed = &entry.hash[..8.min(entry.hash.len())];
-            let computed = &expected_hash[..8.min(expected_hash.len())];
-            errors.push(format!(
-                "seq={}: hash mismatch — entry claims {claimed}…, computed {computed}…",
-                entry.seq
-            ));
-        }
-
-        prev_hash.clone_from(&entry.hash);
-        expected_seq = entry.seq + 1;
-        total += 1;
-    }
+    let report = audit::verify_chain(&content, &key, recorded_tip.as_ref());
 
     println!("Chain Integrity");
-    if errors.is_empty() {
-        println!("  [ok] Hash chain: {total} entries, no gaps, all hashes valid");
+    if report.is_ok() {
+        println!(
+            "  [ok] Hash chain: {} entries, no gaps, all HMACs valid",
+            report.total_entries
+        );
+        if let (Some(seq), Some(hash)) = (report.tip_seq, report.tip_hash.as_ref()) {
+            println!("  tip: seq={seq} hash={}…", &hash[..8.min(hash.len())]);
+        }
         println!();
         println!("{}", "=".repeat(60));
         println!("VERDICT: [ok] INTACT — No tampering detected");
+        Ok(())
     } else {
-        for err in &errors {
+        for err in &report.errors {
             println!("  [FAIL] {err}");
         }
         println!();
         println!("{}", "=".repeat(60));
-        println!("VERDICT: [FAIL] TAMPERED — {} error(s) detected", errors.len());
+        println!("VERDICT: [FAIL] TAMPERED — {} error(s) detected", report.errors.len());
+        // Use a clean error rather than process::exit so callers can compose.
         std::process::exit(1);
     }
-
-    Ok(())
 }
 
 fn show(
-    path: &std::path::Path,
+    path: &Path,
     count: usize,
     sandbox_filter: Option<&str>,
     type_filter: Option<&str>,
@@ -234,26 +159,14 @@ fn show(
 
     for entry in display.iter().rev() {
         let ts = entry.timestamp.get(..19).unwrap_or(&entry.timestamp);
-        let sandbox = if entry.sandbox_id.len() > 12 {
-            format!("{}…", &entry.sandbox_id[..11])
-        } else {
-            entry.sandbox_id.clone()
-        };
-        let target = if entry.target.len() > 40 {
-            format!("{}…", &entry.target[..39])
-        } else {
-            entry.target.clone()
-        };
+        let sandbox = truncate_chars(&entry.sandbox_id, 12);
+        let target = truncate_chars(&entry.target, 40);
         println!(
             "{:<6} {:<26} {:<14} {:<10} {:<8} {}",
             entry.seq, ts, sandbox, entry.request_type, entry.decision, target
         );
         if !entry.detail.is_empty() {
-            let detail = if entry.detail.len() > 60 {
-                format!("{}…", &entry.detail[..59])
-            } else {
-                entry.detail.clone()
-            };
+            let detail = truncate_chars(&entry.detail, 60);
             println!("       args: {detail}");
         }
     }
@@ -262,4 +175,34 @@ fn show(
     println!("Showing {} of {} entries. Use --count to see more.", display.len(), entries.len());
 
     Ok(())
+}
+
+/// Truncate a string to at most `max` characters (not bytes), appending `…`.
+///
+/// `target`/`detail` are agent-influenced (URLs, command args) and may contain
+/// multi-byte UTF-8; slicing by byte index here could panic, so take chars.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{prefix}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncate_chars_no_panic_on_multibyte() {
+        let s = "λλλλλλλλλλλλλλλλλλλλ"; // 20 two-byte chars
+        let out = truncate_chars(s, 5);
+        assert!(out.chars().count() <= 5);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_chars_passthrough() {
+        assert_eq!(truncate_chars("short", 40), "short");
+    }
 }

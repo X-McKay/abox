@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
     let policy = Arc::new(policy);
 
     // Initialize audit log
-    let audit_path = config.logs_dir().join("audit.jsonl");
+    let audit_path = abox_core::audit::default_log_path(&config.logs_dir());
     let audit = Arc::new(AuditLog::new(&audit_path)?);
     tracing::info!(path = %audit_path.display(), "Audit log initialized");
 
