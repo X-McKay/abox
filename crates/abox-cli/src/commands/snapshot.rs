@@ -17,8 +17,9 @@
 
 use super::validate_task_arg;
 use abox_core::config::AboxConfig;
-use abox_core::sandbox::SandboxOrchestrator;
-use abox_core::snapshot::SnapshotManager;
+use abox_core::project::EnvironmentProfile;
+use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
+use abox_core::snapshot::{validate_template_name, SnapshotManager};
 use abox_core::util::format_size;
 use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
@@ -91,6 +92,7 @@ pub fn execute_without_orchestrator(args: &SnapshotArgs, config: &AboxConfig) ->
             Ok(true)
         }
         SnapshotAction::Delete { name } => {
+            validate_template_name(name)?;
             snap_mgr.delete_template(name)?;
             println!("Snapshot '{name}' deleted.");
             Ok(true)
@@ -118,12 +120,14 @@ pub async fn execute_with_orchestrator<W: WorkspacePort, V: VmPort>(
 
     match &args.action {
         SnapshotAction::Create { name, from } => {
+            validate_template_name(name)?;
             validate_task_arg(from)?;
             create_snapshot(name, from, orchestrator, &snap_mgr).await
         }
         SnapshotAction::Restore { name, r#as } => {
+            validate_template_name(name)?;
             validate_task_arg(r#as)?;
-            restore_snapshot(name, r#as, &snap_mgr).await
+            restore_snapshot(name, r#as, orchestrator, &snap_mgr).await
         }
         _ => unreachable!("non-orchestrator actions should have been handled earlier"),
     }
@@ -142,11 +146,13 @@ fn list_snapshots(snap_mgr: &SnapshotManager) -> Result<()> {
 
     println!("{:<24} {:<12} PATH", "NAME", "SIZE");
     println!("{}", "-".repeat(70));
+    let mut total_bytes = 0u64;
     for snap in &snapshots {
+        total_bytes += snap.size_bytes;
         println!("{:<24} {:<12} {}", snap.name, format_size(snap.size_bytes), snap.path.display());
     }
     println!();
-    println!("{} snapshot(s) total", snapshots.len());
+    println!("{} snapshot(s), {} total on disk", snapshots.len(), format_size(total_bytes));
     println!();
     println!("Restore with: abox snapshot restore <name> --as <new-sandbox-id>");
     println!("Delete with:  abox snapshot delete <name>");
@@ -194,17 +200,54 @@ async fn create_snapshot<W: WorkspacePort, V: VmPort>(
     }
 }
 
-async fn restore_snapshot(name: &str, sandbox_id: &str, snap_mgr: &SnapshotManager) -> Result<()> {
+async fn restore_snapshot<W: WorkspacePort, V: VmPort>(
+    name: &str,
+    sandbox_id: &str,
+    orchestrator: &SandboxOrchestrator<W, V>,
+    snap_mgr: &SnapshotManager,
+) -> Result<()> {
+    // Verify the snapshot exists before doing any work.
+    if !snap_mgr.list_templates()?.iter().any(|t| t.name == name) {
+        anyhow::bail!("Snapshot '{name}' not found. List with: abox snapshot list");
+    }
+
     println!("Restoring snapshot '{name}' as sandbox '{sandbox_id}'...");
     println!();
-    println!("Note: The restored sandbox will have the VM state from when '{name}' was taken.");
-    println!("      Use 'abox list' to see it after restoration.");
+    println!("Note: the restored sandbox resumes the VM state from when '{name}' was taken.");
     println!();
 
-    snap_mgr.restore_from_snapshot(name, sandbox_id).await?;
+    // Restore through the orchestrator's proven path (the same one used by
+    // `abox run --template`): it recreates the snapshot's virtiofsd backends,
+    // keeps the VM process alive, and registers it in the manager so it shows
+    // up in `abox list` and can be attached to. A fresh worktree is created for
+    // the new sandbox id; the resumed guest reconnects its virtiofs shares to
+    // it. The agent command is a placeholder — the snapshot resumes from memory
+    // and does not re-run the guest init/runner.
+    let params = CreateSandboxParams {
+        task_id: sandbox_id.to_string(),
+        base_branch: "main".to_string(),
+        template: Some(name.to_string()),
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: Vec::new(),
+        command: vec!["true".to_string()],
+        resolved_prompt: None,
+        cache_mount_dir: None,
+        staged_prepare_script: None,
+        environment_profile: EnvironmentProfile::Base,
+        timeout_secs: None,
+        ephemeral: false,
+        ca_cert_pem: None,
+        mount_excludes: Vec::new(),
+        service_bridges: Vec::new(),
+    };
+
+    orchestrator.create_sandbox(params).await?;
 
     println!("Snapshot '{name}' restored as sandbox '{sandbox_id}'.");
-    println!("Attach with: abox attach {sandbox_id}");
+    println!("See it with:  abox list");
+    println!("Attach with:  abox attach {sandbox_id}");
 
     Ok(())
 }
@@ -217,9 +260,11 @@ fn prune_snapshots(snap_mgr: &SnapshotManager, keep: usize, dry_run: bool) -> Re
         return Ok(());
     }
 
-    // Sort by name (alphabetical, which for timestamped names is also chronological)
-    // Keep the N most recent (last N alphabetically)
-    snapshots.sort_by(|a, b| a.name.cmp(&b.name));
+    // Sort oldest-first by on-disk modification time so "keep the N most
+    // recent" is correct regardless of the user-chosen snapshot names (names
+    // are arbitrary, so lexicographic order is not chronological). Snapshots
+    // with no readable mtime sort oldest.
+    snapshots.sort_by_key(|s| s.modified.unwrap_or(std::time::UNIX_EPOCH));
 
     let total = snapshots.len();
     if total <= keep {
