@@ -68,10 +68,29 @@ pub struct McpToken {
     pub scopes: Vec<String>,
     /// When this token was stored (ISO 8601).
     pub stored_at: String,
+    /// OAuth token endpoint, retained so the token can be refreshed later.
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    /// OAuth client ID used for this grant, retained for refresh.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 fn default_token_type() -> String {
     "Bearer".to_string()
+}
+
+/// The result of a successful token exchange or refresh.
+#[derive(Debug, Clone)]
+pub struct TokenResponse {
+    /// The OAuth access token.
+    pub access_token: String,
+    /// Optional refresh token, if the server issued one.
+    pub refresh_token: Option<String>,
+    /// Absolute expiry as Unix seconds, derived from `expires_in`.
+    pub expires_at: Option<i64>,
+    /// Scopes actually granted by the server.
+    pub scopes: Vec<String>,
 }
 
 impl McpToken {
@@ -98,24 +117,73 @@ pub fn tokens_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("mcp-tokens")
 }
 
-/// Path for a specific MCP token.
-pub fn token_path(state_dir: &Path, name: &str) -> PathBuf {
-    tokens_dir(state_dir).join(format!("{name}.json"))
+/// Validate a token name before using it as a filename.
+///
+/// Tokens are stored at `<state_dir>/mcp-tokens/<name>.json`; an unsanitized
+/// name (`../../foo`, `a/b`) would let the file escape the tokens directory.
+fn validate_token_name(name: &str) -> Result<()> {
+    crate::util::validate_resource_name(name)
+        .map_err(|e| anyhow::anyhow!("Invalid MCP token name: {e}"))
 }
 
-/// Save an MCP token to disk.
+/// Path for a specific MCP token. Validates `name` against path traversal.
+pub fn token_path(state_dir: &Path, name: &str) -> Result<PathBuf> {
+    validate_token_name(name)?;
+    Ok(tokens_dir(state_dir).join(format!("{name}.json")))
+}
+
+/// Save an MCP token to disk with owner-only permissions (0600 file, 0700 dir).
 pub fn save_token(state_dir: &Path, token: &McpToken) -> Result<PathBuf> {
     let dir = tokens_dir(state_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("Creating {}", dir.display()))?;
-    let path = token_path(state_dir, &token.name);
+    restrict_dir_permissions(&dir);
+    let path = token_path(state_dir, &token.name)?;
     let json = serde_json::to_string_pretty(token).context("Serializing token")?;
-    std::fs::write(&path, json).with_context(|| format!("Writing token to {}", path.display()))?;
+    write_secret_file(&path, json.as_bytes())
+        .with_context(|| format!("Writing token to {}", path.display()))?;
     Ok(path)
+}
+
+/// Write a file containing secret material with mode 0600 (owner read/write).
+///
+/// Creates the file with restrictive permissions from the start (via
+/// `OpenOptions::mode`) so the secret is never briefly world-readable.
+fn write_secret_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    // Tighten permissions even if the file already existed with looser mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    f.write_all(contents)?;
+    f.flush()
+}
+
+/// Best-effort restriction of a directory to mode 0700 (owner-only).
+fn restrict_dir_permissions(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
 }
 
 /// Load an MCP token from disk.
 pub fn load_token(state_dir: &Path, name: &str) -> Result<Option<McpToken>> {
-    let path = token_path(state_dir, name);
+    let path = token_path(state_dir, name)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -151,7 +219,7 @@ pub fn list_tokens(state_dir: &Path) -> Result<Vec<McpToken>> {
 
 /// Delete a stored MCP token.
 pub fn delete_token(state_dir: &Path, name: &str) -> Result<bool> {
-    let path = token_path(state_dir, name);
+    let path = token_path(state_dir, name)?;
     if !path.exists() {
         return Ok(false);
     }
@@ -177,12 +245,19 @@ pub async fn discover_oauth_metadata(server_url: &str) -> Result<Option<OAuthSer
         .await
         .with_context(|| format!("Fetching OAuth discovery from {discovery_url}"))?;
 
+    // 404 means "no OAuth discovery here" — a normal, expected answer.
     if response.status() == 404 {
         return Ok(None);
     }
 
+    // Any other non-success status is an *error*, not "no OAuth": surface it so
+    // the user can distinguish a misconfigured/erroring server (500, 401, …)
+    // from one that genuinely does not advertise OAuth.
     if !response.status().is_success() {
-        return Ok(None);
+        anyhow::bail!(
+            "OAuth discovery at {discovery_url} returned HTTP {} (expected 200 or 404)",
+            response.status()
+        );
     }
 
     let metadata: OAuthServerMetadata = response
@@ -190,7 +265,33 @@ pub async fn discover_oauth_metadata(server_url: &str) -> Result<Option<OAuthSer
         .await
         .with_context(|| format!("Parsing OAuth metadata from {discovery_url}"))?;
 
+    // Security: the authorization and token endpoints carry the auth code and
+    // PKCE verifier. A malicious or misconfigured discovery document must not
+    // be able to redirect those to a plaintext (or attacker-controlled http://)
+    // endpoint. Require HTTPS for both. Loopback http:// is allowed only for
+    // local testing against 127.0.0.1/localhost.
+    require_secure_endpoint("authorization_endpoint", &metadata.authorization_endpoint)?;
+    require_secure_endpoint("token_endpoint", &metadata.token_endpoint)?;
+
     Ok(Some(metadata))
+}
+
+/// Require that a discovered OAuth endpoint uses HTTPS (or loopback http for
+/// local testing). Rejects anything else to keep secrets off the wire.
+fn require_secure_endpoint(field: &str, url: &str) -> Result<()> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    let is_loopback_http = url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://localhost")
+        || url.starts_with("http://[::1]");
+    if is_loopback_http {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Discovered {field} {url:?} is not HTTPS. Refusing to send the authorization code / PKCE \
+         verifier over an insecure channel."
+    )
 }
 
 /// Build a reqwest HTTP client for OAuth flows.
@@ -201,15 +302,18 @@ fn build_http_client() -> Result<reqwest::Client> {
         .context("Building HTTP client")
 }
 
-/// Generate a PKCE code verifier and challenge.
+/// Generate a PKCE code verifier and challenge (RFC 7636).
 ///
-/// Uses `/dev/urandom` on Unix for cryptographically secure randomness.
-pub fn generate_pkce() -> (String, String) {
+/// Uses the OS CSPRNG via [`crate::util::secure_random_bytes`]. Returns an
+/// error if the OS entropy source is unavailable — we never fall back to a
+/// weak/guessable verifier, since that would silently defeat PKCE's purpose.
+pub fn generate_pkce() -> Result<(String, String)> {
     use sha2::{Digest, Sha256};
 
-    // Generate 32 cryptographically random bytes for the verifier.
-    // We read from /dev/urandom directly to avoid adding a rand crate dependency.
-    let verifier_bytes = read_random_bytes(32);
+    // 32 cryptographically random bytes for the verifier.
+    let mut verifier_bytes = [0u8; 32];
+    crate::util::secure_random_bytes(&mut verifier_bytes)
+        .map_err(|e| anyhow::anyhow!("Cannot generate PKCE verifier: {e}"))?;
     let verifier = base64_url_encode(&verifier_bytes);
 
     // Challenge = BASE64URL(SHA256(verifier))
@@ -217,44 +321,17 @@ pub fn generate_pkce() -> (String, String) {
     hasher.update(verifier.as_bytes());
     let challenge = base64_url_encode(&hasher.finalize());
 
-    (verifier, challenge)
+    Ok((verifier, challenge))
 }
 
-/// Read `n` cryptographically random bytes from the OS.
-fn read_random_bytes(n: usize) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let mut buf = vec![0u8; n];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            if f.read_exact(&mut buf).is_ok() {
-                return buf;
-            }
-        }
-        // Fallback: use time-based seed (less secure but functional)
-        time_based_random(n)
-    }
-    #[cfg(not(unix))]
-    {
-        time_based_random(n)
-    }
-}
-
-/// Fallback random byte generation using time-based entropy.
-/// Only used when /dev/urandom is unavailable.
-fn time_based_random(n: usize) -> Vec<u8> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(42, |d| d.subsec_nanos());
-    // Simple LCG: multiply by a prime and add the index for variation
-    (0..n)
-        .map(|i| {
-            let mixed = seed
-                .wrapping_mul(1_664_525_u32)
-                .wrapping_add(1_013_904_223_u32)
-                .wrapping_add(i as u32 * 6_971_u32);
-            (mixed >> 8) as u8
-        })
-        .collect()
+/// Generate a random OAuth `state` value for CSRF protection.
+///
+/// Returns an error if the OS CSPRNG is unavailable.
+fn generate_state() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    crate::util::secure_random_bytes(&mut bytes)
+        .map_err(|e| anyhow::anyhow!("Cannot generate OAuth state: {e}"))?;
+    Ok(base64_url_encode(&bytes))
 }
 
 /// Base64-URL encode bytes (no padding, RFC 4648 §5).
@@ -288,14 +365,20 @@ pub async fn run_auth_flow(
     client_id: &str,
     scopes: &[String],
     server_url: &str,
-) -> Result<(String, Option<String>, Option<i64>, Vec<String>)> {
-    let (verifier, challenge) = generate_pkce();
+) -> Result<TokenResponse> {
+    let (verifier, challenge) = generate_pkce()?;
+    let state = generate_state()?;
 
-    // Start a local redirect server
-    let redirect_port = find_free_port().await?;
+    // Bind the loopback redirect listener up front and keep it bound for the
+    // whole flow. Binding once (rather than bind→drop→rebind) closes a TOCTOU
+    // window where another process could steal the port in between.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("Binding local OAuth redirect listener")?;
+    let redirect_port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{redirect_port}/callback");
 
-    // Build the authorization URL
+    // Build the authorization URL, including the CSRF `state`.
     let scope_str = if scopes.is_empty() {
         String::new()
     } else {
@@ -303,10 +386,11 @@ pub async fn run_auth_flow(
     };
 
     let auth_url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256{}",
+        "{}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256{}",
         metadata.authorization_endpoint,
         urlencoded(client_id),
         urlencoded(&redirect_uri),
+        urlencoded(&state),
         challenge,
         scope_str,
     );
@@ -321,9 +405,9 @@ pub async fn run_auth_flow(
     // Try to open the browser
     let _ = open_browser(&auth_url);
 
-    // Wait for the callback
+    // Wait for the callback, validating the returned `state`.
     println!("Waiting for authorization callback on port {redirect_port}...");
-    let code = wait_for_callback(redirect_port).await?;
+    let code = wait_for_callback(listener, &state).await?;
 
     println!("Authorization code received. Exchanging for token...");
 
@@ -343,17 +427,26 @@ pub async fn run_auth_flow(
         params.push(("scope", scope_param.as_str()));
     }
 
-    let response = client
-        .post(&metadata.token_endpoint)
-        .form(&params)
-        .send()
-        .await
-        .context("Token exchange request failed")?;
+    let _ = server_url; // reserved for richer error context
+    exchange_token(&client, &metadata.token_endpoint, &params, scopes).await
+}
+
+/// Exchange OAuth form parameters at the token endpoint and parse the response.
+///
+/// Shared by the initial authorization-code exchange and refresh-token flow.
+async fn exchange_token(
+    client: &reqwest::Client,
+    token_endpoint: &str,
+    params: &[(&str, &str)],
+    requested_scopes: &[String],
+) -> Result<TokenResponse> {
+    let response =
+        client.post(token_endpoint).form(params).send().await.context("Token request failed")?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Token exchange failed ({status}): {body}");
+        anyhow::bail!("Token request failed ({status}): {body}");
     }
 
     let token_response: serde_json::Value =
@@ -373,27 +466,46 @@ pub async fn run_auth_flow(
         now + secs
     });
 
-    let granted_scopes: Vec<String> = token_response["scope"]
-        .as_str()
-        .map_or_else(|| scopes.to_vec(), |s| s.split_whitespace().map(str::to_string).collect());
+    let scopes: Vec<String> = token_response["scope"].as_str().map_or_else(
+        || requested_scopes.to_vec(),
+        |s| s.split_whitespace().map(str::to_string).collect(),
+    );
 
-    let _ = server_url; // used for context in error messages
-    Ok((access_token, refresh_token, expires_at, granted_scopes))
+    Ok(TokenResponse { access_token, refresh_token, expires_at, scopes })
 }
 
-/// Find a free TCP port for the OAuth redirect server.
-async fn find_free_port() -> Result<u16> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+/// Refresh an access token using a stored refresh token (RFC 6749 §6).
+///
+/// Returns a fresh [`TokenResponse`]. If the server omits a new refresh token,
+/// the caller should retain the previous one.
+pub async fn refresh_access_token(
+    token_endpoint: &str,
+    client_id: &str,
+    refresh_token: &str,
+    scopes: &[String],
+) -> Result<TokenResponse> {
+    require_secure_endpoint("token_endpoint", token_endpoint)?;
+    let client = build_http_client()?;
+    let mut params = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    let scope_param;
+    if !scopes.is_empty() {
+        scope_param = scopes.join(" ");
+        params.push(("scope", scope_param.as_str()));
+    }
+    exchange_token(&client, token_endpoint, &params, scopes).await
 }
 
-/// Wait for the OAuth callback on the given port and return the authorization code.
-async fn wait_for_callback(port: u16) -> Result<String> {
+/// Wait for the OAuth callback on an already-bound listener.
+///
+/// Validates the `state` parameter against `expected_state` (CSRF protection),
+/// surfaces an `error=` response from the IdP, and percent-decodes the code.
+async fn wait_for_callback(listener: tokio::net::TcpListener, expected_state: &str) -> Result<String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     let (mut stream, _) =
         tokio::time::timeout(std::time::Duration::from_mins(2), listener.accept())
             .await
@@ -405,28 +517,91 @@ async fn wait_for_callback(port: u16) -> Result<String> {
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await?;
 
-    // Parse the code from the request line: "GET /callback?code=xxx HTTP/1.1"
-    let code = request_line
+    // Extract the raw query string from "GET /callback?<query> HTTP/1.1".
+    let query = request_line
         .split_whitespace()
         .nth(1)
-        .and_then(|path| {
-            path.split('?').nth(1).and_then(|query| {
-                query
-                    .split('&')
-                    .find(|p| p.starts_with("code="))
-                    .map(|p| p.strip_prefix("code=").unwrap_or("").to_string())
-            })
-        })
-        .ok_or_else(|| anyhow::anyhow!("No authorization code in callback URL: {request_line}"))?;
+        .and_then(|path| path.split('?').nth(1))
+        .unwrap_or("")
+        .to_string();
+    let params = parse_query(&query);
 
-    // Send a success response
-    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-        <html><body><h1>Authorization successful!</h1>\
-        <p>You can close this window and return to the terminal.</p>\
-        </body></html>";
-    writer.write_all(response.as_bytes()).await?;
+    // Always answer the browser so the user gets feedback, regardless of
+    // whether the callback was valid.
+    let (status_line, body): (&str, &str) = if params.contains_key("code") {
+        ("200 OK", "<h1>Authorization successful!</h1><p>You can close this window.</p>")
+    } else {
+        ("400 Bad Request", "<h1>Authorization failed.</h1><p>Return to the terminal.</p>")
+    };
+    let response = format!(
+        "HTTP/1.1 {status_line}\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+         <html><body>{body}</body></html>"
+    );
+    let _ = writer.write_all(response.as_bytes()).await;
+
+    // Surface an explicit error response from the authorization server.
+    if let Some(err) = params.get("error") {
+        let desc = params.get("error_description").map_or("", String::as_str);
+        anyhow::bail!("Authorization server returned error '{err}': {desc}");
+    }
+
+    // CSRF protection: the returned state must match what we sent.
+    match params.get("state") {
+        Some(got) if got == expected_state => {}
+        Some(_) => anyhow::bail!("OAuth state mismatch — possible CSRF; aborting"),
+        None => anyhow::bail!("OAuth callback missing required 'state' parameter; aborting"),
+    }
+
+    let code = params
+        .get("code")
+        .filter(|c| !c.is_empty())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("No authorization code in callback"))?;
 
     Ok(code)
+}
+
+/// Parse a URL query string into a map, percent-decoding keys and values.
+///
+/// Treats `+` as a space (form-encoding) and decodes `%XX` escapes.
+fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        map.insert(percent_decode(k), percent_decode(v));
+    }
+    map
+}
+
+/// Percent-decode a URL component (`%XX` escapes, `+` → space).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Open a URL in the default browser.
@@ -452,7 +627,6 @@ fn urlencoded(s: &str) -> String {
     for c in s.chars() {
         match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => result.push(c),
-            ' ' => result.push('+'),
             c => {
                 for byte in c.to_string().as_bytes() {
                     let _ = write!(result, "%{byte:02X}");
@@ -477,9 +651,73 @@ mod tests {
 
     #[test]
     fn test_urlencoded() {
-        assert_eq!(urlencoded("hello world"), "hello+world");
+        // Spaces are encoded as %20 (unambiguous in both path and query).
+        assert_eq!(urlencoded("hello world"), "hello%20world");
         assert_eq!(urlencoded("a=b&c=d"), "a%3Db%26c%3Dd");
         assert_eq!(urlencoded("simple"), "simple");
+    }
+
+    #[test]
+    fn test_percent_decode_roundtrip() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("%2Fpath%2Fx"), "/path/x");
+        // Malformed escape is passed through literally rather than panicking.
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn test_parse_query_extracts_params() {
+        let q = parse_query("code=abc%20123&state=xyz&error=");
+        assert_eq!(q.get("code").map(String::as_str), Some("abc 123"));
+        assert_eq!(q.get("state").map(String::as_str), Some("xyz"));
+        assert_eq!(q.get("error").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn test_generate_state_is_random_and_urlsafe() {
+        let a = generate_state().unwrap();
+        let b = generate_state().unwrap();
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn test_require_secure_endpoint() {
+        assert!(require_secure_endpoint("token_endpoint", "https://idp.example.com/token").is_ok());
+        assert!(require_secure_endpoint("token_endpoint", "http://127.0.0.1:9000/token").is_ok());
+        assert!(require_secure_endpoint("token_endpoint", "http://evil.example.com/token").is_err());
+    }
+
+    #[test]
+    fn test_token_path_rejects_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(token_path(tmp.path(), "../escape").is_err());
+        assert!(token_path(tmp.path(), "a/b").is_err());
+        assert!(token_path(tmp.path(), "valid-name").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_saved_token_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let token = McpToken {
+            name: "perms".into(),
+            server_url: "https://mcp.example.com".into(),
+            access_token: "secret".into(),
+            token_type: "Bearer".into(),
+            refresh_token: None,
+            expires_at: None,
+            scopes: vec![],
+            stored_at: "2024-01-01T00:00:00Z".into(),
+            token_endpoint: None,
+            client_id: None,
+        };
+        let path = save_token(tmp.path(), &token).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "token file must be owner-only");
     }
 
     #[test]
@@ -493,6 +731,8 @@ mod tests {
             expires_at: Some(1), // Unix epoch + 1 second = definitely expired
             scopes: vec![],
             stored_at: "2024-01-01T00:00:00Z".into(),
+            token_endpoint: None,
+            client_id: None,
         };
         assert!(expired_token.is_expired());
 
@@ -505,6 +745,8 @@ mod tests {
             expires_at: Some(i64::MAX), // Far future
             scopes: vec![],
             stored_at: "2024-01-01T00:00:00Z".into(),
+            token_endpoint: None,
+            client_id: None,
         };
         assert!(!valid_token.is_expired());
     }
@@ -523,6 +765,8 @@ mod tests {
             expires_at: None,
             scopes: vec!["read".into()],
             stored_at: "2024-01-01T00:00:00Z".into(),
+            token_endpoint: None,
+            client_id: None,
         };
 
         let path = save_token(state_dir, &token).unwrap();
@@ -542,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_generate_pkce_produces_valid_base64url() {
-        let (verifier, challenge) = generate_pkce();
+        let (verifier, challenge) = generate_pkce().unwrap();
         // Verifier should be non-empty and only contain base64url chars
         assert!(!verifier.is_empty());
         assert!(verifier.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));

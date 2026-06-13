@@ -33,6 +33,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dirs",
+ "getrandom 0.2.17",
  "git2",
  "http-body-util",
  "hyper",

@@ -23,6 +23,7 @@ chrono.workspace = true
 dirs.workspace = true
 git2 = "0.20"
 sha2 = "0.10"
+getrandom = "0.2"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 reqwest = { version = "0.12", features = ["json"] }
 time = "0.3"
