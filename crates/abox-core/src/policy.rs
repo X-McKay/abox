@@ -119,8 +119,15 @@ pub struct EgressRule {
 
     /// Optional per-request rules that filter by HTTP method and path.
     ///
-    /// Rules are evaluated top-to-bottom; the first match wins. If no rule
-    /// matches, the request falls through to the default egress action.
+    /// Rules are evaluated top-to-bottom; the first match wins. If **no** rule
+    /// matches, the request is allowed (the domain-level match already passed).
+    /// To get allowlist semantics — permit a few paths, deny the rest — end the
+    /// list with an explicit catch-all `"deny * /**"`.
+    ///
+    /// Enforcement only happens for domains whose TLS the proxy terminates. A
+    /// domain listed in `bypass_tls` is tunneled opaquely and cannot have its
+    /// method/path inspected; defining `request_rules` on such a domain is
+    /// rejected at policy-load time rather than silently ignored.
     ///
     /// Each rule is a string in the format:
     ///   `"<allow|deny> <METHOD|*> <path-pattern>"`
@@ -336,6 +343,35 @@ impl PolicyEngine {
                     domain = rule.domain,
                 );
             }
+
+            // Validate per-request rule syntax up front. A malformed rule string
+            // (e.g. a typo'd action `dney`) would otherwise be silently skipped
+            // at request time, leaving the request unexpectedly *allowed*.
+            for raw in &rule.request_rules {
+                EgressRequestRule::parse(raw).with_context(|| {
+                    format!("Egress rule #{idx} ({}) has an invalid request_rule", rule.domain)
+                })?;
+            }
+
+            // Per-request rules are only enforced for domains the proxy actually
+            // terminates (MITM). A TLS-bypassed domain is tunneled as opaque TCP,
+            // so the proxy never sees the method/path and could not enforce these
+            // rules — fail loudly rather than give a false sense of restriction.
+            if !rule.request_rules.is_empty() {
+                let bypassed = policy
+                    .bypass_tls
+                    .iter()
+                    .any(|pattern| domain_matches(pattern, &rule.domain));
+                if bypassed {
+                    anyhow::bail!(
+                        "Egress rule #{idx} ({domain}) defines `request_rules`, but the domain is \
+                         also in `bypass_tls`. Bypassed domains are tunneled without inspection, so \
+                         per-request rules cannot be enforced. Remove the domain from `bypass_tls` \
+                         (so the proxy can terminate TLS) or drop the `request_rules`.",
+                        domain = rule.domain,
+                    );
+                }
+            }
         }
 
         Ok(Self {
@@ -466,35 +502,11 @@ impl PolicyEngine {
         self.evaluate_egress_request(domain, 443).map(|evaluation| evaluation.rule)
     }
 
-    /// Evaluate an HTTP egress request with method and path for per-request rules.
-    ///
-    /// When a domain matches an egress rule that has `request_rules`, those rules
-    /// are evaluated against the HTTP method and path. If no request rule matches,
-    /// the request is allowed (the domain-level match already passed).
-    ///
-    /// Returns `Ok(evaluation)` if allowed, `Err(Decision::Deny(...))` if denied.
-    pub fn evaluate_egress_with_path(
-        &self,
-        domain: &str,
-        method: &str,
-        path: &str,
-    ) -> Result<EgressEvaluation<'_>, Decision> {
-        let evaluation = self.evaluate_egress_request(domain, 443)?;
-
-        // If there's a matching rule with per-request rules, apply them
-        if let Some(rule) = evaluation.rule {
-            if !rule.request_rules.is_empty() {
-                if let Some(false) = rule.evaluate_request_rules(method, path) {
-                    return Err(Decision::Deny(format!(
-                        "Request {method} {path} denied by per-request rule for domain '{domain}'"
-                    )));
-                }
-                // Some(true) or None: allowed or no rule matched; fall through
-            }
-        }
-
-        Ok(evaluation)
-    }
+    // NOTE: Per-request rule enforcement lives in the egress proxy
+    // (`egress::handle_mitm_with_injection`), which has the live HTTP request
+    // and returns a 403 directly. The single source of truth for *evaluating* a
+    // rule set is `EgressRule::evaluate_request_rules`; there is intentionally
+    // no second copy of that logic here.
 
     /// Evaluate a CONNECT request against host-managed rules and any active
     /// repo-level network scope.
@@ -643,39 +655,51 @@ fn strip_global_options(command: &str, args: &[String]) -> Result<Vec<String>, S
 /// Pattern syntax:
 /// - `*` matches exactly one path segment (no slashes)
 /// - `**` matches zero or more path segments (including slashes)
-/// - `/**` matches any path with one or more segments after the prefix
+/// - `/**` matches any path (including the root `/`)
 /// - Literal characters match exactly
 ///
-/// The root wildcard `/**` matches all paths including `/`.
+/// Both the pattern and the path are **normalized** before matching: empty
+/// segments (from `//`), `.` segments, and trailing slashes are collapsed, and
+/// `..` segments are resolved. This closes common denylist-bypass tricks such
+/// as `//admin`, `/admin/`, and `/repos/../admin`, so a `deny`/`allow` rule
+/// can't be evaded by trivially re-spelling the path.
 pub(crate) fn path_matches(pattern: &str, path: &str) -> bool {
-    // Fast path: exact match
+    // Fast path: identical strings always match.
     if pattern == path {
         return true;
     }
-    // Root wildcard matches everything
-    if pattern == "/**" {
-        return true;
-    }
-    path_matches_recursive(pattern, path)
+    let pat = normalize_path_segments(pattern);
+    let p = normalize_path_segments(path);
+    path_segs_match(&pat, &p)
 }
 
-fn path_matches_recursive(pattern: &str, path: &str) -> bool {
-    // Split into segments and match
-    let pattern_segs: Vec<&str> = pattern.split('/').collect();
-    let path_segs: Vec<&str> = path.split('/').collect();
-    path_segs_match(&pattern_segs, &path_segs)
+/// Split a path into normalized, non-empty segments.
+///
+/// Drops empty (`//`) and `.` segments, and pops on `..`. Wildcard tokens
+/// (`*`, `**`) are preserved as ordinary segments.
+fn normalize_path_segments(s: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn path_segs_match(pat: &[&str], path: &[&str]) -> bool {
-    match (pat.first(), path.first()) {
-        (None, None) => true,
-        (None, _) | (Some(_), None) => false,
-        (Some(&"**"), _) => {
-            // ** matches zero or more segments
+    match pat.first() {
+        // Pattern exhausted: match iff the path is also exhausted.
+        None => path.is_empty(),
+        // `**` matches zero or more segments.
+        Some(&"**") => {
             if pat.len() == 1 {
-                return true; // ** at end matches everything remaining
+                return true; // trailing `**` matches the remainder, including none
             }
-            // Try matching ** against 0, 1, 2, ... path segments
             for i in 0..=path.len() {
                 if path_segs_match(&pat[1..], &path[i..]) {
                     return true;
@@ -683,17 +707,10 @@ fn path_segs_match(pat: &[&str], path: &[&str]) -> bool {
             }
             false
         }
-        (Some(&"*"), Some(_)) => {
-            // * matches exactly one non-empty segment
-            path_segs_match(&pat[1..], &path[1..])
-        }
-        (Some(p), Some(s)) => {
-            if p == s {
-                path_segs_match(&pat[1..], &path[1..])
-            } else {
-                false
-            }
-        }
+        // `*` matches exactly one segment.
+        Some(&"*") => !path.is_empty() && path_segs_match(&pat[1..], &path[1..]),
+        // Literal segment must match exactly.
+        Some(p) => !path.is_empty() && *p == path[0] && path_segs_match(&pat[1..], &path[1..]),
     }
 }
 
@@ -1117,10 +1134,65 @@ mod tests {
     }
 
     #[test]
+    fn test_path_matches_double_wildcard_zero_segments() {
+        // `/repos/**` must also match the prefix itself with no trailing
+        // segments — `/repos` and `/repos/` (regression: `**` previously
+        // failed to match zero segments).
+        assert!(path_matches("/repos/**", "/repos"));
+        assert!(path_matches("/repos/**", "/repos/"));
+    }
+
+    #[test]
+    fn test_path_matches_normalizes_bypass_tricks() {
+        // Denylist-bypass spellings must normalize to the same path so a
+        // `deny`/`allow` rule cannot be evaded.
+        assert!(path_matches("/admin", "//admin"));
+        assert!(path_matches("/admin", "/admin/"));
+        assert!(path_matches("/admin", "/admin/."));
+        assert!(path_matches("/admin", "/foo/../admin"));
+        // A normalized path that lands elsewhere must NOT match.
+        assert!(!path_matches("/admin", "/foo/../public"));
+    }
+
+    #[test]
     fn test_path_matches_root_wildcard() {
         assert!(path_matches("/**", "/"));
         assert!(path_matches("/**", "/anything"));
         assert!(path_matches("/**", "/a/b/c"));
+        assert!(path_matches("/**", ""));
+    }
+
+    #[test]
+    fn test_load_rejects_invalid_request_rule_syntax() {
+        let toml = r#"
+            default_cli_action = "deny"
+            default_egress_action = "deny"
+            [[egress]]
+            domain = "api.github.com"
+            inject_header = "Authorization"
+            env_var = "GITHUB_TOKEN"
+            request_rules = ["dney GET /x"]
+        "#;
+        let pf: PolicyFile = toml::from_str(toml).unwrap();
+        let err = PolicyEngine::from_policy_file(pf).err().expect("should reject invalid rule");
+        assert!(format!("{err:#}").contains("invalid request_rule"));
+    }
+
+    #[test]
+    fn test_load_rejects_request_rules_on_bypass_tls_domain() {
+        let toml = r#"
+            default_cli_action = "deny"
+            default_egress_action = "deny"
+            bypass_tls = ["api.github.com"]
+            [[egress]]
+            domain = "api.github.com"
+            inject_header = "Authorization"
+            env_var = "GITHUB_TOKEN"
+            request_rules = ["allow GET /repos/**", "deny * /**"]
+        "#;
+        let pf: PolicyFile = toml::from_str(toml).unwrap();
+        let err = PolicyEngine::from_policy_file(pf).err().expect("should reject bypass_tls rule");
+        assert!(format!("{err:#}").contains("bypass_tls"));
     }
 
     #[test]
