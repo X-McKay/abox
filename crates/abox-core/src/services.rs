@@ -316,6 +316,18 @@ pub fn find_free_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+/// Build the Docker `--publish` argument binding the host port to loopback
+/// only.
+///
+/// The guest reaches the service through a vsock->`127.0.0.1` splice (see the
+/// module docs), so the published port must never be exposed on the host's
+/// external interfaces. A bare `host:container` spec makes Docker bind
+/// `0.0.0.0`, which would leak the (password-protected) sidecar to the host
+/// LAN; the explicit `127.0.0.1:` prefix keeps it on loopback.
+fn loopback_publish_spec(host_port: u16, container_port: u16) -> String {
+    format!("127.0.0.1:{host_port}:{container_port}")
+}
+
 /// Start a service sidecar container.
 ///
 /// Returns the running service info including the connection URL.
@@ -341,7 +353,7 @@ pub fn start_service(
         .arg("--name")
         .arg(&container_name)
         .arg("--publish")
-        .arg(format!("{host_port}:{}", def.default_port))
+        .arg(loopback_publish_spec(host_port, def.default_port))
         .arg("--label")
         .arg(format!("abox.sandbox-id={sandbox_id}"))
         .arg("--label")
@@ -519,6 +531,15 @@ pub fn pull_ollama_models(container_name: &str, models: &[String]) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_loopback_publish_spec_binds_loopback_only() {
+        // Must always bind 127.0.0.1 so the sidecar is never reachable from the
+        // host LAN. A bare "host:container" spec would let Docker bind 0.0.0.0.
+        let spec = loopback_publish_spec(49201, 5432);
+        assert_eq!(spec, "127.0.0.1:49201:5432");
+        assert!(spec.starts_with("127.0.0.1:"));
+    }
 
     #[test]
     fn test_find_service_def() {
