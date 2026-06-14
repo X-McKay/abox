@@ -672,42 +672,12 @@ pub(crate) fn path_matches(pattern: &str, path: &str) -> bool {
     }
     // Decode the request path so encoded characters cannot smuggle a segment
     // past the matcher. Patterns are operator-authored and taken verbatim.
-    let decoded = percent_decode(path);
+    // `percent_decode` is `%XX`-only (no `+`->space), which is correct for
+    // paths where `+` is a literal character.
+    let decoded = crate::util::percent_decode(path);
     let pat = normalize_path_segments(pattern);
     let p = normalize_path_segments(&decoded);
     path_segs_match(&pat, &p)
-}
-
-/// Percent-decode a URL path component once. `%XX` (two hex digits) decodes to
-/// the corresponding byte; any `%` not followed by two hex digits is left
-/// literal. The result is interpreted as UTF-8 with lossy replacement, which is
-/// sufficient for segment comparison.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Decode a single ASCII hex digit, or `None` if it is not one.
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// Split a path into normalized, non-empty segments.

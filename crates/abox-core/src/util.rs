@@ -268,9 +268,57 @@ pub fn sanitize_task_id(id: &str) -> String {
         .collect()
 }
 
+/// Percent-decode a URL component once: each `%XX` (two hex digits) becomes the
+/// corresponding byte; any `%` not followed by two hex digits is left literal.
+/// The result is interpreted as UTF-8 with lossy replacement.
+///
+/// This decodes `%XX` only — it does **not** treat `+` as a space. That `+`
+/// rule is specific to `application/x-www-form-urlencoded` query strings; path
+/// matching needs `+` left literal. Callers that want query semantics should
+/// replace `+` with a space before calling (see `mcp_oauth::percent_decode`).
+pub fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Decode a single ASCII hex digit, or `None` if it is not one.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_percent_decode_xx_only() {
+        assert_eq!(percent_decode("%61dmin"), "admin");
+        assert_eq!(percent_decode("a%2fb"), "a/b");
+        // `+` is left literal (path semantics, not query).
+        assert_eq!(percent_decode("a+b"), "a+b");
+        // Invalid / truncated escapes are left literal.
+        assert_eq!(percent_decode("a%xxb"), "a%xxb");
+        assert_eq!(percent_decode("trailing%2"), "trailing%2");
+        assert_eq!(percent_decode("plain"), "plain");
+    }
 
     #[test]
     fn test_format_size_bytes() {
