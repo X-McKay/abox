@@ -113,8 +113,9 @@ fn verify(path: &Path, config: &AboxConfig) -> Result<()> {
         println!();
         println!("{}", "=".repeat(60));
         println!("VERDICT: [FAIL] TAMPERED — {} error(s) detected", report.errors.len());
-        // Use a clean error rather than process::exit so callers can compose.
-        std::process::exit(1);
+        // Return a clean error rather than process::exit so callers can compose
+        // and tests can assert on the result; main maps the Err to exit code 1.
+        anyhow::bail!("audit chain verification failed: {} error(s) detected", report.errors.len())
     }
 }
 
