@@ -210,13 +210,19 @@ impl BootMeta {
     /// host cannot traverse in. `boot.json` is additionally `0600` for
     /// defense in depth; the guest never reads it directly.
     pub fn stage(&self, dir: &Path) -> Result<()> {
-        std::fs::create_dir_all(dir)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            // Tighten the leaf directory only (not parents) so host-side
-            // secrets staged here are not world-readable.
+            use std::fs::DirBuilder;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            // Create the directory already restricted to 0700 so there is no
+            // TOCTOU window in which staged secrets are world-readable.
+            // `set_permissions` additionally tightens it if it already existed.
+            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(dir)?;
         }
         let boot_path = dir.join("boot.json");
         std::fs::write(&boot_path, self.to_json()?)?;
