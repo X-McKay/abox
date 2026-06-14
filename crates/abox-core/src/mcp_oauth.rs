@@ -284,20 +284,39 @@ pub async fn discover_oauth_metadata(server_url: &str) -> Result<Option<OAuthSer
 
 /// Require that a discovered OAuth endpoint uses HTTPS (or loopback http for
 /// local testing). Rejects anything else to keep secrets off the wire.
+///
+/// The host is parsed and matched exactly: a prefix check like
+/// `starts_with("http://127.0.0.1")` would accept attacker-controlled hosts
+/// such as `http://127.0.0.1.evil.com/` or `http://localhost.evil.example/`
+/// and leak the authorization code / PKCE verifier over cleartext. Only a
+/// genuine loopback IP (127.0.0.0/8, ::1) or the literal host `localhost` is
+/// allowed over http.
 fn require_secure_endpoint(field: &str, url: &str) -> Result<()> {
-    if url.starts_with("https://") {
-        return Ok(());
+    let insecure = || {
+        anyhow::anyhow!(
+            "Discovered {field} {url:?} is not HTTPS (or http to a genuine loopback host). \
+             Refusing to send the authorization code / PKCE verifier over an insecure channel."
+        )
+    };
+    let parsed = reqwest::Url::parse(url).map_err(|_| insecure())?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(parsed.host_str().unwrap_or("")) => Ok(()),
+        _ => Err(insecure()),
     }
-    let is_loopback_http = url.starts_with("http://127.0.0.1")
-        || url.starts_with("http://localhost")
-        || url.starts_with("http://[::1]");
-    if is_loopback_http {
-        return Ok(());
+}
+
+/// True iff `host` is the literal `localhost` or a genuine loopback IP literal
+/// (`127.0.0.0/8` or `::1`). IPv6 hosts arrive bracketed (`[::1]`).
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
     }
-    anyhow::bail!(
-        "Discovered {field} {url:?} is not HTTPS. Refusing to send the authorization code / PKCE \
-         verifier over an insecure channel."
-    )
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    let unbracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    matches!(unbracketed.parse::<std::net::Ipv6Addr>(), Ok(v6) if v6.is_loopback())
 }
 
 /// Build a reqwest HTTP client for OAuth flows.
@@ -658,6 +677,7 @@ mod tests {
         assert_eq!(percent_decode("%zz"), "%zz");
     }
 
+
     #[test]
     fn test_parse_query_extracts_params() {
         let q = parse_query("code=abc%20123&state=xyz&error=");
@@ -677,8 +697,19 @@ mod tests {
     #[test]
     fn test_require_secure_endpoint() {
         assert!(require_secure_endpoint("token_endpoint", "https://idp.example.com/token").is_ok());
+        // Genuine loopback over http is allowed for local testing.
         assert!(require_secure_endpoint("token_endpoint", "http://127.0.0.1:9000/token").is_ok());
+        assert!(require_secure_endpoint("token_endpoint", "http://127.0.0.2/token").is_ok());
+        assert!(require_secure_endpoint("token_endpoint", "http://localhost/token").is_ok());
+        assert!(require_secure_endpoint("token_endpoint", "http://[::1]/token").is_ok());
+        // Non-loopback http is rejected.
         assert!(require_secure_endpoint("token_endpoint", "http://evil.example.com/token").is_err());
+        assert!(require_secure_endpoint("token_endpoint", "http://10.0.0.5/token").is_err());
+        // Attacker hosts a `starts_with` prefix check would have wrongly accepted.
+        assert!(require_secure_endpoint("token_endpoint", "http://127.0.0.1.evil.com/token")
+            .is_err());
+        assert!(require_secure_endpoint("token_endpoint", "http://localhost.evil.example/token")
+            .is_err());
     }
 
     #[test]
