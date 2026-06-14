@@ -656,19 +656,58 @@ fn strip_global_options(command: &str, args: &[String]) -> Result<Vec<String>, S
 /// - `/**` matches any path (including the root `/`)
 /// - Literal characters match exactly
 ///
-/// Both the pattern and the path are **normalized** before matching: empty
-/// segments (from `//`), `.` segments, and trailing slashes are collapsed, and
-/// `..` segments are resolved. This closes common denylist-bypass tricks such
-/// as `//admin`, `/admin/`, and `/repos/../admin`, so a `deny`/`allow` rule
-/// can't be evaded by trivially re-spelling the path.
+/// The request path is **percent-decoded** and then **normalized** before
+/// matching: `%XX` escapes are decoded (so `%61dmin` becomes `admin` and an
+/// encoded slash `%2f` becomes a real separator), empty segments (from `//`),
+/// `.` segments, and trailing slashes are collapsed, and `..` segments are
+/// resolved. This closes common denylist-bypass tricks such as `//admin`,
+/// `/admin/`, `/repos/../admin`, and URL-encoded spellings like `/%61dmin`, so
+/// a `deny`/`allow` rule can't be evaded by re-spelling the path in a form the
+/// upstream origin will decode back. Decoding is performed once (matching a
+/// single-decode origin); invalid or truncated escapes are left literal.
 pub(crate) fn path_matches(pattern: &str, path: &str) -> bool {
     // Fast path: identical strings always match.
     if pattern == path {
         return true;
     }
+    // Decode the request path so encoded characters cannot smuggle a segment
+    // past the matcher. Patterns are operator-authored and taken verbatim.
+    let decoded = percent_decode(path);
     let pat = normalize_path_segments(pattern);
-    let p = normalize_path_segments(path);
+    let p = normalize_path_segments(&decoded);
     path_segs_match(&pat, &p)
+}
+
+/// Percent-decode a URL path component once. `%XX` (two hex digits) decodes to
+/// the corresponding byte; any `%` not followed by two hex digits is left
+/// literal. The result is interpreted as UTF-8 with lossy replacement, which is
+/// sufficient for segment comparison.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Decode a single ASCII hex digit, or `None` if it is not one.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Split a path into normalized, non-empty segments.
@@ -1150,6 +1189,27 @@ mod tests {
         assert!(path_matches("/admin", "/foo/../admin"));
         // A normalized path that lands elsewhere must NOT match.
         assert!(!path_matches("/admin", "/foo/../public"));
+    }
+
+    #[test]
+    fn test_path_matches_percent_decodes_before_matching() {
+        // The request path is percent-decoded before normalization, so a
+        // `deny`/`allow` rule cannot be evaded by URL-encoding characters the
+        // upstream origin will decode. Without decoding, `/%61dmin` would be a
+        // single literal segment `%61dmin` that slips past a `/admin` rule.
+        assert!(path_matches("/admin", "/%61dmin"));
+        // %2e%2e decodes to ".." and is then resolved like a literal "..",
+        // so `/admin/%2e%2e` normalizes to root just as `/admin/..` does.
+        assert!(path_matches("/admin/..", "/admin/%2e%2e"));
+        // Encoded slash (%2f) is decoded to a real separator, so it cannot be
+        // used to smuggle extra segments past a single-segment wildcard.
+        assert!(path_matches("/repos/*/*", "/repos/owner%2frepo"));
+        assert!(path_matches("/foo/../admin", "/foo/%2e%2e/admin"));
+        // Decoding must not create false matches for unrelated paths.
+        assert!(!path_matches("/admin", "/%70ublic")); // -> /public
+                                                       // Invalid/partial escapes are left literal rather than mis-decoded.
+        assert!(path_matches("/a%xxb", "/a%xxb"));
+        assert!(path_matches("/trailing%2", "/trailing%2"));
     }
 
     #[test]
