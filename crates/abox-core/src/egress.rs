@@ -29,7 +29,7 @@ pub async fn handle_request(
     policy: &PolicyEngine,
     root_ca: Arc<RootCa>,
     _bypass_tls: &[String],
-    audit_fn: impl Fn(&str, &str, i32) + Send + 'static,
+    audit_fn: impl Fn(&str, &str, i32) + Send + Sync + 'static,
 ) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     if req.method() == Method::CONNECT {
         let host = req.uri().authority().map(|a| a.host().to_string());
@@ -57,6 +57,10 @@ pub async fn handle_request(
                 let rule_opt = evaluation.rule.cloned();
                 let root_ca = Arc::clone(&root_ca);
                 let transport = evaluation.transport;
+                // Share the audit callback with the MITM path so per-request
+                // egress-rule denials (evaluated after this CONNECT is allowed)
+                // can also be recorded in the audit log.
+                let audit_fn: Arc<dyn Fn(&str, &str, i32) + Send + Sync> = Arc::new(audit_fn);
 
                 tokio::spawn(async move {
                     match hyper::upgrade::on(req).await {
@@ -71,6 +75,7 @@ pub async fn handle_request(
                                     port,
                                     &root_ca,
                                     rule_opt.as_ref(),
+                                    audit_fn,
                                 )
                                 .await
                                 {
@@ -129,6 +134,7 @@ async fn handle_mitm(
     port: u16,
     root_ca: &RootCa,
     rule: Option<&crate::policy::EgressRule>,
+    audit_fn: Arc<dyn Fn(&str, &str, i32) + Send + Sync>,
 ) -> Result<()> {
     let leaf =
         root_ca.sign_leaf(domain).with_context(|| format!("signing leaf cert for {domain}"))?;
@@ -158,7 +164,9 @@ async fn handle_mitm(
         .context("TLS connect to upstream failed")?;
 
     if rule.is_some() {
-        if let Err(e) = handle_mitm_with_injection(client_tls, upstream_tls, rule).await {
+        if let Err(e) =
+            handle_mitm_with_injection(client_tls, upstream_tls, rule, domain, audit_fn).await
+        {
             tracing::debug!(error = %e, "MITM with injection ended");
         }
     } else {
@@ -200,6 +208,8 @@ async fn handle_mitm_with_injection(
     client_tls: tokio_rustls::server::TlsStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
     upstream_tls: tokio_rustls::client::TlsStream<TcpStream>,
     rule: Option<&crate::policy::EgressRule>,
+    domain: &str,
+    audit_fn: Arc<dyn Fn(&str, &str, i32) + Send + Sync>,
 ) -> Result<()> {
     use hyper::header::{HeaderName, HeaderValue};
 
@@ -232,11 +242,14 @@ async fn handle_mitm_with_injection(
     let rule_owned: Option<crate::policy::EgressRule> = rule.cloned();
     let inject_header_name: Option<HeaderName> =
         rule_owned.as_ref().and_then(|r| HeaderName::from_bytes(r.inject_header.as_bytes()).ok());
+    let domain_owned = domain.to_string();
 
     let service = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
         let sender = std::sync::Arc::clone(&sender);
         let rule_owned = rule_owned.clone();
         let inject_header_name = inject_header_name.clone();
+        let audit_fn = Arc::clone(&audit_fn);
+        let domain = domain_owned.clone();
         async move {
             // Per-request rule evaluation: if the matched domain rule has
             // request_rules, evaluate them against the HTTP method and path.
@@ -252,6 +265,10 @@ async fn handle_mitm_with_injection(
                             path = %path,
                             "Request denied by per-request egress rule"
                         );
+                        // Record the per-request denial: the CONNECT was already
+                        // logged as allowed/200, so without this an audit reader
+                        // would see the blocked request as an allowed connect.
+                        (audit_fn.as_ref())(&domain, "denied", 403);
                         let msg = format!(
                             "Request {method} {path} denied by egress policy for domain '{}'",
                             rule.domain
