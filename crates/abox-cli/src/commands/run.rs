@@ -368,7 +368,21 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     };
 
     println!("Sandbox '{}' starting...", args.task);
-    let exit_code = orchestrator.run_sandbox(params, policy, root_ca).await?;
+    // The orchestrator tears the sidecars down when the sandbox exits cleanly,
+    // but if `run_sandbox` fails before reaching that teardown (e.g. a
+    // virtiofsd/Cloud Hypervisor startup error or a missing VM artifact) the
+    // already-started containers would leak. Tear them down on the error path.
+    // `stop_sandbox_services` is idempotent (stops by sandbox label), so this is
+    // safe even if some teardown already happened.
+    let exit_code = match orchestrator.run_sandbox(params, policy, root_ca).await {
+        Ok(code) => code,
+        Err(e) => {
+            if !project_services.is_empty() {
+                let _ = abox_core::services::stop_sandbox_services(&args.task);
+            }
+            return Err(e);
+        }
+    };
 
     if exit_code == 0 {
         println!("\nSandbox '{}' exited cleanly.", args.task);
