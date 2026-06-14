@@ -446,6 +446,19 @@ else
              "no vm-e2e entries in $AUDIT_VM"
     fi
 
+    step "\`abox audit verify\` validates the run-path audit log"
+    how "abox audit verify --log \$AUDIT_VM"
+    expect "the per-VM run path writes a hash-chained, verifiable log (exit 0)"
+    # Regression guard for the unified audit writer: the per-VM bridge must
+    # write the same hash-chained format abox-proxyd does, so `abox audit
+    # verify` works for `abox run` sandboxes (not only daemon-proxied traffic).
+    if $ABOX audit verify --log "$AUDIT_VM" >"$SCRATCH/audit-verify.out" 2>&1; then
+        pass "abox audit verify (run-path log is chained + intact)"
+    else
+        fail "abox audit verify on run-path log" "exited non-zero; output below"
+        tail -20 "$SCRATCH/audit-verify.out" | sed "s/^/    /"
+    fi
+
     # D4: assert the guest's init banner ('abox guest init: online')
     # actually reached the orchestrator's stdout. The console streamer
     # is the channel; without this assertion phase 6 could pass even
