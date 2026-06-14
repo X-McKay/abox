@@ -201,14 +201,31 @@ impl BootMeta {
     /// Stage the boot meta on disk: write `boot.json` and `runner.sh` into
     /// `dir`. The orchestrator points virtiofsd at `dir` and mounts it as
     /// `/abox-meta` in the guest.
+    ///
+    /// `runner.sh` and `boot.json` can carry secrets (e.g. service connection
+    /// URLs with passwords exported via `env`). virtiofsd runs as the
+    /// orchestrator user (it forks before entering its namespace), so the
+    /// staging directory is restricted to owner-only (`0700`): the guest still
+    /// reads every file through virtiofsd, but other unprivileged users on the
+    /// host cannot traverse in. `boot.json` is additionally `0600` for
+    /// defense in depth; the guest never reads it directly.
     pub fn stage(&self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("boot.json"), self.to_json()?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Tighten the leaf directory only (not parents) so host-side
+            // secrets staged here are not world-readable.
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let boot_path = dir.join("boot.json");
+        std::fs::write(&boot_path, self.to_json()?)?;
         let runner_path = dir.join("runner.sh");
         std::fs::write(&runner_path, self.runner_script())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&boot_path, std::fs::Permissions::from_mode(0o600))?;
             std::fs::set_permissions(&runner_path, std::fs::Permissions::from_mode(0o755))?;
         }
         Ok(())
@@ -313,13 +330,21 @@ mod tests {
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
         assert!(runner.starts_with("#!/bin/sh\n"));
 
-        // runner.sh must be executable
+        // runner.sh must be executable; the staging dir and boot.json must be
+        // owner-only so host-staged secrets are not world-readable.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode =
+            let runner_mode =
                 std::fs::metadata(tmp.path().join("runner.sh")).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o755);
+            assert_eq!(runner_mode & 0o777, 0o755);
+
+            let dir_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode();
+            assert_eq!(dir_mode & 0o077, 0, "staging dir must not be group/other accessible");
+
+            let boot_mode =
+                std::fs::metadata(tmp.path().join("boot.json")).unwrap().permissions().mode();
+            assert_eq!(boot_mode & 0o077, 0, "boot.json must not be group/other readable");
         }
     }
 
