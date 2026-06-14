@@ -135,8 +135,7 @@ pub fn token_path(state_dir: &Path, name: &str) -> Result<PathBuf> {
 /// Save an MCP token to disk with owner-only permissions (0600 file, 0700 dir).
 pub fn save_token(state_dir: &Path, token: &McpToken) -> Result<PathBuf> {
     let dir = tokens_dir(state_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("Creating {}", dir.display()))?;
-    restrict_dir_permissions(&dir);
+    create_secure_dir(&dir).with_context(|| format!("Creating {}", dir.display()))?;
     let path = token_path(state_dir, &token.name)?;
     let json = serde_json::to_string_pretty(token).context("Serializing token")?;
     write_secret_file(&path, json.as_bytes())
@@ -169,16 +168,23 @@ fn write_secret_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 }
 
 /// Best-effort restriction of a directory to mode 0700 (owner-only).
-fn restrict_dir_permissions(dir: &Path) {
+/// Create `dir` (and parents) restricted to owner-only (`0700`) from the start,
+/// avoiding a TOCTOU window where a freshly created directory is briefly
+/// world-accessible before being tightened. `set_permissions` also re-tightens
+/// the directory if it already existed at looser permissions.
+fn create_secure_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     #[cfg(not(unix))]
     {
-        let _ = dir;
+        std::fs::create_dir_all(dir)?;
     }
+    Ok(())
 }
 
 /// Load an MCP token from disk.
@@ -507,7 +513,7 @@ async fn wait_for_callback(
     listener: tokio::net::TcpListener,
     expected_state: &str,
 ) -> Result<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     let (mut stream, _) =
         tokio::time::timeout(std::time::Duration::from_mins(2), listener.accept())
@@ -516,7 +522,10 @@ async fn wait_for_callback(
             .context("Failed to accept connection")?;
 
     let (reader, mut writer) = stream.split();
-    let mut reader = BufReader::new(reader);
+    // Cap the request line so a client that never sends a newline cannot drive
+    // unbounded memory growth in `read_line`. A real OAuth callback request
+    // line (GET /callback?code=…&state=… HTTP/1.1) fits well under 4 KiB.
+    let mut reader = BufReader::new(reader.take(4096));
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await?;
 
@@ -576,35 +585,14 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
     map
 }
 
-/// Percent-decode a URL component (`%XX` escapes, `+` → space).
+/// Percent-decode a URL query component (`%XX` escapes, `+` → space).
+///
+/// Query strings use `application/x-www-form-urlencoded` semantics where `+`
+/// encodes a space. `+` does not appear in a `%XX` escape, so replacing it
+/// first and then `%XX`-decoding via the shared [`crate::util::percent_decode`]
+/// is equivalent to interleaved decoding (a literal `%2B` still decodes to `+`).
 fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hi = (bytes[i + 1] as char).to_digit(16);
-                let lo = (bytes[i + 2] as char).to_digit(16);
-                if let (Some(hi), Some(lo)) = (hi, lo) {
-                    out.push((hi * 16 + lo) as u8);
-                    i += 3;
-                    continue;
-                }
-                out.push(b'%');
-                i += 1;
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            c => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    crate::util::percent_decode(&s.replace('+', " "))
 }
 
 /// Open a URL in the default browser.
