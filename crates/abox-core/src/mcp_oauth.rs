@@ -99,7 +99,7 @@ impl McpToken {
         if let Some(exp) = self.expires_at {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs().cast_signed());
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
             now >= exp
         } else {
             false
@@ -468,7 +468,7 @@ async fn exchange_token(
     let expires_at = token_response["expires_in"].as_i64().map(|secs| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs().cast_signed());
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
         now + secs
     });
 
@@ -516,7 +516,7 @@ async fn wait_for_callback(
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     let (mut stream, _) =
-        tokio::time::timeout(std::time::Duration::from_mins(2), listener.accept())
+        tokio::time::timeout(std::time::Duration::from_secs(120), listener.accept())
             .await
             .context("Timed out waiting for OAuth callback (120s)")?
             .context("Failed to accept connection")?;
