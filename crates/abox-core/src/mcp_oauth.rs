@@ -677,7 +677,6 @@ mod tests {
         assert_eq!(percent_decode("%zz"), "%zz");
     }
 
-
     #[test]
     fn test_parse_query_extracts_params() {
         let q = parse_query("code=abc%20123&state=xyz&error=");
@@ -706,8 +705,9 @@ mod tests {
         assert!(require_secure_endpoint("token_endpoint", "http://evil.example.com/token").is_err());
         assert!(require_secure_endpoint("token_endpoint", "http://10.0.0.5/token").is_err());
         // Attacker hosts a `starts_with` prefix check would have wrongly accepted.
-        assert!(require_secure_endpoint("token_endpoint", "http://127.0.0.1.evil.com/token")
-            .is_err());
+        assert!(
+            require_secure_endpoint("token_endpoint", "http://127.0.0.1.evil.com/token").is_err()
+        );
         assert!(require_secure_endpoint("token_endpoint", "http://localhost.evil.example/token")
             .is_err());
     }

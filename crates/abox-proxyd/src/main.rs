@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 
     // Initialize audit log
     let audit_path = abox_core::audit::default_log_path(&config.logs_dir());
-    let audit = Arc::new(AuditLog::new(&audit_path)?);
+    let audit = Arc::new(AuditLog::open(&audit_path)?);
     tracing::info!(path = %audit_path.display(), "Audit log initialized");
 
     // Load the root CA for TLS-terminating MITM proxy

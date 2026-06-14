@@ -42,6 +42,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest",
+ "rustix 1.1.4",
  "rustls",
  "rustls-pemfile",
  "serde",
