@@ -516,7 +516,7 @@ async fn wait_for_callback(
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     let (mut stream, _) =
-        tokio::time::timeout(std::time::Duration::from_secs(120), listener.accept())
+        tokio::time::timeout(std::time::Duration::from_mins(2), listener.accept())
             .await
             .context("Timed out waiting for OAuth callback (120s)")?
             .context("Failed to accept connection")?;
