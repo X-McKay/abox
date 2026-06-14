@@ -5,7 +5,7 @@ Welcome! We're excited you want to contribute to `abox`. This document outlines 
 ## Development Environment
 
 ### 1. Prerequisites
-- **Rust Toolchain:** Install via [rustup](https://rustup.rs/). We use the `1.75` edition.
+- **Rust Toolchain:** Install via [rustup](https://rustup.rs/). abox tracks the **latest stable** Rust (`rust-toolchain.toml` pins `channel = "stable"`); there is no fixed MSRV. CI runs `clippy -D warnings` on stable, so validate on stable before pushing — note that a `RUSTUP_TOOLCHAIN` env var, if set, overrides `rust-toolchain.toml` and can mask new-stable lints (run `rustup update stable` and `RUSTUP_TOOLCHAIN=stable just check`).
 - **just:** Command runner. Install with `cargo install just`.
 - **cargo-deny:** Supply chain auditing. Install with `cargo install cargo-deny`.
 - **Pre-commit:** Git hooks. Install via `pip install pre-commit && pre-commit install`.
