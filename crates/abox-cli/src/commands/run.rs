@@ -65,11 +65,14 @@ pub struct RunArgs {
     #[arg(long, value_enum)]
     pub network: Option<RunNetworkMode>,
 
-    /// Inline prompt content for known managed agents.
+    /// Inline prompt content. Only known managed agents (claude, codex) can
+    /// consume a prompt; for any other `--` command use `--input-file` instead.
     #[arg(long, conflicts_with = "prompt_file")]
     pub prompt: Option<String>,
 
-    /// Load prompt content from a file on the host.
+    /// Load prompt content from a file on the host. Only known managed agents
+    /// (claude, codex) can consume it; for any other `--` command use
+    /// `--input-file` instead.
     #[arg(long, conflicts_with = "prompt")]
     pub prompt_file: Option<PathBuf>,
 
