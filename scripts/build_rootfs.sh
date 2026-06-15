@@ -87,7 +87,9 @@ host_mode() {
 
     ensure_file "$shim_abs" "shim binary"
     ensure_file "$init_abs" "guest init script"
-    ensure_file "$vm_dir_abs/alpine-minirootfs.tar.gz" "Alpine minirootfs"
+    if [[ "$(profile_libc)" == "musl" ]]; then
+        ensure_file "$vm_dir_abs/alpine-minirootfs.tar.gz" "Alpine minirootfs"
+    fi
 
     case "$shim_abs" in
         "$REPO_ROOT"/*) shim_rel="${shim_abs#"$REPO_ROOT"/}" ;;
@@ -201,7 +203,11 @@ inner_mode() {
     : "${HOST_UID:?HOST_UID must be set in builder container}"
     : "${HOST_GID:?HOST_GID must be set in builder container}"
 
-    for cmd in apk chroot dd install mkfs.ext4 npm sha256sum tar; do
+    local required=(chroot dd install mkfs.ext4 npm sha256sum tar)
+    if [[ "$(profile_libc)" == "musl" ]]; then
+        required+=(apk)
+    fi
+    for cmd in "${required[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || {
             echo "ERROR: required command '$cmd' not found in builder image" >&2
             exit 1
@@ -210,7 +216,9 @@ inner_mode() {
 
     ensure_file "$SHIM_BIN" "shim binary"
     ensure_file "$GUEST_INIT" "guest init script"
-    ensure_file "$ABOX_VM_DIR/alpine-minirootfs.tar.gz" "Alpine minirootfs"
+    if [[ "$(profile_libc)" == "musl" ]]; then
+        ensure_file "$ABOX_VM_DIR/alpine-minirootfs.tar.gz" "Alpine minirootfs"
+    fi
 
     stage="$(mktemp -d)"
     out_dir="$(profile_output_dir)"
