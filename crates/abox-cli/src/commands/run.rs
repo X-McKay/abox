@@ -377,6 +377,13 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
                 "--input-file: total staged input exceeds the {MAX_INPUT_TOTAL_BYTES} byte limit"
             );
         }
+        if input_files.iter().any(|f| f.guest_name == spec.guest_name) {
+            anyhow::bail!(
+                "--input-file: two inputs both stage to /abox-meta/inputs/{}; \
+                 give one an explicit name as <hostpath>:<name>",
+                spec.guest_name
+            );
+        }
         input_files.push(abox_core::vm::InputFile {
             host_path: spec.host_path.clone(),
             guest_name: spec.guest_name.clone(),
