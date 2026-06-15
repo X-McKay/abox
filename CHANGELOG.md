@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.0 — 2026-06-14
+
+### Features
+
+- feat: audit log, grant, MCP OAuth, service sidecars, snapshot UX (v0.5.0 train) (#20) (9dfbbf7)
+
+### Fixes
+
+- fix(rootfs): update guest agent CLIs (codex 0.139.0, claude-code 2.1.177) + enlarge images (#21) (8a1b8a8)
+
+### Testing
+
+- test(smoke): accept a safe refusal as a valid T4 policy-denial outcome (#22) (7fece1c)
+
+### Chores
+
+- chore: update GitHub Actions to node24-ready majors (#19) (2957555)
+
+
 ## Unreleased
 
 ### Features
