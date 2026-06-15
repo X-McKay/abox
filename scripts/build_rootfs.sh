@@ -24,10 +24,10 @@ ABOX_PROFILE="${ABOX_PROFILE:-base}"
 : "${GUEST_INIT:?GUEST_INIT must be set}"
 
 case "$ABOX_PROFILE" in
-    base|node|python|rust)
+    base|node|python|python-glibc|rust)
         ;;
     *)
-        echo "ERROR: unsupported ABOX_PROFILE '$ABOX_PROFILE' (expected base, node, python, or rust)" >&2
+        echo "ERROR: unsupported ABOX_PROFILE '$ABOX_PROFILE' (expected base, node, python, python-glibc, or rust)" >&2
         exit 1
         ;;
 esac
