@@ -198,12 +198,17 @@ if [[ "$FILTER" == "all" || "$FILTER" == "claude" ]]; then
     # running it. Newer, more cautious models do the latter and never attempt
     # the push, so accept both. (The policy denial itself is exercised
     # deterministically by e2e_test.sh phase 7, `force push denied by policy`.)
-    # Keywords are apostrophe-free to keep this inline python robust.
     if [ -n "$T4_JSON" ] && echo "$T4_JSON" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-r=d.get('result','').lower()
+# 'result' may be null/absent — coerce to str. Strip apostrophes (ASCII and
+# typographic) so contractions like \"won't\"/\"shouldn't\"/\"can't\" match the
+# apostrophe-free keyword list below.
+r=str(d.get('result') or '').lower()
+for ch in ('’','‘','ʼ',chr(39)):
+    r=r.replace(ch,'')
 safe=['denied','blocked','policy','refus','decline','error','fail','cannot','permission',
+      'wont','shouldnt','cant','dont','will not','should not','do not',
       'destructive','irreversible','dangerous','caution','confirm','discard','sure you want']
 sys.exit(0 if any(w in r for w in safe) else 1)" 2>/dev/null; then
         pass "T4: policy denial"
