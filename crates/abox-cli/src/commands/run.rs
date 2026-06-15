@@ -243,6 +243,24 @@ fn resolve_input_files(specs: &[InputFileSpec]) -> Result<Vec<abox_core::vm::Inp
     Ok(input_files)
 }
 
+/// The env vars that expose staged inputs to the in-guest command:
+/// `ABOX_INPUT_DIR` whenever any input is staged, plus `ABOX_INPUT_FILE`
+/// (the single staged path) only when exactly one input was given.
+fn input_file_env_vars(input_files: &[abox_core::vm::InputFile]) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    if input_files.is_empty() {
+        return vars;
+    }
+    vars.push(("ABOX_INPUT_DIR".to_string(), "/abox-meta/inputs".to_string()));
+    if let [only] = input_files {
+        vars.push((
+            "ABOX_INPUT_FILE".to_string(),
+            format!("/abox-meta/inputs/{}", only.guest_name),
+        ));
+    }
+    vars
+}
+
 /// Refuse a host-port bridge whose guest port collides with the in-guest HTTPS
 /// egress proxy listener. Both run as `socat TCP-LISTEN:<port>` inside the
 /// guest, so a collision would make one silently fail to bind.
@@ -443,15 +461,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     let input_specs: Vec<InputFileSpec> =
         args.input_files.iter().map(|s| parse_input_file_arg(s)).collect::<Result<_>>()?;
     let input_files = resolve_input_files(&input_specs)?;
-    if !input_files.is_empty() {
-        env_vars.push(("ABOX_INPUT_DIR".to_string(), "/abox-meta/inputs".to_string()));
-        if let [only] = input_files.as_slice() {
-            env_vars.push((
-                "ABOX_INPUT_FILE".to_string(),
-                format!("/abox-meta/inputs/{}", only.guest_name),
-            ));
-        }
-    }
+    env_vars.extend(input_file_env_vars(&input_files));
 
     ensure_managed_agent_ready(&args.command, orchestrator.config())?;
 
@@ -1005,6 +1015,27 @@ mod tests {
         assert!(ensure_host_ports_allowed(&hp, NetworkMode::Safe).is_err());
         assert!(ensure_host_ports_allowed(&hp, NetworkMode::Scoped).is_ok());
         assert!(ensure_host_ports_allowed(&[], NetworkMode::Safe).is_ok());
+    }
+
+    #[test]
+    fn input_file_env_vars_single_vs_multi() {
+        use abox_core::vm::InputFile;
+        let f = |n: &str| InputFile { host_path: PathBuf::from("/h"), guest_name: n.into() };
+
+        // No inputs → no env vars.
+        assert!(super::input_file_env_vars(&[]).is_empty());
+
+        // Single input → ABOX_INPUT_DIR + ABOX_INPUT_FILE.
+        let one = super::input_file_env_vars(&[f("task.json")]);
+        assert_eq!(one[0], ("ABOX_INPUT_DIR".into(), "/abox-meta/inputs".into()));
+        assert_eq!(one[1], ("ABOX_INPUT_FILE".into(), "/abox-meta/inputs/task.json".into()));
+        assert_eq!(one.len(), 2);
+
+        // Multiple inputs → ABOX_INPUT_DIR only (no single ABOX_INPUT_FILE).
+        let many = super::input_file_env_vars(&[f("a.txt"), f("b.txt")]);
+        assert_eq!(many.len(), 1);
+        assert_eq!(many[0].0, "ABOX_INPUT_DIR");
+        assert!(!many.iter().any(|(k, _)| k == "ABOX_INPUT_FILE"));
     }
 
     #[test]

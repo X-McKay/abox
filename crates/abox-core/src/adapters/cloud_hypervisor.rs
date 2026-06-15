@@ -107,30 +107,40 @@ fn is_benign_virtiofsd_credential_noise(line: &str) -> bool {
 
 /// Drain a virtiofsd child's stderr, downgrading the benign credential noise to
 /// debug and forwarding every other line at warn so real errors stay visible.
+/// Read `reader` line by line, invoking `on_line(is_benign, line)` for each.
+/// Stops on EOF; a read error (almost always the pipe closing as the child
+/// exits, including `kill_on_drop` at teardown) is logged at debug and ends
+/// the loop rather than surfacing a spurious error on every run.
+async fn drain_virtiofsd_stderr<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: R,
+    label: &str,
+    mut on_line: impl FnMut(bool, &str),
+) {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = reader.lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => on_line(is_benign_virtiofsd_credential_noise(&line), &line),
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!(target: "virtiofsd", instance = label, error = %e, "stderr read ended");
+                break;
+            }
+        }
+    }
+}
+
 fn forward_virtiofsd_stderr(mut child: Child, label: &'static str) -> Child {
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        if is_benign_virtiofsd_credential_noise(&line) {
-                            tracing::debug!(target: "virtiofsd", instance = label, "{line}");
-                        } else {
-                            tracing::warn!(target: "virtiofsd", instance = label, "{line}");
-                        }
-                    }
-                    Ok(None) => break,
-                    // A read error here is almost always the pipe closing as the
-                    // child exits (including kill_on_drop at teardown), so log at
-                    // debug rather than surfacing a spurious error on every run.
-                    Err(e) => {
-                        tracing::debug!(target: "virtiofsd", instance = label, error = %e, "stderr read ended");
-                        break;
-                    }
+            drain_virtiofsd_stderr(tokio::io::BufReader::new(stderr), label, |benign, line| {
+                if benign {
+                    tracing::debug!(target: "virtiofsd", instance = label, "{line}");
+                } else {
+                    tracing::warn!(target: "virtiofsd", instance = label, "{line}");
                 }
-            }
+            })
+            .await;
         });
     }
     child
@@ -935,6 +945,25 @@ mod tests {
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o444);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn drain_virtiofsd_stderr_routes_every_line() {
+        let input: &[u8] = b"normal line\n\
+            [ERROR virtiofsd::passthrough::credentials] failed to change uid back to root: Invalid argument (os error 22)\n\
+            another error\n";
+        let reader = tokio::io::BufReader::new(input);
+        let mut seen: Vec<(bool, String)> = Vec::new();
+        super::drain_virtiofsd_stderr(reader, "test", |benign, line| {
+            seen.push((benign, line.to_string()));
+        })
+        .await;
+
+        // Every line is delivered, in order, with the correct benign flag.
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0], (false, "normal line".to_string()));
+        assert!(seen[1].0, "credential-restore line should be benign");
+        assert_eq!(seen[2], (false, "another error".to_string()));
     }
 
     #[test]
