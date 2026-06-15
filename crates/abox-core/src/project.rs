@@ -60,6 +60,16 @@ impl FromStr for NetworkMode {
     }
 }
 
+/// The C library a guest profile's rootfs is built against. Determines whether
+/// Python wheels resolve as `manylinux` (glibc) or `musllinux` (musl).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Libc {
+    /// Alpine-based musl rootfs (the historical default).
+    Musl,
+    /// Debian-based glibc rootfs (manylinux wheels).
+    Glibc,
+}
+
 /// Official guest environment profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -72,6 +82,9 @@ pub enum EnvironmentProfile {
     Python,
     /// Rust-focused guest image.
     Rust,
+    /// Python-focused guest image on a glibc (Debian) base, so `pip`/`uv`
+    /// resolve `manylinux` wheels.
+    PythonGlibc,
 }
 
 impl EnvironmentProfile {
@@ -82,6 +95,15 @@ impl EnvironmentProfile {
             Self::Node => "node and npm",
             Self::Python => "python3, uv, and pip3",
             Self::Rust => "rustc and cargo",
+            Self::PythonGlibc => "python3, uv, and pip3 (glibc / manylinux wheels)",
+        }
+    }
+
+    /// The C library this profile's rootfs is built against.
+    pub fn libc(&self) -> Libc {
+        match self {
+            Self::PythonGlibc => Libc::Glibc,
+            Self::Base | Self::Node | Self::Python | Self::Rust => Libc::Musl,
         }
     }
 
@@ -91,7 +113,7 @@ impl EnvironmentProfile {
             (self, cache),
             (Self::Base, _)
                 | (Self::Node, "npm")
-                | (Self::Python, "pip" | "uv")
+                | (Self::Python | Self::PythonGlibc, "pip" | "uv")
                 | (Self::Rust, "cargo")
         )
     }
@@ -118,6 +140,7 @@ impl EnvironmentProfile {
             Self::Node => "node",
             Self::Python => "python",
             Self::Rust => "rust",
+            Self::PythonGlibc => "python-glibc",
         }
     }
 }
@@ -137,8 +160,9 @@ impl FromStr for EnvironmentProfile {
             "node" => Ok(Self::Node),
             "python" => Ok(Self::Python),
             "rust" => Ok(Self::Rust),
+            "python-glibc" => Ok(Self::PythonGlibc),
             other => anyhow::bail!(
-                "unknown environment profile {other:?}; expected base, node, python, or rust"
+                "unknown environment profile {other:?}; expected base, node, python, python-glibc, or rust"
             ),
         }
     }
@@ -1966,6 +1990,29 @@ host = 5000
 ";
         let cfg: ProjectConfig = toml::from_str(toml).unwrap();
         cfg.validate(std::path::Path::new(".")).unwrap();
+    }
+
+    #[test]
+    fn python_glibc_profile_round_trips_and_is_glibc() {
+        use std::str::FromStr;
+        let p = EnvironmentProfile::from_str("python-glibc").unwrap();
+        assert_eq!(p, EnvironmentProfile::PythonGlibc);
+        assert_eq!(p.as_str(), "python-glibc");
+        assert_eq!(p.to_string(), "python-glibc");
+        assert_eq!(p.libc(), Libc::Glibc);
+        assert_eq!(EnvironmentProfile::Python.libc(), Libc::Musl);
+        assert_eq!(EnvironmentProfile::Base.libc(), Libc::Musl);
+    }
+
+    #[test]
+    fn python_glibc_supports_python_caches_but_is_not_the_default() {
+        assert!(EnvironmentProfile::PythonGlibc.supports_cache("pip"));
+        assert!(EnvironmentProfile::PythonGlibc.supports_cache("uv"));
+        assert!(!EnvironmentProfile::PythonGlibc.supports_cache("npm"));
+        assert_eq!(
+            EnvironmentProfile::recommended_for_cache("pip"),
+            Some(EnvironmentProfile::Python)
+        );
     }
 
     #[test]
