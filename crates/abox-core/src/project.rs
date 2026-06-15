@@ -84,6 +84,7 @@ pub enum EnvironmentProfile {
     Rust,
     /// Python-focused guest image on a glibc (Debian) base, so `pip`/`uv`
     /// resolve `manylinux` wheels.
+    #[serde(rename = "python-glibc")]
     PythonGlibc,
 }
 
@@ -2013,6 +2014,26 @@ host = 5000
             EnvironmentProfile::recommended_for_cache("pip"),
             Some(EnvironmentProfile::Python)
         );
+    }
+
+    #[test]
+    fn python_glibc_serde_uses_canonical_hyphenated_name() {
+        // Enum serde round-trip on the canonical string.
+        let json = serde_json::to_string(&EnvironmentProfile::PythonGlibc).unwrap();
+        assert_eq!(json, "\"python-glibc\"");
+        let back: EnvironmentProfile = serde_json::from_str("\"python-glibc\"").unwrap();
+        assert_eq!(back, EnvironmentProfile::PythonGlibc);
+
+        // A repo config written with the canonical name deserializes.
+        let toml = r#"
+[network]
+mode = "safe"
+
+[environment]
+profile = "python-glibc"
+"#;
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.environment.unwrap().profile, Some(EnvironmentProfile::PythonGlibc));
     }
 
     #[test]

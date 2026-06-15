@@ -663,20 +663,14 @@ else
             git commit -q -m "init"
         )
         ABOX_GLIBC="$ABOX_BIN --config $SCRATCH/config.toml --repo $GLIBC_REPO"
-        # Pin the repo to the python-glibc profile. NOTE: the EnvironmentProfile
-        # enum deserializes with serde `rename_all = "lowercase"`, so the value
-        # that round-trips through `ProjectConfig::load` is the *unhyphenated*
-        # token `pythonglibc` (the hyphenated `python-glibc` that `abox project
-        # init`/`set-profile` writes via Display fails to parse on load). We
-        # write the config directly with the deserializable token; the resolver
-        # still maps it back to the `python-glibc` profile + image path.
+        # Pin the repo to the python-glibc profile.
         mkdir -p "$GLIBC_REPO/.abox"
         cat > "$GLIBC_REPO/.abox/project.toml" <<'EOF'
 [network]
 mode = "safe"
 
 [environment]
-profile = "pythonglibc"
+profile = "python-glibc"
 EOF
         # Trust it non-interactively (the e2e runs piped, so an untrusted repo
         # config would otherwise bail before launch).
