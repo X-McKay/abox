@@ -785,6 +785,7 @@ async fn test_orchestrator_create_sandbox() {
             ca_cert_pem: None,
             mount_excludes: vec![],
             service_bridges: Vec::new(),
+            host_port_bridges: Vec::new(),
             input_files: Vec::new(),
         })
         .await
@@ -827,6 +828,7 @@ async fn test_orchestrator_create_multiple_sandboxes() {
             ca_cert_pem: None,
             mount_excludes: vec![],
             service_bridges: Vec::new(),
+            host_port_bridges: Vec::new(),
             input_files: Vec::new(),
         })
         .await
@@ -872,6 +874,7 @@ async fn test_orchestrator_stop_sandbox() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     })
     .await
@@ -914,6 +917,7 @@ async fn test_orchestrator_stop_with_clean() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     })
     .await
@@ -957,6 +961,7 @@ async fn test_orchestrator_divergence() {
             ca_cert_pem: None,
             mount_excludes: vec![],
             service_bridges: Vec::new(),
+            host_port_bridges: Vec::new(),
             input_files: Vec::new(),
         })
         .await
@@ -1010,6 +1015,7 @@ async fn test_orchestrator_vm_config_overrides() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     })
     .await
@@ -1121,6 +1127,7 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 
@@ -1239,6 +1246,7 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 
@@ -1381,6 +1389,7 @@ async fn test_run_sandbox_timeout_returns_124() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 
@@ -1496,6 +1505,7 @@ async fn test_run_sandbox_exits_before_timeout() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 
@@ -1611,6 +1621,7 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 
@@ -1727,6 +1738,7 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 

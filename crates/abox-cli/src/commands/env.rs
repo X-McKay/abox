@@ -370,6 +370,7 @@ async fn warm_environment<W: WorkspacePort, V: VmPort>(
         mount_excludes: resolved.mount_excludes.clone(),
         // The warm/prepare flow does not use service sidecars.
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 

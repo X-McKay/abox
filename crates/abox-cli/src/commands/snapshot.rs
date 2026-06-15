@@ -241,6 +241,7 @@ async fn restore_snapshot<W: WorkspacePort, V: VmPort>(
         ca_cert_pem: None,
         mount_excludes: Vec::new(),
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
         input_files: Vec::new(),
     };
 

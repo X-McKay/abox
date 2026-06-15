@@ -56,6 +56,8 @@ pub struct CreateSandboxParams {
     /// the agent can reach them; teardown stops the containers. Empty for the
     /// common case (no services), in which nothing changes.
     pub service_bridges: Vec<crate::services::ServiceBridge>,
+    /// Repo-declared, gated host-port bridges (guest loopback → host loopback).
+    pub host_port_bridges: Vec<crate::services::HostPortPlan>,
     /// Arbitrary host files to stage read-only under `/abox-meta/inputs/`.
     pub input_files: Vec<crate::vm::InputFile>,
 }
@@ -285,6 +287,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 .service_bridges
                 .iter()
                 .map(crate::services::ServiceBridge::guest)
+                .chain(params.host_port_bridges.iter().map(crate::services::HostPortPlan::guest))
                 .collect(),
             input_files: params.input_files.clone(),
         };
@@ -429,6 +432,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         // Capture service bridges before `params` is consumed; used below to
         // spawn host→guest forwarders and to tear down containers at exit.
         let service_bridges = params.service_bridges.clone();
+        let host_port_bridges = params.host_port_bridges.clone();
         // Inject the root CA PEM so the guest trust store includes it.
         let mut params = params;
         params.ca_cert_pem = Some(root_ca.cert_pem.clone());
@@ -579,6 +583,30 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             }));
         }
 
+        // Spawn a host→guest bridge for each declared host-port. Reuses the
+        // service-bridge vsock plumbing but logs every connection, since this
+        // is a deliberate, audited exception to the egress boundary.
+        let mut host_port_handles = Vec::new();
+        for plan in &host_port_bridges {
+            let socket = self
+                .config
+                .runtime_dir()
+                .join(format!("vsock-{task_id}.sock_{}", plan.vsock_port));
+            let guest_port = plan.guest_port;
+            let host_port = plan.host_port;
+            let sandbox_id = task_id.clone();
+            let audit = std::sync::Arc::clone(&audit_sink);
+            host_port_handles.push(tokio::spawn(async move {
+                if let Err(e) = crate::services::serve_host_port_bridge(
+                    socket, guest_port, host_port, sandbox_id, audit,
+                )
+                .await
+                {
+                    tracing::error!(host_port, error = %e, "host-port bridge crashed");
+                }
+            }));
+        }
+
         // Spawn the console streamer with a shutdown notify so it can drain
         // the last bytes of guest output gracefully when the VM exits,
         // instead of being abort()'d mid-read and dropping the trailing
@@ -641,6 +669,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         bridge_handle.abort();
         egress_handle.abort();
         for handle in service_bridge_handles {
+            handle.abort();
+        }
+        for handle in host_port_handles {
             handle.abort();
         }
         // Stop and remove any service sidecars started for this sandbox. Keyed

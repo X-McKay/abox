@@ -316,6 +316,25 @@ fn ensure_managed_agent_ready(command: &[String], config: &AboxConfig) -> Result
     Ok(())
 }
 
+/// Refuse `[[host_ports]]` unless the effective network mode permits an
+/// unmediated path to a host service. `safe` means "only the host-managed
+/// surface", which a host-port bridge is not.
+fn ensure_host_ports_allowed(
+    host_ports: &[abox_core::services::HostPortBridge],
+    mode: NetworkMode,
+) -> Result<()> {
+    if !host_ports.is_empty() && mode == NetworkMode::Safe {
+        anyhow::bail!(
+            "[[host_ports]] requires network mode 'scoped' or 'open', but the \
+             effective mode is 'safe'.\n\n\
+             A host-port bridge gives the sandbox an unmediated path to a host \
+             service, so it is refused in 'safe' mode. Set network.mode = \
+             \"scoped\" in .abox/project.toml (or pass --network scoped) to enable it."
+        );
+    }
+    Ok(())
+}
+
 pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
     repo_root: &Path,
@@ -380,6 +399,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     let requested_network = args.network.map(Into::into);
     let project_config = ProjectConfig::load(repo_root)?;
     let project_services = project_config.as_ref().map(|c| c.services.clone()).unwrap_or_default();
+    let project_host_ports =
+        project_config.as_ref().map(|c| c.host_ports.clone()).unwrap_or_default();
     let resolved_project = match project_config {
         Some(config) => Some(config.resolve(repo_root)?),
         None => None,
@@ -405,6 +426,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         (None, Some(mode)) => Some(standalone_network_scope(mode)?),
         (None, None) => None,
     };
+    let effective_mode = network_scope.as_ref().map_or(NetworkMode::Safe, |s| s.mode);
+    ensure_host_ports_allowed(&project_host_ports, effective_mode)?;
     let policy = if let Some(scope) = network_scope.as_ref() {
         println!("Network mode: {}", scope.mode);
         std::sync::Arc::new(policy.as_ref().with_network_scope(scope.clone())?)
@@ -452,6 +475,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         args.template.as_deref(),
         &mut env_vars,
     )?;
+    let host_port_bridges =
+        abox_core::services::plan_host_port_bridges(&project_host_ports, service_bridges.len());
 
     let params = CreateSandboxParams {
         task_id: args.task.clone(),
@@ -475,6 +500,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
             .as_ref()
             .map_or_else(Vec::new, |resolved| resolved.mount_excludes.clone()),
         service_bridges,
+        host_port_bridges,
         input_files,
     };
 
@@ -677,8 +703,9 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapt_command_for_prompt, ensure_managed_agent_ready, parse_env_var, parse_input_file_arg,
-        resolve_prompt_input, selected_managed_agent, strip_detach_flag, RunArgs,
+        adapt_command_for_prompt, ensure_host_ports_allowed, ensure_managed_agent_ready,
+        parse_env_var, parse_input_file_arg, resolve_prompt_input, selected_managed_agent,
+        strip_detach_flag, RunArgs,
     };
     use abox_core::config::AboxConfig;
     use abox_core::project::{EnvironmentProfile, NetworkMode, ResolvedProjectConfig};
@@ -902,5 +929,15 @@ mod tests {
         assert!(parse_input_file_arg("/tmp/x.json:..").is_err());
         assert!(parse_input_file_arg("/tmp/x.json:a/b").is_err());
         assert!(parse_input_file_arg("/tmp/x.json:.").is_err());
+    }
+
+    #[test]
+    fn host_ports_refused_in_safe_mode() {
+        use abox_core::services::HostPortBridge;
+        use abox_core::project::NetworkMode;
+        let hp = vec![HostPortBridge { guest: 4000, host: 4000 }];
+        assert!(ensure_host_ports_allowed(&hp, NetworkMode::Safe).is_err());
+        assert!(ensure_host_ports_allowed(&hp, NetworkMode::Scoped).is_ok());
+        assert!(ensure_host_ports_allowed(&[], NetworkMode::Safe).is_ok());
     }
 }
