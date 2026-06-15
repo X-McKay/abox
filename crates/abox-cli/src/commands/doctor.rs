@@ -378,6 +378,7 @@ fn installed_profiles(config: &AboxConfig) -> Vec<EnvironmentProfile> {
         EnvironmentProfile::Base,
         EnvironmentProfile::Node,
         EnvironmentProfile::Python,
+        EnvironmentProfile::PythonGlibc,
         EnvironmentProfile::Rust,
     ] {
         if image_path_for_profile(config, profile).exists() {
@@ -403,6 +404,7 @@ fn check_installed_guest_profiles(config: &AboxConfig) -> Check {
         EnvironmentProfile::Base,
         EnvironmentProfile::Node,
         EnvironmentProfile::Python,
+        EnvironmentProfile::PythonGlibc,
         EnvironmentProfile::Rust,
     ]
     .into_iter()

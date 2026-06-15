@@ -40,6 +40,7 @@ pub enum ProjectProfileArg {
     Base,
     Node,
     Python,
+    PythonGlibc,
     Rust,
 }
 
@@ -207,6 +208,7 @@ impl From<ProjectProfileArg> for EnvironmentProfile {
             ProjectProfileArg::Base => Self::Base,
             ProjectProfileArg::Node => Self::Node,
             ProjectProfileArg::Python => Self::Python,
+            ProjectProfileArg::PythonGlibc => Self::PythonGlibc,
             ProjectProfileArg::Rust => Self::Rust,
         }
     }
