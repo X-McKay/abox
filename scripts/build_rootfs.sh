@@ -49,15 +49,20 @@ profile_output_dir() {
 }
 
 profile_image_size_mib() {
+    # Sized to hold the Alpine base, the profile toolchain, and the bundled
+    # agent CLIs (Claude Code + Codex). The Codex CLI ships a large vendored
+    # binary (~220 MiB as of codex 0.139.0), so these include headroom for it
+    # and future growth. Bump together if `__populate_fs: Could not allocate
+    # block` appears during the ext4 populate step.
     case "$ABOX_PROFILE" in
         base|node)
-            printf '%s\n' "768"
+            printf '%s\n' "1280"
             ;;
         python)
-            printf '%s\n' "1024"
+            printf '%s\n' "1536"
             ;;
         rust)
-            printf '%s\n' "2048"
+            printf '%s\n' "2560"
             ;;
     esac
 }
@@ -203,7 +208,7 @@ inner_mode() {
     local npm_prefix="$stage/usr/local"
     mkdir -p "$npm_prefix/lib" "$npm_prefix/bin"
     npm install --global --prefix "$npm_prefix" \
-        @anthropic-ai/claude-code@2.1.109 @openai/codex@0.121.0 2>&1 | tail -5
+        @anthropic-ai/claude-code@2.1.177 @openai/codex@0.139.0 2>&1 | tail -5
     find "$npm_prefix/bin" -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +
 
     echo "  building system CA trust bundle..."
