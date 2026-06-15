@@ -57,7 +57,7 @@ enum Commands {
 
     /// List all active sandboxes.
     #[command(alias = "ls")]
-    List,
+    List(commands::list::ListArgs),
 
     /// Attach to a sandbox's console.
     Attach(commands::attach::AttachArgs),
@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::List => commands::list::execute(&orchestrator).await,
+        Commands::List(ref args) => commands::list::execute(args, &orchestrator).await,
         Commands::Attach(args) => commands::attach::execute(args, &orchestrator).await,
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,
         Commands::Divergence(ref args) => commands::divergence::execute(args, &orchestrator),
