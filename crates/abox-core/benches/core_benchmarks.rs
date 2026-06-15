@@ -149,6 +149,7 @@ fn boot_meta(c: &mut Criterion) {
             ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
         ],
         credential_files: vec![],
+        mount_excludes: vec![],
     };
 
     let mut group = c.benchmark_group("boot_meta");

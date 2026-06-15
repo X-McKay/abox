@@ -62,6 +62,15 @@ pub struct BootMeta {
     /// Credential files staged in `<meta_dir>/credentials/`.
     #[serde(default)]
     pub credential_files: Vec<StagedCredential>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    ///
+    /// Each entry is a path relative to `/workspace`. The guest `init.sh`
+    /// mounts a fresh tmpfs over each path immediately after mounting the
+    /// virtiofs workspace share, so the Linux guest sees a clean directory
+    /// instead of the host's platform-specific binaries (e.g. macOS
+    /// `node_modules`). The host copy is untouched.
+    #[serde(default)]
+    pub mount_excludes: Vec<String>,
 }
 
 impl BootMeta {
@@ -192,14 +201,37 @@ impl BootMeta {
     /// Stage the boot meta on disk: write `boot.json` and `runner.sh` into
     /// `dir`. The orchestrator points virtiofsd at `dir` and mounts it as
     /// `/abox-meta` in the guest.
+    ///
+    /// `runner.sh` and `boot.json` can carry secrets (e.g. service connection
+    /// URLs with passwords exported via `env`). virtiofsd runs as the
+    /// orchestrator user (it forks before entering its namespace), so the
+    /// staging directory is restricted to owner-only (`0700`): the guest still
+    /// reads every file through virtiofsd, but other unprivileged users on the
+    /// host cannot traverse in. `boot.json` is additionally `0600` for
+    /// defense in depth; the guest never reads it directly.
     pub fn stage(&self, dir: &Path) -> Result<()> {
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("boot.json"), self.to_json()?)?;
+        #[cfg(unix)]
+        {
+            use std::fs::DirBuilder;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            // Create the directory already restricted to 0700 so there is no
+            // TOCTOU window in which staged secrets are world-readable.
+            // `set_permissions` additionally tightens it if it already existed.
+            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(dir)?;
+        }
+        let boot_path = dir.join("boot.json");
+        std::fs::write(&boot_path, self.to_json()?)?;
         let runner_path = dir.join("runner.sh");
         std::fs::write(&runner_path, self.runner_script())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&boot_path, std::fs::Permissions::from_mode(0o600))?;
             std::fs::set_permissions(&runner_path, std::fs::Permissions::from_mode(0o755))?;
         }
         Ok(())
@@ -224,6 +256,7 @@ mod tests {
             agent_command: vec!["claude".into(), "--model".into(), "opus".into()],
             env: vec![("FOO".into(), "bar".into())],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let json = meta.to_json().unwrap();
         let parsed = BootMeta::from_json(&json).unwrap();
@@ -240,6 +273,7 @@ mod tests {
             agent_command: vec!["/bin/echo".into(), "hello".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -257,6 +291,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![("TMPDIR".into(), "/workspace".into())],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
 
         let script = meta.runner_script();
@@ -270,6 +305,7 @@ mod tests {
             agent_command: vec!["echo".into(), "hello world".into(), "$HOME".into(), "it's".into()],
             env: vec![("MSG".into(), "a 'quote' here".into())],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         // Argument wrapping
@@ -290,6 +326,7 @@ mod tests {
             agent_command: vec!["true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         meta.stage(tmp.path()).unwrap();
 
@@ -299,13 +336,21 @@ mod tests {
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
         assert!(runner.starts_with("#!/bin/sh\n"));
 
-        // runner.sh must be executable
+        // runner.sh must be executable; the staging dir and boot.json must be
+        // owner-only so host-staged secrets are not world-readable.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode =
+            let runner_mode =
                 std::fs::metadata(tmp.path().join("runner.sh")).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o755);
+            assert_eq!(runner_mode & 0o777, 0o755);
+
+            let dir_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode();
+            assert_eq!(dir_mode & 0o077, 0, "staging dir must not be group/other accessible");
+
+            let boot_mode =
+                std::fs::metadata(tmp.path().join("boot.json")).unwrap().permissions().mode();
+            assert_eq!(boot_mode & 0o077, 0, "boot.json must not be group/other readable");
         }
     }
 
@@ -320,6 +365,7 @@ mod tests {
                 guest_path: "/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains("mkdir -p '/.claude'"));
@@ -338,6 +384,7 @@ mod tests {
             agent_command: vec!["echo".into(), "hi".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(!script.contains("/abox-meta/credentials"));
@@ -354,6 +401,7 @@ mod tests {
                 guest_path: "/root/.config/it's a test/creds.json".into(),
                 mode: "0600".into(),
             }],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains(r"'/root/.config/it'\''s a test/creds.json'"));
@@ -371,6 +419,7 @@ mod tests {
                 guest_path: "/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
+            mount_excludes: vec![],
         };
         meta.stage(tmp.path()).unwrap();
         let runner = std::fs::read_to_string(tmp.path().join("runner.sh")).unwrap();
@@ -384,6 +433,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(
@@ -403,6 +453,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(
@@ -427,6 +478,7 @@ mod tests {
                 guest_path: "/home/abox/.claude/.credentials.json".into(),
                 mode: "0600".into(),
             }],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         // Directory under agent home gets chowned so tools can write config there.
@@ -450,6 +502,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(script.contains("grep -q '^-----BEGIN CERTIFICATE-----' /home/abox/.claude.json"));
@@ -463,6 +516,7 @@ mod tests {
             agent_command: vec!["/bin/true".into()],
             env: vec![],
             credential_files: vec![],
+            mount_excludes: vec![],
         };
         let script = meta.runner_script();
         assert!(

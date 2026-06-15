@@ -268,6 +268,7 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "{value}".to_string(),
+                request_rules: vec![],
             },
             EgressRule {
                 domain: "api.openai.com".to_string(),
@@ -276,6 +277,7 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "Bearer {value}".to_string(),
+                request_rules: vec![],
             },
             EgressRule {
                 domain: "*.amazonaws.com".to_string(),
@@ -284,6 +286,7 @@ fn test_policy_multiple_egress_rules() {
                 credential_file: None,
                 json_path: None,
                 header_template: "AWS4-HMAC-SHA256 {value}".to_string(),
+                request_rules: vec![],
             },
         ],
         default_cli_action: "deny".to_string(),
@@ -780,6 +783,8 @@ async fn test_orchestrator_create_sandbox() {
             timeout_secs: None,
             ephemeral: false,
             ca_cert_pem: None,
+            mount_excludes: vec![],
+            service_bridges: Vec::new(),
         })
         .await
         .unwrap();
@@ -819,6 +824,8 @@ async fn test_orchestrator_create_multiple_sandboxes() {
             timeout_secs: None,
             ephemeral: false,
             ca_cert_pem: None,
+            mount_excludes: vec![],
+            service_bridges: Vec::new(),
         })
         .await
         .unwrap();
@@ -861,6 +868,8 @@ async fn test_orchestrator_stop_sandbox() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     })
     .await
     .unwrap();
@@ -900,6 +909,8 @@ async fn test_orchestrator_stop_with_clean() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     })
     .await
     .unwrap();
@@ -940,6 +951,8 @@ async fn test_orchestrator_divergence() {
             timeout_secs: None,
             ephemeral: false,
             ca_cert_pem: None,
+            mount_excludes: vec![],
+            service_bridges: Vec::new(),
         })
         .await
         .unwrap();
@@ -990,6 +1003,8 @@ async fn test_orchestrator_vm_config_overrides() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     })
     .await
     .unwrap();
@@ -1098,6 +1113,8 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1213,6 +1230,8 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1352,6 +1371,8 @@ async fn test_run_sandbox_timeout_returns_124() {
         timeout_secs: Some(1), // 1-second timeout
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1464,6 +1485,8 @@ async fn test_run_sandbox_exits_before_timeout() {
         timeout_secs: Some(60), // generous timeout — should not fire
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1576,6 +1599,8 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
         timeout_secs: None,
         ephemeral: true,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1689,6 +1714,8 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
         timeout_secs: None,
         ephemeral: false,
         ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(

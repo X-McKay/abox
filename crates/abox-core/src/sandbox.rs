@@ -47,6 +47,15 @@ pub struct CreateSandboxParams {
     /// Set by `run_sandbox` from the loaded `RootCa`; `None` for tests or
     /// callers that don't need MITM proxy support.
     pub ca_cert_pem: Option<String>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    /// Sourced from `ResolvedProjectConfig.mount_excludes` and passed through
+    /// to `VmConfig` and ultimately `BootMeta`.
+    pub mount_excludes: Vec<String>,
+    /// Ephemeral service sidecars already started on the host. `run_sandbox`
+    /// spawns a host→guest vsock bridge for each and stages guest metadata so
+    /// the agent can reach them; teardown stops the containers. Empty for the
+    /// common case (no services), in which nothing changes.
+    pub service_bridges: Vec<crate::services::ServiceBridge>,
 }
 
 /// Full sandbox status combining workspace and VM info.
@@ -269,6 +278,12 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             start_mode,
             credential_files,
             ca_cert_pem: params.ca_cert_pem.clone(),
+            mount_excludes: params.mount_excludes.clone(),
+            services: params
+                .service_bridges
+                .iter()
+                .map(crate::services::ServiceBridge::guest)
+                .collect(),
         };
 
         // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just
@@ -408,6 +423,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     ) -> Result<i32> {
         let timeout_secs = params.timeout_secs;
         let ephemeral = params.ephemeral;
+        // Capture service bridges before `params` is consumed; used below to
+        // spawn host→guest forwarders and to tear down containers at exit.
+        let service_bridges = params.service_bridges.clone();
         // Inject the root CA PEM so the guest trust store includes it.
         let mut params = params;
         params.ca_cert_pem = Some(root_ca.cert_pem.clone());
@@ -539,6 +557,25 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             }
         });
 
+        // Spawn a host→guest bridge for each service sidecar. Each binds the
+        // Cloud Hypervisor vsock backend socket for the service's vsock port
+        // and forwards to the container's published host port. No services →
+        // no bridges, so the common path is unaffected.
+        let mut service_bridge_handles = Vec::new();
+        for bridge in &service_bridges {
+            let socket = self
+                .config
+                .runtime_dir()
+                .join(format!("vsock-{task_id}.sock_{}", bridge.vsock_port));
+            let host_port = bridge.host_port;
+            let name = bridge.name.clone();
+            service_bridge_handles.push(tokio::spawn(async move {
+                if let Err(e) = crate::services::serve_service_bridge(socket, host_port).await {
+                    tracing::error!(service = %name, error = %e, "service bridge crashed");
+                }
+            }));
+        }
+
         // Spawn the console streamer with a shutdown notify so it can drain
         // the last bytes of guest output gracefully when the VM exits,
         // instead of being abort()'d mid-read and dropping the trailing
@@ -600,6 +637,17 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
 
         bridge_handle.abort();
         egress_handle.abort();
+        for handle in service_bridge_handles {
+            handle.abort();
+        }
+        // Stop and remove any service sidecars started for this sandbox. Keyed
+        // by the sandbox label so it also reaps containers the bridge list
+        // might have missed. No-op when no services were started.
+        if !service_bridges.is_empty() {
+            if let Err(e) = crate::services::stop_sandbox_services(&task_id) {
+                tracing::warn!(task_id = %task_id, error = %e, "Failed to stop service sidecars");
+            }
+        }
         // Signal the console tailer to drain and exit. Wait briefly for it
         // to finish before we move on; if it stays stuck (shouldn't happen
         // in practice), the JoinHandle is dropped and the task is cancelled.

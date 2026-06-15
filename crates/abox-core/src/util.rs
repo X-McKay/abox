@@ -195,6 +195,64 @@ pub fn validate_env_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Fill `buf` with cryptographically secure random bytes from the OS CSPRNG.
+///
+/// Backed by the `getrandom` crate (which uses `getrandom(2)`/`/dev/urandom`
+/// on Linux, `getentropy` on macOS, etc.). Returns an error rather than
+/// silently falling back to a weak source: callers that need secrecy
+/// (PKCE verifiers, generated passwords) must fail loudly if the OS CSPRNG
+/// is unavailable instead of emitting guessable output.
+pub fn secure_random_bytes(buf: &mut [u8]) -> Result<(), String> {
+    getrandom::getrandom(buf).map_err(|e| format!("OS CSPRNG unavailable: {e}"))
+}
+
+/// Validate a user-supplied resource name that will be used as a single path
+/// component (token names, snapshot names, etc.).
+///
+/// Rejects empty names, names longer than 64 chars, and anything outside
+/// `[A-Za-z0-9._-]`. This blocks path-traversal (`..`, `/`) and absolute-path
+/// injection when the name is later joined onto a state directory.
+pub fn validate_resource_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if name.len() > 64 {
+        return Err(format!("name {name:?} is too long (max 64 characters)"));
+    }
+    if name == "." || name == ".." {
+        return Err(format!("name {name:?} is reserved"));
+    }
+    for (i, c) in name.char_indices() {
+        if !c.is_ascii_alphanumeric() && !matches!(c, '.' | '_' | '-') {
+            return Err(format!(
+                "name {name:?} contains invalid character {c:?} at position {i}; only ASCII \
+                 letters, digits, '.', '_', and '-' are allowed"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Sanitize an arbitrary string into a safe single-path-component resource name.
+///
+/// Replaces every character outside `[A-Za-z0-9._-]` with `-`, collapses the
+/// result, and guarantees the output passes [`validate_resource_name`]. Used to
+/// derive a default name (e.g. from a hostname) before validation.
+pub fn sanitize_resource_name(input: &str) -> String {
+    let mut out: String = input
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
+            _ => '-',
+        })
+        .collect();
+    if out.is_empty() || out == "." || out == ".." {
+        out = "default".to_string();
+    }
+    out.truncate(64);
+    out
+}
+
 /// Sanitize a task ID for use as a branch name and directory name.
 ///
 /// Replaces characters that are invalid in git branch names with hyphens.
@@ -210,9 +268,57 @@ pub fn sanitize_task_id(id: &str) -> String {
         .collect()
 }
 
+/// Percent-decode a URL component once: each `%XX` (two hex digits) becomes the
+/// corresponding byte; any `%` not followed by two hex digits is left literal.
+/// The result is interpreted as UTF-8 with lossy replacement.
+///
+/// This decodes `%XX` only — it does **not** treat `+` as a space. That `+`
+/// rule is specific to `application/x-www-form-urlencoded` query strings; path
+/// matching needs `+` left literal. Callers that want query semantics should
+/// replace `+` with a space before calling (see `mcp_oauth::percent_decode`).
+pub fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Decode a single ASCII hex digit, or `None` if it is not one.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_percent_decode_xx_only() {
+        assert_eq!(percent_decode("%61dmin"), "admin");
+        assert_eq!(percent_decode("a%2fb"), "a/b");
+        // `+` is left literal (path semantics, not query).
+        assert_eq!(percent_decode("a+b"), "a+b");
+        // Invalid / truncated escapes are left literal.
+        assert_eq!(percent_decode("a%xxb"), "a%xxb");
+        assert_eq!(percent_decode("trailing%2"), "trailing%2");
+        assert_eq!(percent_decode("plain"), "plain");
+    }
 
     #[test]
     fn test_format_size_bytes() {
@@ -248,6 +354,49 @@ mod tests {
     #[test]
     fn test_sanitize_preserves_valid_chars() {
         assert_eq!(sanitize_task_id("My.Task_v2"), "My.Task_v2");
+    }
+
+    // ── secure_random_bytes tests ─────────────────────────────────────────
+
+    #[test]
+    fn secure_random_bytes_fills_buffer() {
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        secure_random_bytes(&mut a).unwrap();
+        secure_random_bytes(&mut b).unwrap();
+        // Two independent draws of 32 bytes should differ with overwhelming
+        // probability; a constant result would indicate a broken RNG.
+        assert_ne!(a, b);
+        assert_ne!(a, [0u8; 32]);
+    }
+
+    // ── validate_resource_name / sanitize_resource_name tests ─────────────
+
+    #[test]
+    fn validate_resource_name_accepts_safe_names() {
+        assert!(validate_resource_name("github").is_ok());
+        assert!(validate_resource_name("mcp.example.com").is_ok());
+        assert!(validate_resource_name("snap_2024-01-01").is_ok());
+    }
+
+    #[test]
+    fn validate_resource_name_rejects_traversal_and_separators() {
+        assert!(validate_resource_name("").is_err());
+        assert!(validate_resource_name(".").is_err());
+        assert!(validate_resource_name("..").is_err());
+        assert!(validate_resource_name("../../etc/passwd").is_err());
+        assert!(validate_resource_name("a/b").is_err());
+        assert!(validate_resource_name("a\\b").is_err());
+        assert!(validate_resource_name("name with space").is_err());
+        assert!(validate_resource_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn sanitize_resource_name_produces_valid_names() {
+        assert_eq!(sanitize_resource_name("mcp.example.com"), "mcp.example.com");
+        assert_eq!(sanitize_resource_name("a/b c"), "a-b-c");
+        assert!(validate_resource_name(&sanitize_resource_name("../../weird")).is_ok());
+        assert!(validate_resource_name(&sanitize_resource_name("")).is_ok());
     }
 
     // ── validate_task_id tests ────────────────────────────────────────────

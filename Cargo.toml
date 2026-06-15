@@ -13,7 +13,11 @@ version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/X-McKay/abox"
-rust-version = "1.75"
+# No MSRV is promised. abox is an application (not a published library) and
+# tracks the latest stable Rust — see rust-toolchain.toml (`channel = "stable"`)
+# and CI (`dtolnay/rust-toolchain@stable`). The clippy `-D warnings` gate runs
+# on stable, so the effective floor is "current stable"; deliberately omitting
+# `rust-version` rather than declaring a value nothing verifies.
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

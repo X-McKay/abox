@@ -75,12 +75,25 @@ enum Commands {
     /// Manage VM snapshot templates.
     Template(commands::template::TemplateArgs),
 
+    /// Manage sandbox snapshots (create, restore, list, prune).
+    Snapshot(commands::snapshot::SnapshotArgs),
+
     /// Manage the root CA for HTTPS credential injection.
     #[command(subcommand)]
     Ca(commands::ca::CaCommand),
 
+    /// Manage credential injection rules for transparent HTTP auth.
+    #[command(subcommand)]
+    Grant(commands::grant::GrantAction),
+
+    /// Manage ephemeral service sidecars (postgres, redis, ollama).
+    Services(commands::services::ServicesArgs),
+
     /// Open the TUI dashboard.
     Tui,
+    /// Verify and inspect the audit log.
+    #[command(subcommand)]
+    Audit(commands::audit::AuditAction),
 }
 
 #[tokio::main]
@@ -146,10 +159,35 @@ async fn main() -> Result<()> {
         return commands::ca::execute(cmd);
     }
 
+    // Grant command does not need the orchestrator
+    if let Some(Commands::Grant(action)) = command.as_ref() {
+        let args = commands::grant::GrantArgs { action: action.clone() };
+        return commands::grant::execute(&args, &config).await;
+    }
+
+    // Services command does not need the orchestrator
+    if let Some(Commands::Services(args)) = command.as_ref() {
+        return commands::services::execute(args, &config, &repo_path);
+    }
+
     // TUI command
     if let Some(Commands::Tui) = command.as_ref() {
         let mut state = tui::dashboard::DashboardState::new();
         return tui::dashboard::run_dashboard(&mut state);
+    }
+
+    // Snapshot list/delete/prune do not need the orchestrator.
+    // Snapshot create/restore do — they fall through to the orchestrator block.
+    if let Some(Commands::Snapshot(args)) = command.as_ref() {
+        if commands::snapshot::execute_without_orchestrator(args, &config)? {
+            return Ok(());
+        }
+    }
+
+    // Audit command does not need the orchestrator
+    if let Some(Commands::Audit(action)) = command.as_ref() {
+        let args = commands::audit::AuditArgs { action: action.clone() };
+        return commands::audit::execute(&args, &config);
     }
 
     // Load the policy engine. Fail fast with an actionable message if the
@@ -228,8 +266,14 @@ async fn main() -> Result<()> {
             }
             _ => unreachable!(),
         },
+        Commands::Snapshot(ref args) => {
+            commands::snapshot::execute_with_orchestrator(args, &orchestrator, &config).await
+        }
         Commands::Ca(_)
+        | Commands::Grant(_)
+        | Commands::Services(_)
         | Commands::Tui
+        | Commands::Audit(_)
         | Commands::Init(_)
         | Commands::Doctor
         | Commands::Project(_) => unreachable!(),

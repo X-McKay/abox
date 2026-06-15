@@ -302,21 +302,19 @@ fn resolve_request_cwd(
 /// `AuditSink` impl.
 pub struct TracingAuditSink;
 
-/// A file-based audit sink that writes JSON lines to a log file.
-/// Used by the per-VM proxy bridge so that guest requests appear in the
-/// same audit file as requests through `abox-proxyd`.
+/// A file-based audit sink for the per-VM proxy bridge.
+///
+/// Delegates to the shared [`crate::audit::AuditChainWriter`] so guest requests
+/// are written to the same hash-chained, verifiable `audit.jsonl` as requests
+/// through `abox-proxyd` — and can be checked with `abox audit verify`.
 pub struct FileAuditSink {
-    writer: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
+    writer: crate::audit::AuditChainWriter,
 }
 
 impl FileAuditSink {
-    /// Open (or create + append to) the given path as an audit log.
+    /// Open (or create + append to) the given path as a hash-chained audit log.
     pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self { writer: std::sync::Mutex::new(std::io::BufWriter::new(file)) })
+        Ok(Self { writer: crate::audit::AuditChainWriter::open(path)? })
     }
 }
 
@@ -329,21 +327,7 @@ impl AuditSink for FileAuditSink {
         decision: &str,
         exit_code: i32,
     ) {
-        use chrono::Utc;
-        use std::io::Write;
-        let entry = serde_json::json!({
-            "timestamp": Utc::now().to_rfc3339(),
-            "sandbox_id": sandbox_id,
-            "request_type": "cli",
-            "target": command,
-            "detail": args.join(" "),
-            "decision": decision,
-            "result_code": exit_code,
-        });
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = writeln!(w, "{entry}");
-            let _ = w.flush();
-        }
+        self.writer.log_cli(sandbox_id, command, args, decision, exit_code);
         // Also emit through tracing for visibility.
         tracing::info!(
             sandbox_id = %sandbox_id,
@@ -356,21 +340,7 @@ impl AuditSink for FileAuditSink {
     }
 
     fn log_egress(&self, sandbox_id: &str, domain: &str, decision: &str, status_code: i32) {
-        use chrono::Utc;
-        use std::io::Write;
-        let entry = serde_json::json!({
-            "timestamp": Utc::now().to_rfc3339(),
-            "sandbox_id": sandbox_id,
-            "request_type": "egress",
-            "target": domain,
-            "detail": "",
-            "decision": decision,
-            "result_code": status_code,
-        });
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = writeln!(w, "{entry}");
-            let _ = w.flush();
-        }
+        self.writer.log_egress(sandbox_id, domain, decision, status_code);
         tracing::info!(
             sandbox_id = %sandbox_id,
             domain = %domain,
@@ -378,6 +348,30 @@ impl AuditSink for FileAuditSink {
             status_code,
             "egress"
         );
+    }
+}
+
+/// The shared chained writer is itself an [`AuditSink`], so the `abox-proxyd`
+/// daemon can plug it straight into a [`ProxyBridge`] without a wrapper. Both
+/// CLI and egress entries are written to the chain (the trait's default
+/// `log_egress` only traces). Inherent methods are named explicitly to avoid
+/// recursing into these trait methods.
+impl AuditSink for crate::audit::AuditChainWriter {
+    fn log_cli(
+        &self,
+        sandbox_id: &str,
+        command: &str,
+        args: &[String],
+        decision: &str,
+        exit_code: i32,
+    ) {
+        crate::audit::AuditChainWriter::log_cli(
+            self, sandbox_id, command, args, decision, exit_code,
+        );
+    }
+
+    fn log_egress(&self, sandbox_id: &str, domain: &str, decision: &str, status_code: i32) {
+        crate::audit::AuditChainWriter::log_egress(self, sandbox_id, domain, decision, status_code);
     }
 }
 

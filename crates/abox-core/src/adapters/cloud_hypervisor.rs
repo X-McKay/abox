@@ -241,6 +241,7 @@ impl VmPort for CloudHypervisorAdapter {
             agent_command: config.agent_command.clone(),
             env: config.env_vars.clone(),
             credential_files: staged_creds,
+            mount_excludes: config.mount_excludes.clone(),
         };
         meta.stage(&meta_dir)
             .with_context(|| format!("Failed to stage boot metadata in {}", meta_dir.display()))?;
@@ -287,6 +288,35 @@ impl VmPort for CloudHypervisorAdapter {
                     format!("Failed to write credential file {}", dest.display())
                 })?;
             }
+        }
+
+        // Stage mount-excludes file so guest/init.sh can overlay workspace
+        // subdirectories with empty tmpfs mounts (e.g. node_modules, .venv).
+        if !config.mount_excludes.is_empty() {
+            let excludes_content = config.mount_excludes.join("\n") + "\n";
+            let excludes_path = meta_dir.join("mount-excludes");
+            std::fs::write(&excludes_path, excludes_content).with_context(|| {
+                format!("Failed to write mount-excludes to {}", excludes_path.display())
+            })?;
+        }
+
+        // Stage the services file so guest/init.sh can bridge guest loopback
+        // ports to host service containers over vsock. Each line is
+        // `<name> <guest_port> <vsock_port>`.
+        if !config.services.is_empty() {
+            let mut services_content = String::new();
+            for svc in &config.services {
+                use std::fmt::Write as _;
+                let _ = writeln!(
+                    services_content,
+                    "{} {} {}",
+                    svc.name, svc.guest_port, svc.vsock_port
+                );
+            }
+            let services_path = meta_dir.join("services");
+            std::fs::write(&services_path, services_content).with_context(|| {
+                format!("Failed to write services file to {}", services_path.display())
+            })?;
         }
 
         // Stage the root CA certificate so guest/init.sh can inject it

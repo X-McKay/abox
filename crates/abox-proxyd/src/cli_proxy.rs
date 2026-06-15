@@ -13,18 +13,8 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-impl AuditSink for AuditLog {
-    fn log_cli(
-        &self,
-        sandbox_id: &str,
-        command: &str,
-        args: &[String],
-        decision: &str,
-        exit_code: i32,
-    ) {
-        AuditLog::log_cli(self, sandbox_id, command, args, decision, exit_code);
-    }
-}
+// `AuditLog` (= `abox_core::audit::AuditChainWriter`) implements `AuditSink` in
+// `abox-core`, so it plugs into the bridge directly — no local impl needed.
 
 /// The CLI proxy server. Owns the socket path and forwards requests
 /// through a [`ProxyBridge`] configured with `SandboxAttribution::FromRequest`.

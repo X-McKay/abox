@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- feat(grant): `abox grant` injects credentials into outbound HTTPS transparently;
+  the agent only sees a placeholder. Built-in shortcuts for openai/anthropic/
+  github/huggingface, plus custom `--domain/--header/--env` grants.
+- feat(grant mcp): MCP OAuth 2.0 discovery and authorization (RFC 8414) with
+  PKCE and CSRF `state`, owner-only token storage, and `abox grant mcp refresh`.
+- feat(services): ephemeral service sidecars (postgres/redis/ollama/mysql)
+  declared in `.abox/project.toml`, started on `abox run`, reachable from the
+  guest over a vsock bridge, and torn down on exit.
+- feat(snapshot): user-facing `abox snapshot` (list/create/restore/delete/prune);
+  restore goes through the VM manager so the restored sandbox is attachable.
+- feat(audit): tamper-evident, HMAC-keyed hash-chained audit log with
+  `abox audit verify`/`show`; truncation detection and an honest threat model
+  (see `docs/audit-log.md`).
+- feat(egress): per-method/path `request_rules` on egress domains, validated at
+  policy-load time.
+- feat(doctor): CA file/trust, agent credential-injection, and audit-log checks.
+- feat(mount-excludes): overlay workspace subdirectories with empty tmpfs in the
+  guest (e.g. host-native `node_modules`).
+
+### Security
+
+- Use the OS CSPRNG for PKCE verifiers, OAuth `state`, and generated service
+  passwords; removed weak time-seeded fallbacks.
+- Store MCP OAuth tokens and the audit key with `0600` permissions; validate
+  token/snapshot names against path traversal.
+- Enforce HTTPS on discovered OAuth endpoints; key the audit chain so a
+  sandboxed agent cannot forge it.
+
 ## v0.4.0 — 2026-05-09
 
 ### Features

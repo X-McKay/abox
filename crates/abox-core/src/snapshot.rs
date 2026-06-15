@@ -19,6 +19,9 @@ pub struct TemplateInfo {
     pub path: PathBuf,
     /// Size on disk in bytes.
     pub size_bytes: u64,
+    /// Last-modified time of the snapshot directory, used to prune oldest-first
+    /// regardless of the (user-chosen) name.
+    pub modified: Option<std::time::SystemTime>,
 }
 
 /// Metadata stored alongside a snapshot template.
@@ -59,7 +62,9 @@ impl TemplateMeta {
 pub struct SnapshotManager {
     /// Directory where templates are stored (e.g., `~/.abox/templates/`).
     template_dir: PathBuf,
-    /// Directory for runtime sockets.
+    /// Directory for runtime sockets. Retained for API stability and future
+    /// snapshot-runtime work; restore now goes through the VM manager.
+    #[allow(dead_code)]
     runtime_dir: PathBuf,
     /// Base state directory (e.g., `~/.abox`). Used to resolve VM binary paths.
     state_dir: PathBuf,
@@ -87,6 +92,7 @@ impl SnapshotManager {
         template_name: &str,
         virtiofs_sockets: HashMap<String, String>,
     ) -> Result<PathBuf> {
+        validate_template_name(template_name)?;
         let snap_dir = self.template_dir.join(template_name);
 
         if snap_dir.exists() {
@@ -125,63 +131,13 @@ impl SnapshotManager {
         Ok(snap_dir)
     }
 
-    /// Restore a VM from a snapshot template.
-    ///
-    /// Returns the API socket path of the new VM.
-    pub async fn restore_from_snapshot(
-        &self,
-        template_name: &str,
-        sandbox_id: &str,
-    ) -> Result<PathBuf> {
-        let snap_dir = self.template_dir.join(template_name);
-        if !snap_dir.exists() {
-            bail!("Template '{template_name}' not found");
-        }
-
-        let api_socket = self.runtime_dir.join(format!("ch-api-{sandbox_id}.sock"));
-
-        // Clean up stale socket
-        let _ = std::fs::remove_file(&api_socket);
-
-        // Start Cloud Hypervisor in restore mode
-        let _child = Command::new(self.resolve_binary("cloud-hypervisor")?)
-            .arg("--api-socket")
-            .arg(api_socket.display().to_string())
-            .arg("--restore")
-            .arg(format!("source_url=file://{}", snap_dir.display()))
-            .kill_on_drop(true)
-            .spawn()
-            .context("Failed to start cloud-hypervisor in restore mode")?;
-
-        // Wait for the API socket
-        let start = std::time::Instant::now();
-        loop {
-            if api_socket.exists() {
-                break;
-            }
-            if start.elapsed().as_millis() > 5000 {
-                bail!("Timed out waiting for restored VM API socket");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        // Resume the VM (it was paused when the snapshot was taken)
-        let status = Command::new(self.resolve_binary("ch-remote")?)
-            .arg("--api-socket")
-            .arg(api_socket.display().to_string())
-            .arg("resume")
-            .status()
-            .await
-            .context("Failed to resume restored VM")?;
-
-        if !status.success() {
-            bail!("Failed to resume VM from template '{template_name}'");
-        }
-
-        tracing::info!(template = template_name, sandbox_id, "VM restored from snapshot");
-
-        Ok(api_socket)
-    }
+    // NOTE: VM restore is intentionally NOT implemented here. A correct restore
+    // must recreate the snapshot's virtiofsd backends, keep the Cloud Hypervisor
+    // child process alive, and register the VM in the manager's state so it is
+    // visible to `abox list`/`attach`. All of that already exists in the VM
+    // manager's `start()` path (`StartMode::Restore`), which `abox run
+    // --template` uses. `abox snapshot restore` therefore goes through the
+    // orchestrator rather than a second, divergent implementation here.
 
     /// List all available templates.
     pub fn list_templates(&self) -> Result<Vec<TemplateInfo>> {
@@ -198,11 +154,10 @@ impl SnapshotManager {
             }
 
             let name = entry.file_name().to_str().unwrap_or_default().to_string();
-
-            // Calculate total size of the snapshot directory
             let size_bytes = dir_size(&entry.path()).unwrap_or(0);
+            let modified = entry.metadata().and_then(|m| m.modified()).ok();
 
-            templates.push(TemplateInfo { name, path: entry.path(), size_bytes });
+            templates.push(TemplateInfo { name, path: entry.path(), size_bytes, modified });
         }
 
         templates.sort_by(|a, b| a.name.cmp(&b.name));
@@ -211,6 +166,7 @@ impl SnapshotManager {
 
     /// Delete a template.
     pub fn delete_template(&self, name: &str) -> Result<()> {
+        validate_template_name(name)?;
         let path = self.template_dir.join(name);
         if !path.exists() {
             bail!("Template '{name}' not found");
@@ -221,8 +177,17 @@ impl SnapshotManager {
     }
 }
 
+/// Validate a snapshot/template name before using it as a path component.
+///
+/// Names are joined onto `template_dir`; without this a name like
+/// `../../etc/foo` would let create/delete escape the templates directory.
+pub fn validate_template_name(name: &str) -> Result<()> {
+    crate::util::validate_resource_name(name)
+        .map_err(|e| anyhow::anyhow!("Invalid snapshot name: {e}"))
+}
+
 /// Recursively compute the size of a directory.
-fn dir_size(path: &Path) -> Result<u64> {
+pub fn dir_size(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
@@ -275,6 +240,26 @@ mod tests {
         .unwrap();
         let list = mgr.list_templates().unwrap();
         assert!(list.is_empty());
+    }
+
+    #[test]
+    fn validate_template_name_rejects_traversal() {
+        assert!(validate_template_name("../../etc/passwd").is_err());
+        assert!(validate_template_name("a/b").is_err());
+        assert!(validate_template_name("good-name_1").is_ok());
+    }
+
+    #[test]
+    fn delete_template_rejects_traversal_name() {
+        let tdir = tempfile::tempdir().unwrap();
+        let rdir = tempfile::tempdir().unwrap();
+        let mgr = SnapshotManager::new(
+            tdir.path().to_path_buf(),
+            rdir.path().to_path_buf(),
+            tdir.path().to_path_buf(),
+        )
+        .unwrap();
+        assert!(mgr.delete_template("../escape").is_err());
     }
 
     #[test]

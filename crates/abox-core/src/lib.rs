@@ -15,6 +15,7 @@
 //! - **Orchestration** happens in [`sandbox::SandboxOrchestrator`]
 
 pub mod adapters;
+pub mod audit;
 pub mod binary_resolve;
 pub mod boot_meta;
 pub mod ca;
@@ -22,11 +23,13 @@ pub mod config;
 pub mod console;
 pub mod egress;
 pub mod error;
+pub mod mcp_oauth;
 pub mod policy;
 pub mod project;
 pub mod protocol;
 pub mod proxy_bridge;
 pub mod sandbox;
+pub mod services;
 pub mod snapshot;
 pub mod util;
 pub mod vm;

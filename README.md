@@ -103,6 +103,8 @@ curl -fsSL https://raw.githubusercontent.com/X-McKay/abox/main/scripts/install.s
   what every component does and why
 - [`docs/vm-setup.md`](docs/vm-setup.md) — VM stack installation +
   troubleshooting
+- [`docs/audit-log.md`](docs/audit-log.md) — audit log format, verification,
+  and tamper-evidence threat model
 - [`docs/decisions/`](docs/decisions/) — architecture decision records
 - [`docs/future-work.md`](docs/future-work.md) — forward-looking
   roadmap; what's next and why
@@ -229,6 +231,63 @@ namespace sandbox.
    #
    # See docs/explainer.md Section 8 and docs/credential-scoping.md.
    ```
+
+13. **Grant transparent credential injection for a service:**
+   ```bash
+   abox grant providers                 # list built-in shortcuts
+   abox grant add openai                # inject $OPENAI_API_KEY into api.openai.com
+   abox grant add my-svc --domain api.my.com --header Authorization --env MY_TOKEN
+   abox grant list                      # show configured grants (incl. path rules)
+   abox grant remove openai
+   ```
+   The agent only ever sees a placeholder — the real token is injected by the
+   host proxy into outbound HTTPS and never enters the VM.
+
+14. **Authorize an MCP server over OAuth (PKCE + state, refresh supported):**
+   ```bash
+   abox grant mcp auth https://mcp.example.com --client-id <id> --scopes "read write"
+   abox grant mcp list
+   abox grant mcp refresh example-com    # use the stored refresh token
+   abox grant mcp remove example-com
+   ```
+   Tokens are stored under `~/.abox/mcp-tokens/<name>.json` with `0600`
+   permissions.
+
+15. **Ephemeral service sidecars (Postgres/Redis/Ollama/MySQL):**
+   ```toml
+   # .abox/project.toml
+   [services]
+   postgres = { version = "17" }
+   redis = { version = "7" }
+   ollama = { models = ["qwen2.5-coder:7b"] }
+   ```
+   ```bash
+   abox services available              # list supported services
+   abox services show                   # show this repo's configured services
+   abox run --task feat -- claude       # starts services, injects ABOX_*_URL,
+                                        # bridges them into the guest, tears down on exit
+   ```
+   Requires Docker on the host. The connection URL is injected as an env var
+   (e.g. `ABOX_POSTGRES_URL`) reachable from inside the guest.
+
+16. **Snapshot a running sandbox and restore it later:**
+   ```bash
+   abox snapshot create --name wip --from fix-auth
+   abox snapshot list                   # names, sizes, total disk usage
+   abox snapshot restore wip --as fix-auth-2
+   abox snapshot prune --keep 5         # delete oldest, keep 5 most recent
+   abox snapshot delete wip
+   ```
+
+17. **Inspect and verify the tamper-evident audit log:**
+   ```bash
+   abox audit show -n 50                # recent proxied CLI/egress requests
+   abox audit show --sandbox fix-auth --request-type egress
+   abox audit verify                    # check the keyed hash chain + tip
+   ```
+   The chain is HMAC-keyed with a host-only key (`~/.abox/logs/audit.key`,
+   `0600`) so a sandboxed agent cannot forge it, and truncation is detected via
+   a persisted chain tip. See `docs/audit-log.md` for the threat model.
 
 For profile-backed repo environments:
 

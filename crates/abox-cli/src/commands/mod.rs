@@ -1,14 +1,19 @@
 pub mod attach;
+pub mod audit;
 pub mod ca;
 pub mod capabilities;
 pub mod divergence;
 pub mod doctor;
 pub mod env;
+pub mod grant;
+pub mod grant_mcp;
 pub mod init;
 pub mod list;
 pub mod merge;
 pub mod project;
 pub mod run;
+pub mod services;
+pub mod snapshot;
 pub mod stop;
 pub mod template;
 

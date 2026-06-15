@@ -25,6 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 regex.workspace = true
 chrono.workspace = true
+sha2 = "0.10"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
@@ -35,6 +36,9 @@ tokio-rustls = "0.26"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 [lints]
 workspace = true

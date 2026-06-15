@@ -23,7 +23,9 @@ chrono.workspace = true
 dirs.workspace = true
 git2 = "0.20"
 sha2 = "0.10"
+getrandom = "0.2"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+reqwest = { version = "0.12", features = ["json"] }
 time = "0.3"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -33,6 +35,7 @@ rustls = "0.23"
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
+rustix = { version = "1", features = ["fs"] }
 
 [lints]
 workspace = true

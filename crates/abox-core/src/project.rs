@@ -189,6 +189,17 @@ pub struct EnvironmentConfig {
     /// Optional additional files that influence environment freshness.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watch: Vec<PathBuf>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    ///
+    /// Use this to prevent platform-specific dependency directories (e.g.
+    /// `node_modules`, `.venv`, `target`) from leaking from a macOS host into
+    /// the Linux guest. Each excluded path receives an empty tmpfs mount so
+    /// the guest sees a clean directory; the host copy is untouched.
+    ///
+    /// Paths must be relative to the workspace root, must not start with `/`
+    /// or `..`, and must not overlap with each other.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mount_excludes: Vec<String>,
 }
 
 /// Optional agent defaults.
@@ -216,6 +227,22 @@ pub struct ProjectConfig {
     /// Optional agent defaults.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
+    /// Optional ephemeral service sidecars (postgres, redis, ollama).
+    ///
+    /// Services are started as Docker containers on the host before the
+    /// sandbox VM boots. Connection URLs are injected as environment
+    /// variables (ABOX_POSTGRES_URL, ABOX_REDIS_URL, ABOX_OLLAMA_URL).
+    /// All services are stopped and removed when the sandbox exits.
+    ///
+    /// Example:
+    /// ```toml
+    /// [services]
+    /// postgres = { version = "17" }
+    /// redis = { version = "7" }
+    /// ollama = { models = ["qwen2.5-coder:7b"] }
+    /// ```
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub services: std::collections::HashMap<String, crate::services::ServiceConfig>,
 }
 
 /// The normalized scoped network input used by policy compilation.
@@ -256,6 +283,8 @@ pub struct ResolvedProjectConfig {
     pub default_prompt_path: Option<PathBuf>,
     /// Immutable bytes loaded during resolution for trust and later staging.
     pub default_prompt_bytes: Option<Vec<u8>>,
+    /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
+    pub mount_excludes: Vec<String>,
     /// Human-readable normalization notes.
     pub notes: Vec<String>,
     /// Current approval fingerprint for this repo-owned behavior.
@@ -381,6 +410,8 @@ impl ProjectConfig {
             }
         }
         let watch_paths = infer_watch_paths(self.environment.as_ref(), &caches);
+        let mount_excludes =
+            self.environment.as_ref().map(|env| env.mount_excludes.clone()).unwrap_or_default();
 
         let default_prompt_path =
             self.agent.as_ref().and_then(|agent| agent.default_prompt_file.clone());
@@ -418,6 +449,7 @@ impl ProjectConfig {
             watch_paths,
             default_prompt_path,
             default_prompt_bytes,
+            mount_excludes,
             notes,
             approval_fingerprint,
         })
@@ -499,6 +531,10 @@ impl ProjectConfig {
             if let Some(prompt_file) = &agent.default_prompt_file {
                 ensure_repo_owned_path(repo_root, prompt_file, "agent.default_prompt_file", true)?;
             }
+        }
+
+        if let Some(environment) = &self.environment {
+            validate_mount_excludes(&environment.mount_excludes)?;
         }
 
         Ok(())
@@ -1069,6 +1105,54 @@ fn infer_watch_paths(environment: Option<&EnvironmentConfig>, caches: &[String])
     paths.into_iter().collect()
 }
 
+/// Validate that mount exclusion paths are safe relative paths.
+///
+/// Rules:
+/// - Must not be empty
+/// - Must not start with `/` or `..`
+/// - Must not overlap with each other (neither is a prefix of the other)
+fn validate_mount_excludes(excludes: &[String]) -> Result<()> {
+    for path in excludes {
+        if path.is_empty() {
+            anyhow::bail!("environment.mount_excludes: empty path is not allowed");
+        }
+        if path.starts_with('/') {
+            anyhow::bail!(
+                "environment.mount_excludes: path {path:?} must be relative (no leading '/')"
+            );
+        }
+        if path.starts_with("..") {
+            anyhow::bail!(
+                "environment.mount_excludes: path {path:?} must not escape the workspace (no '..')"
+            );
+        }
+        if path.contains("/../") || path.ends_with("/..") {
+            anyhow::bail!(
+                "environment.mount_excludes: path {path:?} must not escape the workspace (no '..')"
+            );
+        }
+    }
+
+    // Check for overlapping paths (one is a prefix of another)
+    for (i, a) in excludes.iter().enumerate() {
+        for (j, b) in excludes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let a_prefix = format!("{a}/");
+            let b_prefix = format!("{b}/");
+            if b.starts_with(&a_prefix) || a.starts_with(&b_prefix) {
+                anyhow::bail!(
+                    "environment.mount_excludes: paths {a:?} and {b:?} overlap; \
+                     one is a prefix of the other"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_rust_profile_repo_compatibility(repo_root: &Path) -> Result<()> {
     let cargo_toml = repo_root.join("Cargo.toml");
     if cargo_toml.exists() {
@@ -1293,6 +1377,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1310,6 +1395,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         config.validate(Path::new(".")).unwrap();
@@ -1335,6 +1421,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1351,8 +1438,10 @@ mod tests {
                 caches: vec!["cargo".into()],
                 prepare: None,
                 watch: vec![],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1376,8 +1465,10 @@ mod tests {
                 caches: vec!["cargo".into()],
                 prepare: None,
                 watch: vec![],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1402,8 +1493,10 @@ mod tests {
                 caches: vec!["cargo".into()],
                 prepare: None,
                 watch: vec![],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1421,6 +1514,7 @@ mod tests {
             },
             environment: None,
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let temp = tempdir().unwrap();
@@ -1506,6 +1600,7 @@ mod tests {
             agent: Some(AgentConfig {
                 default_prompt_file: Some(PathBuf::from(".abox/prompt.md")),
             }),
+            services: std::collections::HashMap::new(),
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -1531,6 +1626,7 @@ mod tests {
             agent: Some(AgentConfig {
                 default_prompt_file: Some(PathBuf::from("../outside-secret.txt")),
             }),
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(&repo_root).expect_err("prompt path should be rejected");
@@ -1558,8 +1654,10 @@ mod tests {
                     caches: vec!["npm".into()],
                     prepare: Some(PathBuf::from(".abox/prepare.sh")),
                     watch: vec![],
+                    mount_excludes: Vec::new(),
                 }),
                 agent: None,
+                services: std::collections::HashMap::new(),
             };
 
             let err = config.validate(&repo_root).expect_err("symlink escape should be rejected");
@@ -1581,8 +1679,10 @@ mod tests {
                 caches: vec!["npm".into()],
                 prepare: None,
                 watch: vec![PathBuf::from("../outside-lock.json")],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
 
         let err = config.validate(&repo_root).expect_err("watch escape should be rejected");
@@ -1607,8 +1707,10 @@ mod tests {
                 caches: vec!["npm".into()],
                 prepare: Some(PathBuf::from(".abox/prepare.sh")),
                 watch: vec![PathBuf::from("package-lock.json")],
+                mount_excludes: Vec::new(),
             }),
             agent: None,
+            services: std::collections::HashMap::new(),
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -1638,6 +1740,7 @@ mod tests {
             watch_paths: vec![],
             default_prompt_path: None,
             default_prompt_bytes: None,
+            mount_excludes: vec![],
             notes: vec![],
             approval_fingerprint: "abc".into(),
         };
