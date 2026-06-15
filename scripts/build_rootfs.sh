@@ -130,15 +130,21 @@ host_mode() {
 # $stamp, $ABOX_PROFILE, $SHIM_BIN, $GUEST_INIT, $SCRIPT_DIR, $packages,
 # $BUILDER_DOCKERFILE.
 stage_abox_into() {
-    echo "  installing Claude Code and Codex CLIs..."
-    local npm_prefix="$stage/usr/local"
-    mkdir -p "$npm_prefix/lib" "$npm_prefix/bin"
-    # `--loglevel=error` suppresses npm progress noise but keeps full error
-    # output, so a failed install (e.g. a network error) is fully visible in
-    # the build log rather than truncated by a `tail`.
-    npm install --global --prefix "$npm_prefix" \
-        @anthropic-ai/claude-code@2.1.177 @openai/codex@0.139.0 --loglevel=error
-    find "$npm_prefix/bin" -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +
+    # musl profiles install the agent CLIs here with the Alpine builder's npm.
+    # glibc profiles bake them into the Debian base (with the glibc npm) so the
+    # per-platform native/vendored binaries match the guest libc — see
+    # scripts/glibc/<profile>.Dockerfile. Keep the pinned versions in sync.
+    if [[ "$(profile_libc)" == "musl" ]]; then
+        echo "  installing Claude Code and Codex CLIs..."
+        local npm_prefix="$stage/usr/local"
+        mkdir -p "$npm_prefix/lib" "$npm_prefix/bin"
+        # `--loglevel=error` suppresses npm progress noise but keeps full error
+        # output, so a failed install (e.g. a network error) is fully visible in
+        # the build log rather than truncated by a `tail`.
+        npm install --global --prefix "$npm_prefix" \
+            @anthropic-ai/claude-code@2.1.177 @openai/codex@0.139.0 --loglevel=error
+        find "$npm_prefix/bin" -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +
+    fi
 
     echo "  building system CA trust bundle..."
     mkdir -p "$stage/etc/ssl/certs"
@@ -245,7 +251,7 @@ inner_mode() {
         local base_tar="$ABOX_VM_DIR/${ABOX_PROFILE}-rootfs.tar.gz"
         ensure_file "$base_tar" "glibc base tarball for $ABOX_PROFILE"
         echo "  staging Debian/glibc base for '$ABOX_PROFILE'..."
-        tar -xzf "$base_tar" -C "$stage"
+        tar --numeric-owner -xzf "$base_tar" -C "$stage"
         echo "  creating abox user (uid=1000)..."
         chroot "$stage" /bin/sh -c '
             groupadd -g 1000 abox
@@ -258,7 +264,7 @@ inner_mode() {
     else
         # ── musl (Alpine) branch — existing code, moved here UNCHANGED ──
         echo "  staging Alpine miniroot..."
-        tar -xzf "$ABOX_VM_DIR/alpine-minirootfs.tar.gz" -C "$stage"
+        tar --numeric-owner -xzf "$ABOX_VM_DIR/alpine-minirootfs.tar.gz" -C "$stage"
 
         echo "  installing guest packages via apk for profile '$ABOX_PROFILE'..."
         packages=(bash nodejs npm python3 su-exec ca-certificates gcompat socat)

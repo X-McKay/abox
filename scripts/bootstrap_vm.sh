@@ -298,6 +298,14 @@ produce_glibc_base() {
         echo "  glibc base for '$profile' is up to date (cached)"
         return
     fi
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "ERROR: 'docker' is required to build the '$profile' (glibc) base, but was not found in PATH." >&2
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "ERROR: the Docker daemon is not running or not accessible (needed to build the '$profile' glibc base)." >&2
+        exit 1
+    fi
     echo "  building glibc base for '$profile' via Docker..."
     local tag="abox-rootfs-${profile}:$(printf '%s' "$want" | cut -c1-16)"
     docker build -f "$dockerfile" -t "$tag" "$REPO_ROOT/scripts/glibc"

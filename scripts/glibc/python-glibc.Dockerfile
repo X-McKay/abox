@@ -39,3 +39,17 @@ RUN set -eux; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /var/log/*; \
     find / -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+
+# Agent CLIs (Claude Code + Codex) — installed here with the Debian/glibc npm so
+# their per-platform native/vendored binaries are glibc-linked, NOT the musl
+# variants the Alpine rootfs-builder would select. The musl profiles install
+# these in scripts/build_rootfs.sh; these versions MUST stay in sync with it.
+ARG CLAUDE_VERSION=2.1.177
+ARG CODEX_VERSION=0.139.0
+RUN set -eux; \
+    npm install --global --prefix /usr/local \
+        "@anthropic-ai/claude-code@${CLAUDE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
+        --loglevel=error; \
+    find /usr/local/bin -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +; \
+    npm cache clean --force 2>/dev/null || true; \
+    rm -rf /root/.npm
