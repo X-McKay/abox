@@ -210,6 +210,84 @@ pub async fn serve_service_bridge(socket_path: PathBuf, host_port: u16) -> Resul
     }
 }
 
+/// A planned host-port bridge with its allocated vsock port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostPortPlan {
+    pub guest_port: u16,
+    pub host_port: u16,
+    pub vsock_port: u32,
+}
+
+impl HostPortPlan {
+    /// Project to the guest-visible bridge line written into `/abox-meta/services`.
+    pub fn guest(&self) -> GuestServiceBridge {
+        GuestServiceBridge {
+            name: format!("hostport-{}", self.host_port),
+            guest_port: self.guest_port,
+            vsock_port: self.vsock_port,
+        }
+    }
+}
+
+/// Plan host-port bridges, allocating vsock ports immediately after the
+/// `service_count` sidecar bridges so the two ranges never collide.
+pub fn plan_host_port_bridges(
+    bridges: &[HostPortBridge],
+    service_count: usize,
+) -> Vec<HostPortPlan> {
+    bridges
+        .iter()
+        .enumerate()
+        .map(|(i, b)| HostPortPlan {
+            guest_port: b.guest,
+            host_port: b.host,
+            vsock_port: SERVICE_VSOCK_BASE + (service_count + i) as u32,
+        })
+        .collect()
+}
+
+/// Like [`serve_service_bridge`], but for an operator-declared host port:
+/// logs an audit entry at setup and on every accepted connection, since this
+/// bypasses the egress proxy and is a deliberate boundary exception.
+pub async fn serve_host_port_bridge(
+    socket_path: PathBuf,
+    guest_port: u16,
+    host_port: u16,
+    sandbox_id: String,
+    audit: std::sync::Arc<dyn crate::proxy_bridge::AuditSink>,
+) -> Result<()> {
+    use tokio::net::{TcpStream, UnixListener};
+
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("Binding host-port bridge socket {}", socket_path.display()))?;
+    audit.log_host_port(&sandbox_id, "host-port-bridge", guest_port, host_port);
+    tracing::info!(socket = %socket_path.display(), guest_port, host_port, "Host-port bridge listening");
+
+    loop {
+        let (mut guest, _) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "Host-port bridge accept error");
+                continue;
+            }
+        };
+        audit.log_host_port(&sandbox_id, "host-port-connect", guest_port, host_port);
+        tokio::spawn(async move {
+            match TcpStream::connect(("127.0.0.1", host_port)).await {
+                Ok(mut upstream) => {
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut guest, &mut upstream).await {
+                        tracing::debug!(error = %e, host_port, "Host-port bridge copy ended");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, host_port, "Host-port bridge could not reach host service");
+                }
+            }
+        });
+    }
+}
+
 /// Built-in service definitions.
 #[derive(Debug, Clone)]
 pub struct ServiceDef {
@@ -609,6 +687,20 @@ mod tests {
         assert_eq!(bridge.vsock_port, SERVICE_VSOCK_BASE);
         assert_eq!(bridge.guest_url, "postgresql://abox:pw@127.0.0.1:5432/abox");
         assert_eq!(bridge.guest().vsock_port, SERVICE_VSOCK_BASE);
+    }
+
+    #[test]
+    fn host_port_plans_allocate_vsock_after_services() {
+        let cfg = vec![
+            HostPortBridge { guest: 4000, host: 4000 },
+            HostPortBridge { guest: 8080, host: 9000 },
+        ];
+        // Two sidecar services already occupy SERVICE_VSOCK_BASE + 0..=1.
+        let plans = plan_host_port_bridges(&cfg, 2);
+        assert_eq!(plans[0].vsock_port, SERVICE_VSOCK_BASE + 2);
+        assert_eq!(plans[1].vsock_port, SERVICE_VSOCK_BASE + 3);
+        assert_eq!(plans[0].guest().name, "hostport-4000");
+        assert_eq!(plans[1].guest().guest_port, 8080);
     }
 
     #[tokio::test]

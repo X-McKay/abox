@@ -390,6 +390,25 @@ impl AuditChainWriter {
         self.append("egress", sandbox_id, domain, "", decision, status_code);
     }
 
+    /// Log a host-port bridge event (`host-port-bridge` at setup,
+    /// `host-port-connect` per connection). Target encodes the port mapping.
+    pub fn log_host_port(
+        &self,
+        sandbox_id: &str,
+        event: &str,
+        guest_port: u16,
+        host_port: u16,
+    ) {
+        self.append(
+            event,
+            sandbox_id,
+            &format!("guest:{guest_port}->host:{host_port}"),
+            "",
+            "allowed",
+            0,
+        );
+    }
+
     fn append(
         &self,
         request_type: &str,
