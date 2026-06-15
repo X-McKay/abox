@@ -98,7 +98,7 @@ Usage: $(basename "$0") [--no-symlink] [--yes] [--profile <name>] [--from-bundle
                         Honored from the BOOTSTRAP_YES=1 environment variable too.
   --profile <name>      Build an additional official guest profile image.
                         Repeat to add more profiles. Supported values:
-                        base, node, python, rust.
+                        base, node, python, python-glibc, rust.
   --from-bundle <path>  Restore VM assets from a pre-built tarball instead of
                         downloading components individually. The tarball should
                         be an abox-vm-assets-*.tar.gz from a GitHub release.
