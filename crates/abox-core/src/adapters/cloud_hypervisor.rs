@@ -46,6 +46,33 @@ fn workspace_virtiofsd_args(
     ]
 }
 
+/// Stage arbitrary host input files read-only under `<meta_dir>/inputs/`.
+///
+/// Each `guest_name` is a validated single path component (see the CLI), so
+/// `join` cannot escape the inputs directory. Files are copied at mode `0444`.
+fn stage_input_files(
+    meta_dir: &std::path::Path,
+    input_files: &[crate::vm::InputFile],
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    if input_files.is_empty() {
+        return Ok(());
+    }
+    let inputs_dir = meta_dir.join("inputs");
+    std::fs::create_dir_all(&inputs_dir)
+        .with_context(|| format!("Creating inputs dir {}", inputs_dir.display()))?;
+    for f in input_files {
+        let dest = inputs_dir.join(&f.guest_name);
+        std::fs::copy(&f.host_path, &dest).with_context(|| {
+            format!("Staging input file {} -> {}", f.host_path.display(), dest.display())
+        })?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o444))
+            .with_context(|| format!("Setting input file read-only: {}", dest.display()))?;
+    }
+    Ok(())
+}
+
 /// Build the virtiofsd argument list for the read-only meta and status shares.
 ///
 /// These shares do not require UID/GID remapping (they are accessed by the
@@ -299,6 +326,8 @@ impl VmPort for CloudHypervisorAdapter {
                 format!("Failed to write mount-excludes to {}", excludes_path.display())
             })?;
         }
+
+        stage_input_files(&meta_dir, &config.input_files)?;
 
         // Stage the services file so guest/init.sh can bridge guest loopback
         // ports to host service containers over vsock. Each line is
@@ -811,5 +840,29 @@ mod tests {
             !args.iter().any(|a| a.starts_with("--gid-map")),
             "auxiliary virtiofsd must NOT include --gid-map; got: {args:?}"
         );
+    }
+
+    #[test]
+    fn stage_input_files_copies_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("abox-inputs-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let meta_dir = tmp.join("meta");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let host = src_dir.join("payload.json");
+        std::fs::write(&host, b"{\"k\":1}").unwrap();
+
+        let files = vec![crate::vm::InputFile {
+            host_path: host.clone(),
+            guest_name: "payload.json".to_string(),
+        }];
+        super::stage_input_files(&meta_dir, &files).unwrap();
+
+        let dest = meta_dir.join("inputs").join("payload.json");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"{\"k\":1}");
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o444);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

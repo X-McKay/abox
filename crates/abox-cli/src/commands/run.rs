@@ -334,6 +334,47 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     let mut env_vars: Vec<(String, String)> =
         args.env_vars.iter().map(|s| parse_env_var(s)).collect::<Result<Vec<_>>>()?;
 
+    // Resolve --input-file specs, validate they exist and are within the size
+    // budget, and expose them to any command via /abox-meta/inputs.
+    const MAX_INPUT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_INPUT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+    let input_specs: Vec<InputFileSpec> =
+        args.input_files.iter().map(|s| parse_input_file_arg(s)).collect::<Result<_>>()?;
+    let mut input_total: u64 = 0;
+    let mut input_files: Vec<abox_core::vm::InputFile> = Vec::with_capacity(input_specs.len());
+    for spec in &input_specs {
+        let meta = std::fs::metadata(&spec.host_path).with_context(|| {
+            format!("--input-file: cannot read host file {}", spec.host_path.display())
+        })?;
+        if meta.len() > MAX_INPUT_FILE_BYTES {
+            anyhow::bail!(
+                "--input-file {}: {} bytes exceeds the {} byte per-file limit",
+                spec.host_path.display(),
+                meta.len(),
+                MAX_INPUT_FILE_BYTES
+            );
+        }
+        input_total += meta.len();
+        if input_total > MAX_INPUT_TOTAL_BYTES {
+            anyhow::bail!(
+                "--input-file: total staged input exceeds the {MAX_INPUT_TOTAL_BYTES} byte limit"
+            );
+        }
+        input_files.push(abox_core::vm::InputFile {
+            host_path: spec.host_path.clone(),
+            guest_name: spec.guest_name.clone(),
+        });
+    }
+    if !input_files.is_empty() {
+        env_vars.push(("ABOX_INPUT_DIR".to_string(), "/abox-meta/inputs".to_string()));
+        if let [only] = input_files.as_slice() {
+            env_vars.push((
+                "ABOX_INPUT_FILE".to_string(),
+                format!("/abox-meta/inputs/{}", only.guest_name),
+            ));
+        }
+    }
+
     ensure_managed_agent_ready(&args.command, orchestrator.config())?;
 
     let requested_network = args.network.map(Into::into);
@@ -434,7 +475,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
             .as_ref()
             .map_or_else(Vec::new, |resolved| resolved.mount_excludes.clone()),
         service_bridges,
-        input_files: Vec::new(),
+        input_files,
     };
 
     println!("Sandbox '{}' starting...", args.task);
