@@ -192,6 +192,8 @@ pub async fn serve_service_bridge(socket_path: PathBuf, host_port: u16) -> Resul
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(error = %e, "Service bridge accept error");
+                // Back off so a persistent error (e.g. EMFILE) doesn't spin the CPU.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -269,6 +271,8 @@ pub async fn serve_host_port_bridge(
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(error = %e, "Host-port bridge accept error");
+                // Back off so a persistent error (e.g. EMFILE) doesn't spin the CPU.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };

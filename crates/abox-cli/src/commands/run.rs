@@ -363,6 +363,13 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         let meta = std::fs::metadata(&spec.host_path).with_context(|| {
             format!("--input-file: cannot read host file {}", spec.host_path.display())
         })?;
+        if !meta.is_file() {
+            anyhow::bail!(
+                "--input-file {}: not a regular file (directories and special files \
+                 cannot be staged)",
+                spec.host_path.display()
+            );
+        }
         if meta.len() > MAX_INPUT_FILE_BYTES {
             anyhow::bail!(
                 "--input-file {}: {} bytes exceeds the {} byte per-file limit",
@@ -480,6 +487,19 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         args.template.as_deref(),
         &mut env_vars,
     )?;
+    // A template restore resumes an already-booted VM and does not re-run
+    // guest/init.sh, so newly staged `/abox-meta/services` host-port lines are
+    // never read and the in-guest listener is never created. Reject the combo
+    // (mirrors how service sidecars reject `--template`) rather than starting a
+    // host listener that silently goes nowhere.
+    if args.template.is_some() && !project_host_ports.is_empty() {
+        anyhow::bail!(
+            "[[host_ports]] is not supported with --template restores.\n\
+             A restored VM does not re-run guest init, so the in-guest port \
+             listener is never created. Remove --template for this run, or remove \
+             [[host_ports]] from .abox/project.toml."
+        );
+    }
     let host_port_bridges =
         abox_core::services::plan_host_port_bridges(&project_host_ports, service_bridges.len());
 

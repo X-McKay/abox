@@ -112,11 +112,23 @@ fn forward_virtiofsd_stderr(mut child: Child, label: &'static str) -> Child {
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if is_benign_virtiofsd_credential_noise(&line) {
-                    tracing::debug!(target: "virtiofsd", instance = label, "{line}");
-                } else {
-                    tracing::warn!(target: "virtiofsd", instance = label, "{line}");
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if is_benign_virtiofsd_credential_noise(&line) {
+                            tracing::debug!(target: "virtiofsd", instance = label, "{line}");
+                        } else {
+                            tracing::warn!(target: "virtiofsd", instance = label, "{line}");
+                        }
+                    }
+                    Ok(None) => break,
+                    // A read error here is almost always the pipe closing as the
+                    // child exits (including kill_on_drop at teardown), so log at
+                    // debug rather than surfacing a spurious error on every run.
+                    Err(e) => {
+                        tracing::debug!(target: "virtiofsd", instance = label, error = %e, "stderr read ended");
+                        break;
+                    }
                 }
             }
         });
