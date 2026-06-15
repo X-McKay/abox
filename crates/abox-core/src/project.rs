@@ -243,6 +243,11 @@ pub struct ProjectConfig {
     /// ```
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub services: std::collections::HashMap<String, crate::services::ServiceConfig>,
+    /// Repo-declared host-port bridges. Each splices a guest loopback port to
+    /// an existing host loopback service. Refused in `safe` network mode and
+    /// audited per connection — an explicit egress-boundary exception.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_ports: Vec<crate::services::HostPortBridge>,
 }
 
 /// The normalized scoped network input used by policy compilation.
@@ -265,6 +270,10 @@ pub struct ResolvedProjectConfig {
     pub project_id: String,
     /// The normalized default network mode from repo config.
     pub default_network_mode: NetworkMode,
+    /// Whether the repo declares any `[[host_ports]]` bridges. A declared
+    /// host-port bridge counts as a `scoped` addition, so a `scoped` config
+    /// whose only addition is a host-port bridge is not normalized to `safe`.
+    pub has_host_ports: bool,
     /// Scoped bundles declared by the repo.
     pub bundles: Vec<String>,
     /// Scoped exact hostnames declared by the repo.
@@ -378,6 +387,7 @@ impl ProjectConfig {
         if self.network.mode == NetworkMode::Scoped
             && self.network.bundles.is_empty()
             && self.network.domains.is_empty()
+            && self.host_ports.is_empty()
         {
             default_network_mode = NetworkMode::Safe;
             notes.push(
@@ -440,6 +450,7 @@ impl ProjectConfig {
             config_path,
             project_id,
             default_network_mode,
+            has_host_ports: !self.host_ports.is_empty(),
             bundles,
             domains,
             environment_profile,
@@ -537,6 +548,37 @@ impl ProjectConfig {
             validate_mount_excludes(&environment.mount_excludes)?;
         }
 
+        // Each host-port bridge becomes a guest-side socat TCP listener, so guest
+        // ports must be non-zero and unique across host-port bridges and the
+        // well-known ports of declared [services] sidecars — otherwise the
+        // in-guest listeners would collide at boot.
+        {
+            use std::collections::HashSet;
+            let mut guest_ports: HashSet<u16> = HashSet::new();
+            for name in self.services.keys() {
+                if let Some(def) = crate::services::find_service_def(name) {
+                    guest_ports.insert(def.default_port);
+                }
+            }
+            for hp in &self.host_ports {
+                if hp.guest == 0 || hp.host == 0 {
+                    anyhow::bail!(
+                        "[[host_ports]] entry has an invalid port 0 (guest = {}, host = {})",
+                        hp.guest,
+                        hp.host
+                    );
+                }
+                if !guest_ports.insert(hp.guest) {
+                    anyhow::bail!(
+                        "[[host_ports]] guest port {} is declared more than once (or collides \
+                         with a [services] sidecar port); each guest port maps to exactly one \
+                         in-guest listener",
+                        hp.guest
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -566,7 +608,9 @@ impl ResolvedProjectConfig {
                 NetworkScope { mode, bundles: self.bundles.clone(), domains: self.domains.clone() }
             }
         };
-        validate_network_scope(&scope)?;
+        // A declared host-port bridge is itself a reviewable `scoped` addition,
+        // so a scoped config whose only addition is a host-port bridge is valid.
+        validate_network_scope(&scope, self.has_host_ports)?;
         Ok(scope)
     }
 
@@ -734,7 +778,8 @@ pub fn starter_config_toml_with_profile(profile: Option<EnvironmentProfile>) -> 
 /// Build a network scope when no repo-local config exists.
 pub fn standalone_network_scope(mode: NetworkMode) -> Result<NetworkScope> {
     let scope = NetworkScope { mode, bundles: Vec::new(), domains: Vec::new() };
-    validate_network_scope(&scope)?;
+    // Standalone (no repo config) has no host-port bridges to count as an addition.
+    validate_network_scope(&scope, false)?;
     Ok(scope)
 }
 
@@ -938,7 +983,7 @@ pub fn bundle_description(bundle: &str) -> Option<&'static str> {
     bundle_spec(bundle).map(|spec| spec.description)
 }
 
-fn validate_network_scope(scope: &NetworkScope) -> Result<()> {
+fn validate_network_scope(scope: &NetworkScope, allow_empty_scoped: bool) -> Result<()> {
     for bundle in &scope.bundles {
         if bundle_hosts(bundle).is_none() {
             anyhow::bail!(
@@ -960,8 +1005,10 @@ fn validate_network_scope(scope: &NetworkScope) -> Result<()> {
             }
         }
         NetworkMode::Scoped => {
-            if scope.bundles.is_empty() && scope.domains.is_empty() {
-                anyhow::bail!("scoped mode requires at least one bundle or domain");
+            if scope.bundles.is_empty() && scope.domains.is_empty() && !allow_empty_scoped {
+                anyhow::bail!(
+                    "scoped mode requires at least one bundle, domain, or host-port bridge"
+                );
             }
         }
         NetworkMode::Open => {
@@ -1378,6 +1425,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1396,6 +1444,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         config.validate(Path::new(".")).unwrap();
@@ -1422,6 +1471,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1442,6 +1492,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1469,6 +1520,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1497,6 +1549,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1515,6 +1568,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let temp = tempdir().unwrap();
@@ -1601,6 +1655,7 @@ mod tests {
                 default_prompt_file: Some(PathBuf::from(".abox/prompt.md")),
             }),
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -1627,6 +1682,7 @@ mod tests {
                 default_prompt_file: Some(PathBuf::from("../outside-secret.txt")),
             }),
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(&repo_root).expect_err("prompt path should be rejected");
@@ -1658,6 +1714,7 @@ mod tests {
                 }),
                 agent: None,
                 services: std::collections::HashMap::new(),
+                host_ports: vec![],
             };
 
             let err = config.validate(&repo_root).expect_err("symlink escape should be rejected");
@@ -1683,6 +1740,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(&repo_root).expect_err("watch escape should be rejected");
@@ -1711,6 +1769,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -1731,6 +1790,7 @@ mod tests {
             config_path: PathBuf::from(".abox/project.toml"),
             project_id: "repo".into(),
             default_network_mode: NetworkMode::Safe,
+            has_host_ports: false,
             bundles: vec![],
             domains: vec![],
             environment_profile: EnvironmentProfile::Base,
@@ -1792,6 +1852,120 @@ mod tests {
             image_path_for_profile(&config, EnvironmentProfile::Python),
             temp.path().join("vm/profiles/python/rootfs.raw")
         );
+    }
+
+    #[test]
+    fn parses_host_ports_section() {
+        let toml = r"
+[[host_ports]]
+guest = 4000
+host = 4000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.host_ports.len(), 1);
+        assert_eq!(cfg.host_ports[0].guest, 4000);
+        assert_eq!(cfg.host_ports[0].host, 4000);
+    }
+
+    #[test]
+    fn rejects_duplicate_host_port_guest() {
+        let toml = r"
+[[host_ports]]
+guest = 4000
+host = 4000
+
+[[host_ports]]
+guest = 4000
+host = 5000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let err = cfg.validate(std::path::Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("4000"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_host_port_colliding_with_service() {
+        // postgres listens on its default guest port 5432; a host-port bridge
+        // declaring guest = 5432 would stage a second in-guest listener.
+        let toml = r"
+[services]
+postgres = { version = '17' }
+
+[[host_ports]]
+guest = 5432
+host = 9000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let err = cfg.validate(std::path::Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("5432"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_host_port_zero() {
+        let toml = r"
+[[host_ports]]
+guest = 0
+host = 4000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.validate(std::path::Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn scoped_with_only_host_ports_stays_scoped() {
+        // A scoped config whose only addition is a host-port bridge must NOT be
+        // normalized to safe, and must resolve to an effective scoped scope
+        // (otherwise the gated, version-controlled bridge would be unusable).
+        let toml = r"
+[network]
+mode = 'scoped'
+
+[[host_ports]]
+guest = 4000
+host = 4000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let tmp = tempdir().unwrap();
+        let cfg_path = ProjectConfig::default_path(tmp.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, toml).unwrap();
+
+        let resolved = cfg.resolve(tmp.path()).unwrap();
+        assert_eq!(resolved.default_network_mode, NetworkMode::Scoped);
+        assert!(resolved.has_host_ports);
+        let scope = resolved.effective_network_scope(None).unwrap();
+        assert_eq!(scope.mode, NetworkMode::Scoped);
+    }
+
+    #[test]
+    fn scoped_without_additions_still_normalizes_to_safe() {
+        let toml = r"
+[network]
+mode = 'scoped'
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let tmp = tempdir().unwrap();
+        let cfg_path = ProjectConfig::default_path(tmp.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, toml).unwrap();
+
+        let resolved = cfg.resolve(tmp.path()).unwrap();
+        assert_eq!(resolved.default_network_mode, NetworkMode::Safe);
+    }
+
+    #[test]
+    fn accepts_distinct_host_port_guests() {
+        let toml = r"
+[[host_ports]]
+guest = 4000
+host = 4000
+
+[[host_ports]]
+guest = 4001
+host = 5000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        cfg.validate(std::path::Path::new(".")).unwrap();
     }
 
     #[test]

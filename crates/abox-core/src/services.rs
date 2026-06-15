@@ -124,6 +124,20 @@ pub struct GuestServiceBridge {
     pub vsock_port: u32,
 }
 
+/// A repo-declared bridge from a guest loopback port to an existing host
+/// loopback service. Unlike `[services]` sidecars, abox launches nothing —
+/// it splices the guest port to a port the operator already runs on the host.
+///
+/// This is an explicit hole in the egress boundary: it is refused in `safe`
+/// network mode and every connection through it is written to the audit log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostPortBridge {
+    /// Port the agent connects to inside the guest (`127.0.0.1:<guest>`).
+    pub guest: u16,
+    /// Existing host loopback port to splice to (`127.0.0.1:<host>`).
+    pub host: u16,
+}
+
 impl ServiceBridge {
     /// Project the host-side bridge to the guest-visible subset.
     pub fn guest(&self) -> GuestServiceBridge {
@@ -178,6 +192,8 @@ pub async fn serve_service_bridge(socket_path: PathBuf, host_port: u16) -> Resul
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(error = %e, "Service bridge accept error");
+                // Back off so a persistent error (e.g. EMFILE) doesn't spin the CPU.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -190,6 +206,86 @@ pub async fn serve_service_bridge(socket_path: PathBuf, host_port: u16) -> Resul
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, host_port, "Service bridge could not reach container");
+                }
+            }
+        });
+    }
+}
+
+/// A planned host-port bridge with its allocated vsock port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostPortPlan {
+    pub guest_port: u16,
+    pub host_port: u16,
+    pub vsock_port: u32,
+}
+
+impl HostPortPlan {
+    /// Project to the guest-visible bridge line written into `/abox-meta/services`.
+    pub fn guest(&self) -> GuestServiceBridge {
+        GuestServiceBridge {
+            name: format!("hostport-{}", self.host_port),
+            guest_port: self.guest_port,
+            vsock_port: self.vsock_port,
+        }
+    }
+}
+
+/// Plan host-port bridges, allocating vsock ports immediately after the
+/// `service_count` sidecar bridges so the two ranges never collide.
+pub fn plan_host_port_bridges(
+    bridges: &[HostPortBridge],
+    service_count: usize,
+) -> Vec<HostPortPlan> {
+    bridges
+        .iter()
+        .enumerate()
+        .map(|(i, b)| HostPortPlan {
+            guest_port: b.guest,
+            host_port: b.host,
+            vsock_port: SERVICE_VSOCK_BASE + (service_count + i) as u32,
+        })
+        .collect()
+}
+
+/// Like [`serve_service_bridge`], but for an operator-declared host port:
+/// logs an audit entry at setup and on every accepted connection, since this
+/// bypasses the egress proxy and is a deliberate boundary exception.
+pub async fn serve_host_port_bridge(
+    socket_path: PathBuf,
+    guest_port: u16,
+    host_port: u16,
+    sandbox_id: String,
+    audit: std::sync::Arc<dyn crate::proxy_bridge::AuditSink>,
+) -> Result<()> {
+    use tokio::net::{TcpStream, UnixListener};
+
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("Binding host-port bridge socket {}", socket_path.display()))?;
+    audit.log_host_port(&sandbox_id, "host-port-bridge", guest_port, host_port);
+    tracing::info!(socket = %socket_path.display(), guest_port, host_port, "Host-port bridge listening");
+
+    loop {
+        let (mut guest, _) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "Host-port bridge accept error");
+                // Back off so a persistent error (e.g. EMFILE) doesn't spin the CPU.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        audit.log_host_port(&sandbox_id, "host-port-connect", guest_port, host_port);
+        tokio::spawn(async move {
+            match TcpStream::connect(("127.0.0.1", host_port)).await {
+                Ok(mut upstream) => {
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut guest, &mut upstream).await {
+                        tracing::debug!(error = %e, host_port, "Host-port bridge copy ended");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, host_port, "Host-port bridge could not reach host service");
                 }
             }
         });
@@ -597,6 +693,20 @@ mod tests {
         assert_eq!(bridge.guest().vsock_port, SERVICE_VSOCK_BASE);
     }
 
+    #[test]
+    fn host_port_plans_allocate_vsock_after_services() {
+        let cfg = vec![
+            HostPortBridge { guest: 4000, host: 4000 },
+            HostPortBridge { guest: 8080, host: 9000 },
+        ];
+        // Two sidecar services already occupy SERVICE_VSOCK_BASE + 0..=1.
+        let plans = plan_host_port_bridges(&cfg, 2);
+        assert_eq!(plans[0].vsock_port, SERVICE_VSOCK_BASE + 2);
+        assert_eq!(plans[1].vsock_port, SERVICE_VSOCK_BASE + 3);
+        assert_eq!(plans[0].guest().name, "hostport-4000");
+        assert_eq!(plans[1].guest().guest_port, 8080);
+    }
+
     #[tokio::test]
     async fn test_serve_service_bridge_forwards_bytes() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -633,5 +743,56 @@ mod tests {
         client.read_exact(&mut out).await.unwrap();
         assert_eq!(&out, b"hello");
         bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn host_port_bridge_audits_each_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A fake host service: a TCP echo server on the host loopback.
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host_port = upstream.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = upstream.accept().await {
+                let mut buf = [0u8; 5];
+                let _ = s.read_exact(&mut buf).await;
+                let _ = s.write_all(&buf).await; // echo
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("vsock-test.sock_5200");
+        let audit_path = dir.path().join("audit.jsonl");
+        let audit: std::sync::Arc<dyn crate::proxy_bridge::AuditSink> =
+            std::sync::Arc::new(crate::proxy_bridge::FileAuditSink::open(&audit_path).unwrap());
+
+        let sock2 = sock.clone();
+        let bridge = tokio::spawn(async move {
+            let _ = serve_host_port_bridge(sock2, 4000, host_port, "audit-task".to_string(), audit)
+                .await;
+        });
+
+        for _ in 0..100 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut out = [0u8; 5];
+        client.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"hello");
+
+        // The connect event is appended synchronously on accept (before
+        // forwarding); a short pause covers filesystem flush on slow CI.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        bridge.abort();
+
+        let log = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(log.contains("host-port-bridge"), "setup event missing:\n{log}");
+        assert!(log.contains("host-port-connect"), "per-connection event missing:\n{log}");
+        assert!(log.contains("guest:4000->host:"), "port mapping missing:\n{log}");
     }
 }

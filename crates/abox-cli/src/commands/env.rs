@@ -370,6 +370,8 @@ async fn warm_environment<W: WorkspacePort, V: VmPort>(
         mount_excludes: resolved.mount_excludes.clone(),
         // The warm/prepare flow does not use service sidecars.
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     };
 
     let exit_code = orchestrator.run_sandbox(params, policy, root_ca).await?;
@@ -808,6 +810,7 @@ mod tests {
             config_path: PathBuf::from(".abox/project.toml"),
             project_id: "repo".into(),
             default_network_mode: abox_core::project::NetworkMode::Safe,
+            has_host_ports: false,
             bundles: vec![],
             domains: vec![],
             environment_profile: EnvironmentProfile::Base,

@@ -65,13 +65,23 @@ pub struct RunArgs {
     #[arg(long, value_enum)]
     pub network: Option<RunNetworkMode>,
 
-    /// Inline prompt content for known managed agents.
+    /// Inline prompt content. Only known managed agents (claude, codex) can
+    /// consume a prompt; for any other `--` command use `--input-file` instead.
     #[arg(long, conflicts_with = "prompt_file")]
     pub prompt: Option<String>,
 
-    /// Load prompt content from a file on the host.
+    /// Load prompt content from a file on the host. Only known managed agents
+    /// (claude, codex) can consume it; for any other `--` command use
+    /// `--input-file` instead.
     #[arg(long, conflicts_with = "prompt")]
     pub prompt_file: Option<PathBuf>,
+
+    /// Stage an arbitrary host file into `/abox-meta/inputs/` (read-only) for
+    /// any `--` command. Format: `<hostpath>[:<guestname>]`. Repeatable.
+    /// The guest sees `ABOX_INPUT_DIR=/abox-meta/inputs`, plus
+    /// `ABOX_INPUT_FILE` when exactly one is given.
+    #[arg(long = "input-file")]
+    pub input_files: Vec<String>,
 
     /// Kill sandbox after N seconds (exit code 124, like GNU timeout).
     #[arg(long)]
@@ -124,6 +134,167 @@ fn parse_env_var(s: &str) -> Result<(String, String)> {
     validate_env_key(&key).map_err(|e| anyhow::anyhow!("--env {s:?}: {e}"))?;
 
     Ok((key, value))
+}
+
+/// A parsed `--input-file` argument: a host file plus the name it will take
+/// inside `/abox-meta/inputs/` in the guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputFileSpec {
+    host_path: PathBuf,
+    guest_name: String,
+}
+
+/// Validate a guest-side input file name. Must be a single safe path component
+/// so it cannot escape `/abox-meta/inputs/` or collide with reserved meta files.
+fn validate_guest_name(name: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." {
+        anyhow::bail!("{name:?} is not a valid file name");
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        anyhow::bail!("{name:?} may contain only ASCII letters, digits, '.', '_', '-'");
+    }
+    Ok(())
+}
+
+/// Parse `<hostpath>[:<guestname>]`. The guest name is taken after the last
+/// `:` when that suffix is a plain file name (no `/`); otherwise the whole
+/// string is the host path and the guest name is the host file's basename.
+///
+/// If a `:` is present and the suffix after it is non-empty but contains a
+/// `/`, it is treated as an invalid explicit guest name (path traversal attempt)
+/// rather than falling back to basename derivation.
+fn parse_input_file_arg(s: &str) -> Result<InputFileSpec> {
+    let (host_str, guest_name) = match s.rsplit_once(':') {
+        Some((host, name)) if !name.is_empty() && !name.contains('/') => {
+            (host.to_string(), name.to_string())
+        }
+        Some((_host, name)) if !name.is_empty() => {
+            // Non-empty suffix that contains '/' — reject immediately rather
+            // than silently deriving a basename, since the user clearly tried
+            // to specify a guest path and that is not allowed.
+            anyhow::bail!(
+                "--input-file {s:?}: guest name {name:?} must be a plain file name, not a path"
+            );
+        }
+        _ => {
+            let derived =
+                Path::new(s).file_name().and_then(|n| n.to_str()).map(str::to_string).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                            "--input-file {s:?}: cannot derive a guest file name; \
+                         specify one as <hostpath>:<name>"
+                        )
+                    },
+                )?;
+            (s.to_string(), derived)
+        }
+    };
+    validate_guest_name(&guest_name).map_err(|e| anyhow::anyhow!("--input-file {s:?}: {e}"))?;
+    Ok(InputFileSpec { host_path: PathBuf::from(host_str), guest_name })
+}
+
+/// Per-file and total size budget for staged `--input-file` inputs.
+const MAX_INPUT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_INPUT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Validate parsed `--input-file` specs (each must exist, be a regular file,
+/// stay within the size budget, and map to a unique guest name) and return the
+/// staged-file descriptors. Pure except for reading host file metadata.
+fn resolve_input_files(specs: &[InputFileSpec]) -> Result<Vec<abox_core::vm::InputFile>> {
+    let mut input_total: u64 = 0;
+    let mut input_files: Vec<abox_core::vm::InputFile> = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let meta = std::fs::metadata(&spec.host_path).with_context(|| {
+            format!("--input-file: cannot read host file {}", spec.host_path.display())
+        })?;
+        if !meta.is_file() {
+            anyhow::bail!(
+                "--input-file {}: not a regular file (directories and special files \
+                 cannot be staged)",
+                spec.host_path.display()
+            );
+        }
+        if meta.len() > MAX_INPUT_FILE_BYTES {
+            anyhow::bail!(
+                "--input-file {}: {} bytes exceeds the {} byte per-file limit",
+                spec.host_path.display(),
+                meta.len(),
+                MAX_INPUT_FILE_BYTES
+            );
+        }
+        input_total += meta.len();
+        if input_total > MAX_INPUT_TOTAL_BYTES {
+            anyhow::bail!(
+                "--input-file: total staged input exceeds the {MAX_INPUT_TOTAL_BYTES} byte limit"
+            );
+        }
+        if input_files.iter().any(|f| f.guest_name == spec.guest_name) {
+            anyhow::bail!(
+                "--input-file: two inputs both stage to /abox-meta/inputs/{}; \
+                 give one an explicit name as <hostpath>:<name>",
+                spec.guest_name
+            );
+        }
+        input_files.push(abox_core::vm::InputFile {
+            host_path: spec.host_path.clone(),
+            guest_name: spec.guest_name.clone(),
+        });
+    }
+    Ok(input_files)
+}
+
+/// The env vars that expose staged inputs to the in-guest command:
+/// `ABOX_INPUT_DIR` whenever any input is staged, plus `ABOX_INPUT_FILE`
+/// (the single staged path) only when exactly one input was given.
+fn input_file_env_vars(input_files: &[abox_core::vm::InputFile]) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    if input_files.is_empty() {
+        return vars;
+    }
+    vars.push(("ABOX_INPUT_DIR".to_string(), "/abox-meta/inputs".to_string()));
+    if let [only] = input_files {
+        vars.push((
+            "ABOX_INPUT_FILE".to_string(),
+            format!("/abox-meta/inputs/{}", only.guest_name),
+        ));
+    }
+    vars
+}
+
+/// Refuse a host-port bridge whose guest port collides with the in-guest HTTPS
+/// egress proxy listener. Both run as `socat TCP-LISTEN:<port>` inside the
+/// guest, so a collision would make one silently fail to bind.
+fn ensure_host_ports_no_egress_collision(
+    host_ports: &[abox_core::services::HostPortBridge],
+    egress_port: u16,
+) -> Result<()> {
+    if let Some(hp) = host_ports.iter().find(|hp| hp.guest == egress_port) {
+        anyhow::bail!(
+            "[[host_ports]] guest port {} collides with the in-guest HTTPS egress proxy \
+             listener (proxy.egress_port = {egress_port}); choose a different guest port.",
+            hp.guest
+        );
+    }
+    Ok(())
+}
+
+/// Refuse `[[host_ports]]` with a `--template` restore. A restored VM resumes
+/// an already-booted guest and does not re-run guest init, so newly staged
+/// `/abox-meta/services` host-port lines are never read and the in-guest
+/// listener is never created (mirrors how `[services]` rejects `--template`).
+fn ensure_host_ports_not_templated(
+    host_ports: &[abox_core::services::HostPortBridge],
+    template: Option<&str>,
+) -> Result<()> {
+    if template.is_some() && !host_ports.is_empty() {
+        anyhow::bail!(
+            "[[host_ports]] is not supported with --template restores.\n\
+             A restored VM does not re-run guest init, so the in-guest port \
+             listener is never created. Remove --template for this run, or remove \
+             [[host_ports]] from .abox/project.toml."
+        );
+    }
+    Ok(())
 }
 
 /// Start the project's declared service sidecars and return their host→guest
@@ -247,6 +418,25 @@ fn ensure_managed_agent_ready(command: &[String], config: &AboxConfig) -> Result
     Ok(())
 }
 
+/// Refuse `[[host_ports]]` unless the effective network mode permits an
+/// unmediated path to a host service. `safe` means "only the host-managed
+/// surface", which a host-port bridge is not.
+fn ensure_host_ports_allowed(
+    host_ports: &[abox_core::services::HostPortBridge],
+    mode: NetworkMode,
+) -> Result<()> {
+    if !host_ports.is_empty() && mode == NetworkMode::Safe {
+        anyhow::bail!(
+            "[[host_ports]] requires network mode 'scoped' or 'open', but the \
+             effective mode is 'safe'.\n\n\
+             A host-port bridge gives the sandbox an unmediated path to a host \
+             service, so it is refused in 'safe' mode. Set network.mode = \
+             \"scoped\" in .abox/project.toml (or pass --network scoped) to enable it."
+        );
+    }
+    Ok(())
+}
+
 pub async fn execute<W: WorkspacePort, V: VmPort>(
     args: RunArgs,
     repo_root: &Path,
@@ -265,11 +455,21 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     let mut env_vars: Vec<(String, String)> =
         args.env_vars.iter().map(|s| parse_env_var(s)).collect::<Result<Vec<_>>>()?;
 
+    // Resolve --input-file specs into staged-file descriptors (existence,
+    // regular-file, size budget, and guest-name uniqueness validated within),
+    // then expose them to any command via /abox-meta/inputs.
+    let input_specs: Vec<InputFileSpec> =
+        args.input_files.iter().map(|s| parse_input_file_arg(s)).collect::<Result<_>>()?;
+    let input_files = resolve_input_files(&input_specs)?;
+    env_vars.extend(input_file_env_vars(&input_files));
+
     ensure_managed_agent_ready(&args.command, orchestrator.config())?;
 
     let requested_network = args.network.map(Into::into);
     let project_config = ProjectConfig::load(repo_root)?;
     let project_services = project_config.as_ref().map(|c| c.services.clone()).unwrap_or_default();
+    let project_host_ports =
+        project_config.as_ref().map(|c| c.host_ports.clone()).unwrap_or_default();
     let resolved_project = match project_config {
         Some(config) => Some(config.resolve(repo_root)?),
         None => None,
@@ -295,6 +495,12 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         (None, Some(mode)) => Some(standalone_network_scope(mode)?),
         (None, None) => None,
     };
+    let effective_mode = network_scope.as_ref().map_or(NetworkMode::Safe, |s| s.mode);
+    ensure_host_ports_allowed(&project_host_ports, effective_mode)?;
+    ensure_host_ports_no_egress_collision(
+        &project_host_ports,
+        orchestrator.config().proxy.egress_port,
+    )?;
     let policy = if let Some(scope) = network_scope.as_ref() {
         println!("Network mode: {}", scope.mode);
         std::sync::Arc::new(policy.as_ref().with_network_scope(scope.clone())?)
@@ -342,6 +548,9 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         args.template.as_deref(),
         &mut env_vars,
     )?;
+    ensure_host_ports_not_templated(&project_host_ports, args.template.as_deref())?;
+    let host_port_bridges =
+        abox_core::services::plan_host_port_bridges(&project_host_ports, service_bridges.len());
 
     let params = CreateSandboxParams {
         task_id: args.task.clone(),
@@ -365,6 +574,8 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
             .as_ref()
             .map_or_else(Vec::new, |resolved| resolved.mount_excludes.clone()),
         service_bridges,
+        host_port_bridges,
+        input_files,
     };
 
     println!("Sandbox '{}' starting...", args.task);
@@ -566,8 +777,10 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapt_command_for_prompt, ensure_managed_agent_ready, parse_env_var, resolve_prompt_input,
-        selected_managed_agent, strip_detach_flag, RunArgs,
+        adapt_command_for_prompt, ensure_host_ports_allowed, ensure_host_ports_no_egress_collision,
+        ensure_host_ports_not_templated, ensure_managed_agent_ready, parse_env_var,
+        parse_input_file_arg, resolve_input_files, resolve_prompt_input, selected_managed_agent,
+        strip_detach_flag, InputFileSpec, RunArgs, MAX_INPUT_FILE_BYTES,
     };
     use abox_core::config::AboxConfig;
     use abox_core::project::{EnvironmentProfile, NetworkMode, ResolvedProjectConfig};
@@ -743,6 +956,7 @@ mod tests {
             network: None,
             prompt: None,
             prompt_file: None,
+            input_files: vec![],
             timeout: None,
             ephemeral: false,
             no_warm: false,
@@ -753,6 +967,7 @@ mod tests {
             config_path: PathBuf::from(".abox/project.toml"),
             project_id: "repo".into(),
             default_network_mode: NetworkMode::Safe,
+            has_host_ports: false,
             bundles: vec![],
             domains: vec![],
             environment_profile: EnvironmentProfile::Base,
@@ -769,5 +984,128 @@ mod tests {
 
         let prompt = resolve_prompt_input(&args, Some(&resolved)).unwrap();
         assert_eq!(prompt.as_deref(), Some("hello from repo prompt"));
+    }
+
+    #[test]
+    fn input_file_derives_guest_name_from_basename() {
+        let spec = parse_input_file_arg("/tmp/data/bundle.json").unwrap();
+        assert_eq!(spec.host_path, std::path::PathBuf::from("/tmp/data/bundle.json"));
+        assert_eq!(spec.guest_name, "bundle.json");
+    }
+
+    #[test]
+    fn input_file_accepts_explicit_guest_name() {
+        let spec = parse_input_file_arg("/tmp/x.json:task.json").unwrap();
+        assert_eq!(spec.host_path, std::path::PathBuf::from("/tmp/x.json"));
+        assert_eq!(spec.guest_name, "task.json");
+    }
+
+    #[test]
+    fn input_file_rejects_traversal_guest_name() {
+        assert!(parse_input_file_arg("/tmp/x.json:..").is_err());
+        assert!(parse_input_file_arg("/tmp/x.json:a/b").is_err());
+        assert!(parse_input_file_arg("/tmp/x.json:.").is_err());
+    }
+
+    #[test]
+    fn host_ports_refused_in_safe_mode() {
+        use abox_core::project::NetworkMode;
+        use abox_core::services::HostPortBridge;
+        let hp = vec![HostPortBridge { guest: 4000, host: 4000 }];
+        assert!(ensure_host_ports_allowed(&hp, NetworkMode::Safe).is_err());
+        assert!(ensure_host_ports_allowed(&hp, NetworkMode::Scoped).is_ok());
+        assert!(ensure_host_ports_allowed(&[], NetworkMode::Safe).is_ok());
+    }
+
+    #[test]
+    fn input_file_env_vars_single_vs_multi() {
+        use abox_core::vm::InputFile;
+        let f = |n: &str| InputFile { host_path: PathBuf::from("/h"), guest_name: n.into() };
+
+        // No inputs → no env vars.
+        assert!(super::input_file_env_vars(&[]).is_empty());
+
+        // Single input → ABOX_INPUT_DIR + ABOX_INPUT_FILE.
+        let one = super::input_file_env_vars(&[f("task.json")]);
+        assert_eq!(one[0], ("ABOX_INPUT_DIR".into(), "/abox-meta/inputs".into()));
+        assert_eq!(one[1], ("ABOX_INPUT_FILE".into(), "/abox-meta/inputs/task.json".into()));
+        assert_eq!(one.len(), 2);
+
+        // Multiple inputs → ABOX_INPUT_DIR only (no single ABOX_INPUT_FILE).
+        let many = super::input_file_env_vars(&[f("a.txt"), f("b.txt")]);
+        assert_eq!(many.len(), 1);
+        assert_eq!(many[0].0, "ABOX_INPUT_DIR");
+        assert!(!many.iter().any(|(k, _)| k == "ABOX_INPUT_FILE"));
+    }
+
+    #[test]
+    fn host_ports_rejected_with_template() {
+        use abox_core::services::HostPortBridge;
+        let hp = vec![HostPortBridge { guest: 4000, host: 4000 }];
+        assert!(ensure_host_ports_not_templated(&hp, Some("snap")).is_err());
+        assert!(ensure_host_ports_not_templated(&hp, None).is_ok());
+        assert!(ensure_host_ports_not_templated(&[], Some("snap")).is_ok());
+    }
+
+    #[test]
+    fn host_ports_reject_egress_port_collision() {
+        use abox_core::services::HostPortBridge;
+        let hp = vec![HostPortBridge { guest: 18443, host: 4000 }];
+        assert!(ensure_host_ports_no_egress_collision(&hp, 18443).is_err());
+        assert!(ensure_host_ports_no_egress_collision(&hp, 28443).is_ok());
+        assert!(ensure_host_ports_no_egress_collision(&[], 18443).is_ok());
+    }
+
+    #[test]
+    fn resolve_input_files_validates_and_dedups() {
+        let dir = std::env::temp_dir().join(format!("abox-rif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        std::fs::write(&a, b"hello").unwrap();
+
+        // Happy path: one regular file resolves.
+        let ok = resolve_input_files(&[InputFileSpec {
+            host_path: a.clone(),
+            guest_name: "a.txt".into(),
+        }])
+        .unwrap();
+        assert_eq!(ok.len(), 1);
+
+        // A directory is rejected as not a regular file.
+        let subdir = dir.join("sub");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert!(resolve_input_files(&[InputFileSpec {
+            host_path: subdir.clone(),
+            guest_name: "sub".into(),
+        }])
+        .is_err());
+
+        // A missing file is rejected.
+        assert!(resolve_input_files(&[InputFileSpec {
+            host_path: dir.join("missing"),
+            guest_name: "missing".into(),
+        }])
+        .is_err());
+
+        // Two specs mapping to the same guest name collide.
+        let b = dir.join("b.txt");
+        std::fs::write(&b, b"world").unwrap();
+        let dup = resolve_input_files(&[
+            InputFileSpec { host_path: a.clone(), guest_name: "same".into() },
+            InputFileSpec { host_path: b.clone(), guest_name: "same".into() },
+        ]);
+        assert!(dup.is_err());
+
+        // Per-file size cap (use a sparse file so we don't write 64 MiB).
+        let big = dir.join("big.bin");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_INPUT_FILE_BYTES + 1).unwrap();
+        assert!(resolve_input_files(&[InputFileSpec {
+            host_path: big.clone(),
+            guest_name: "big.bin".into(),
+        }])
+        .is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

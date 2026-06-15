@@ -785,6 +785,8 @@ async fn test_orchestrator_create_sandbox() {
             ca_cert_pem: None,
             mount_excludes: vec![],
             service_bridges: Vec::new(),
+            host_port_bridges: Vec::new(),
+            input_files: Vec::new(),
         })
         .await
         .unwrap();
@@ -793,6 +795,53 @@ async fn test_orchestrator_create_sandbox() {
     assert_eq!(status.branch, "agent/fix-auth");
     assert_eq!(status.vm_state, "running");
     assert_eq!(status.vm_pid, 12345);
+}
+
+/// `abox path <task>` is a thin wrapper over `worktree_info`; this verifies the
+/// lookup it relies on returns the real worktree path for a known sandbox and
+/// `None` for an unknown one.
+#[tokio::test]
+async fn test_worktree_info_lookup() {
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    setup_vm_artifacts(&tmp);
+
+    let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+    let vm = MockVmPort::new();
+    let orch = SandboxOrchestrator::new(config, ws, vm);
+
+    let status = orch
+        .create_sandbox(CreateSandboxParams {
+            task_id: "collect-me".to_string(),
+            base_branch: "main".to_string(),
+            template: None,
+            memory_mib: None,
+            vcpus: None,
+            user: None,
+            env_vars: vec![],
+            command: vec!["claude".to_string()],
+            resolved_prompt: None,
+            cache_mount_dir: None,
+            staged_prepare_script: None,
+            environment_profile: EnvironmentProfile::Base,
+            timeout_secs: None,
+            ephemeral: false,
+            ca_cert_pem: None,
+            mount_excludes: vec![],
+            service_bridges: Vec::new(),
+            host_port_bridges: Vec::new(),
+            input_files: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let info = orch.worktree_info("collect-me").unwrap().expect("known task resolves");
+    assert_eq!(info.sandbox_id, "collect-me");
+    assert_eq!(info.path.to_string_lossy(), status.worktree_path);
+    assert!(info.path.is_dir(), "worktree path should exist on disk");
+
+    assert!(orch.worktree_info("no-such-task").unwrap().is_none());
 }
 
 #[tokio::test]
@@ -826,6 +875,8 @@ async fn test_orchestrator_create_multiple_sandboxes() {
             ca_cert_pem: None,
             mount_excludes: vec![],
             service_bridges: Vec::new(),
+            host_port_bridges: Vec::new(),
+            input_files: Vec::new(),
         })
         .await
         .unwrap();
@@ -870,6 +921,8 @@ async fn test_orchestrator_stop_sandbox() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     })
     .await
     .unwrap();
@@ -911,6 +964,8 @@ async fn test_orchestrator_stop_with_clean() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     })
     .await
     .unwrap();
@@ -953,6 +1008,8 @@ async fn test_orchestrator_divergence() {
             ca_cert_pem: None,
             mount_excludes: vec![],
             service_bridges: Vec::new(),
+            host_port_bridges: Vec::new(),
+            input_files: Vec::new(),
         })
         .await
         .unwrap();
@@ -1005,6 +1062,8 @@ async fn test_orchestrator_vm_config_overrides() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     })
     .await
     .unwrap();
@@ -1115,6 +1174,8 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1232,6 +1293,8 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1373,6 +1436,8 @@ async fn test_run_sandbox_timeout_returns_124() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1487,6 +1552,8 @@ async fn test_run_sandbox_exits_before_timeout() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1601,6 +1668,8 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1716,6 +1785,8 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
         ca_cert_pem: None,
         mount_excludes: vec![],
         service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(

@@ -58,6 +58,18 @@ pub trait AuditSink: Send + Sync {
             "egress"
         );
     }
+
+    /// Record a host-port bridge event. Default impl emits a tracing event so
+    /// sinks that don't persist it still surface the boundary crossing.
+    fn log_host_port(&self, sandbox_id: &str, event: &str, guest_port: u16, host_port: u16) {
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            event = %event,
+            guest_port,
+            host_port,
+            "host-port"
+        );
+    }
 }
 
 /// A configured but not-yet-running proxy bridge.
@@ -349,6 +361,17 @@ impl AuditSink for FileAuditSink {
             "egress"
         );
     }
+
+    fn log_host_port(&self, sandbox_id: &str, event: &str, guest_port: u16, host_port: u16) {
+        self.writer.log_host_port(sandbox_id, event, guest_port, host_port);
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            event = %event,
+            guest_port,
+            host_port,
+            "host-port"
+        );
+    }
 }
 
 /// The shared chained writer is itself an [`AuditSink`], so the `abox-proxyd`
@@ -372,6 +395,12 @@ impl AuditSink for crate::audit::AuditChainWriter {
 
     fn log_egress(&self, sandbox_id: &str, domain: &str, decision: &str, status_code: i32) {
         crate::audit::AuditChainWriter::log_egress(self, sandbox_id, domain, decision, status_code);
+    }
+
+    fn log_host_port(&self, sandbox_id: &str, event: &str, guest_port: u16, host_port: u16) {
+        crate::audit::AuditChainWriter::log_host_port(
+            self, sandbox_id, event, guest_port, host_port,
+        );
     }
 }
 

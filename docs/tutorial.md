@@ -254,6 +254,30 @@ Two profile-specific notes from the real validation matrix:
 Use `abox project explain` at any time to review the effective repo behavior
 that was approved, including the selected profile and widened network scope.
 
+### Reaching a self-hosted model
+
+Prefer the mediated path: if your model endpoint (e.g. vLLM on Kubernetes) is
+reachable over the network, add it as a `scoped` egress rule so requests stay
+behind the abox proxy (policy-checked, audited, credential injection available).
+
+Only when the model gateway is bound to host loopback (e.g. a LiteLLM gateway on
+`localhost:4000`) and cannot be exposed otherwise, declare a host-port bridge:
+
+```toml
+# .abox/project.toml
+[network]
+mode = "scoped"   # host-port bridges are refused in "safe" mode
+
+[[host_ports]]
+guest = 4000
+host  = 4000
+```
+
+A declared host-port bridge counts as a `scoped` addition, so `mode = "scoped"`
+with only `[[host_ports]]` is valid — no egress domain is required, and egress
+stays restrictive. The agent then reaches the gateway at `127.0.0.1:4000` inside
+the guest. Pair this with `--input-file` to hand a custom runner its task payload.
+
 ## 9. What just happened?
 
 In about 10 minutes you:

@@ -8,6 +8,7 @@ use crate::vm::{StartMode, VmConfig, VmInfo, VmPort, VmState};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -46,6 +47,33 @@ fn workspace_virtiofsd_args(
     ]
 }
 
+/// Stage arbitrary host input files read-only under `<meta_dir>/inputs/`.
+///
+/// Each `guest_name` is a validated single path component (see the CLI), so
+/// `join` cannot escape the inputs directory. Files are copied at mode `0444`.
+fn stage_input_files(
+    meta_dir: &std::path::Path,
+    input_files: &[crate::vm::InputFile],
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    if input_files.is_empty() {
+        return Ok(());
+    }
+    let inputs_dir = meta_dir.join("inputs");
+    std::fs::create_dir_all(&inputs_dir)
+        .with_context(|| format!("Creating inputs dir {}", inputs_dir.display()))?;
+    for f in input_files {
+        let dest = inputs_dir.join(&f.guest_name);
+        std::fs::copy(&f.host_path, &dest).with_context(|| {
+            format!("Staging input file {} -> {}", f.host_path.display(), dest.display())
+        })?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o444))
+            .with_context(|| format!("Setting input file read-only: {}", dest.display()))?;
+    }
+    Ok(())
+}
+
 /// Build the virtiofsd argument list for the read-only meta and status shares.
 ///
 /// These shares do not require UID/GID remapping (they are accessed by the
@@ -66,6 +94,56 @@ fn auxiliary_virtiofsd_args(
         "--sandbox=namespace".to_string(),
         "--log-level=warn".to_string(),
     ]
+}
+
+/// True only for the exact, known-benign virtiofsd messages emitted when its
+/// passthrough credential code restores uid/gid to 0 inside our rootless user
+/// namespace (no CAP_SETUID for uid 0 there). Matched tightly so a real
+/// virtiofsd privilege error is never downgraded.
+fn is_benign_virtiofsd_credential_noise(line: &str) -> bool {
+    line.contains("failed to change uid back to root: Invalid argument")
+        || line.contains("failed to change gid back to root: Invalid argument")
+}
+
+/// Drain a virtiofsd child's stderr, downgrading the benign credential noise to
+/// debug and forwarding every other line at warn so real errors stay visible.
+/// Read `reader` line by line, invoking `on_line(is_benign, line)` for each.
+/// Stops on EOF; a read error (almost always the pipe closing as the child
+/// exits, including `kill_on_drop` at teardown) is logged at debug and ends
+/// the loop rather than surfacing a spurious error on every run.
+async fn drain_virtiofsd_stderr<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: R,
+    label: &str,
+    mut on_line: impl FnMut(bool, &str),
+) {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = reader.lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => on_line(is_benign_virtiofsd_credential_noise(&line), &line),
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!(target: "virtiofsd", instance = label, error = %e, "stderr read ended");
+                break;
+            }
+        }
+    }
+}
+
+fn forward_virtiofsd_stderr(mut child: Child, label: &'static str) -> Child {
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            drain_virtiofsd_stderr(tokio::io::BufReader::new(stderr), label, |benign, line| {
+                if benign {
+                    tracing::debug!(target: "virtiofsd", instance = label, "{line}");
+                } else {
+                    tracing::warn!(target: "virtiofsd", instance = label, "{line}");
+                }
+            })
+            .await;
+        });
+    }
+    child
 }
 
 /// Manages Cloud Hypervisor and virtiofsd process lifecycles.
@@ -300,6 +378,8 @@ impl VmPort for CloudHypervisorAdapter {
             })?;
         }
 
+        stage_input_files(&meta_dir, &config.input_files)?;
+
         // Stage the services file so guest/init.sh can bridge guest loopback
         // ports to host service containers over vsock. Each line is
         // `<name> <guest_port> <vsock_port>`.
@@ -373,9 +453,10 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &virtiofsd_args {
             cmd.arg(a);
         }
-        let virtiofsd_child = cmd.kill_on_drop(true).spawn().context(
+        let virtiofsd_child = cmd.stderr(Stdio::piped()).kill_on_drop(true).spawn().context(
             "Failed to start workspace virtiofsd. Run scripts/bootstrap_vm.sh to install it.",
         )?;
+        let virtiofsd_child = forward_virtiofsd_stderr(virtiofsd_child, "workspace");
 
         // Meta virtiofsd (read-only in practice; serves boot metadata).
         // Uses auxiliary_virtiofsd_args which adds --sandbox=namespace for
@@ -385,8 +466,12 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &meta_args {
             meta_cmd.arg(a);
         }
-        let meta_virtiofsd_child =
-            meta_cmd.kill_on_drop(true).spawn().context("Failed to start meta virtiofsd")?;
+        let meta_virtiofsd_child = meta_cmd
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("Failed to start meta virtiofsd")?;
+        let meta_virtiofsd_child = forward_virtiofsd_stderr(meta_virtiofsd_child, "meta");
 
         // Status virtiofsd (read-write; for exit-code reporting).
         // Uses auxiliary_virtiofsd_args which adds --sandbox=namespace for
@@ -396,8 +481,12 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &status_args {
             status_cmd.arg(a);
         }
-        let status_virtiofsd_child =
-            status_cmd.kill_on_drop(true).spawn().context("Failed to start status virtiofsd")?;
+        let status_virtiofsd_child = status_cmd
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("Failed to start status virtiofsd")?;
+        let status_virtiofsd_child = forward_virtiofsd_stderr(status_virtiofsd_child, "status");
         let cache_virtiofsd_child = if let (Some(cache_socket), Some(cache_dir)) =
             (cache_socket.as_ref(), config.cache_mount_dir.as_ref())
         {
@@ -406,7 +495,14 @@ impl VmPort for CloudHypervisorAdapter {
             for a in &cache_args {
                 cache_cmd.arg(a);
             }
-            Some(cache_cmd.kill_on_drop(true).spawn().context("Failed to start cache virtiofsd")?)
+            Some(forward_virtiofsd_stderr(
+                cache_cmd
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .context("Failed to start cache virtiofsd")?,
+                "cache",
+            ))
         } else {
             None
         };
@@ -811,5 +907,95 @@ mod tests {
             !args.iter().any(|a| a.starts_with("--gid-map")),
             "auxiliary virtiofsd must NOT include --gid-map; got: {args:?}"
         );
+    }
+
+    #[test]
+    fn classifies_benign_virtiofsd_credential_noise() {
+        assert!(is_benign_virtiofsd_credential_noise(
+            "[ERROR virtiofsd::passthrough::credentials] failed to change uid back to root: Invalid argument (os error 22)"
+        ));
+        assert!(is_benign_virtiofsd_credential_noise(
+            "[ERROR virtiofsd::passthrough::credentials] failed to change gid back to root: Invalid argument (os error 22)"
+        ));
+        // A genuine error must NOT be classified as benign.
+        assert!(!is_benign_virtiofsd_credential_noise(
+            "[ERROR virtiofsd] failed to mount shared dir: Permission denied"
+        ));
+    }
+
+    #[test]
+    fn stage_input_files_copies_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("abox-inputs-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let meta_dir = tmp.join("meta");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let host = src_dir.join("payload.json");
+        std::fs::write(&host, b"{\"k\":1}").unwrap();
+
+        let files = vec![crate::vm::InputFile {
+            host_path: host.clone(),
+            guest_name: "payload.json".to_string(),
+        }];
+        super::stage_input_files(&meta_dir, &files).unwrap();
+
+        let dest = meta_dir.join("inputs").join("payload.json");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"{\"k\":1}");
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o444);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn drain_virtiofsd_stderr_routes_every_line() {
+        let input: &[u8] = b"normal line\n\
+            [ERROR virtiofsd::passthrough::credentials] failed to change uid back to root: Invalid argument (os error 22)\n\
+            another error\n";
+        let reader = tokio::io::BufReader::new(input);
+        let mut seen: Vec<(bool, String)> = Vec::new();
+        super::drain_virtiofsd_stderr(reader, "test", |benign, line| {
+            seen.push((benign, line.to_string()));
+        })
+        .await;
+
+        // Every line is delivered, in order, with the correct benign flag.
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0], (false, "normal line".to_string()));
+        assert!(seen[1].0, "credential-restore line should be benign");
+        assert_eq!(seen[2], (false, "another error".to_string()));
+    }
+
+    #[test]
+    fn stage_input_files_handles_multiple() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("abox-inputs-multi-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let meta_dir = tmp.join("meta");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(src_dir.join("a.txt"), b"aaa").unwrap();
+        std::fs::write(src_dir.join("b.txt"), b"bbbb").unwrap();
+
+        let files = vec![
+            crate::vm::InputFile {
+                host_path: src_dir.join("a.txt"),
+                guest_name: "a.txt".to_string(),
+            },
+            crate::vm::InputFile {
+                host_path: src_dir.join("b.txt"),
+                guest_name: "renamed.txt".to_string(),
+            },
+        ];
+        super::stage_input_files(&meta_dir, &files).unwrap();
+
+        let inputs = meta_dir.join("inputs");
+        assert_eq!(std::fs::read(inputs.join("a.txt")).unwrap(), b"aaa");
+        assert_eq!(std::fs::read(inputs.join("renamed.txt")).unwrap(), b"bbbb");
+        for name in ["a.txt", "renamed.txt"] {
+            let mode = std::fs::metadata(inputs.join(name)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o444, "{name} should be read-only");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

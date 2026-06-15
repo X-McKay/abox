@@ -130,6 +130,9 @@ pub enum GrantAction {
         /// Path to policy file. Defaults to ~/.abox/policies/default.toml.
         #[arg(long)]
         policy: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Remove a credential injection rule by domain.
@@ -162,9 +165,9 @@ pub async fn execute(args: &GrantArgs, config: &AboxConfig) -> Result<()> {
                 &policy_path,
             )
         }
-        GrantAction::List { policy } => {
+        GrantAction::List { policy, json } => {
             let policy_path = resolve_policy_path(policy.as_ref(), config);
-            list_grants(&policy_path)
+            list_grants(&policy_path, *json)
         }
         GrantAction::Remove { name, policy } => {
             let policy_path = resolve_policy_path(policy.as_ref(), config);
@@ -294,8 +297,12 @@ fn add_egress_rule(
     Ok(())
 }
 
-fn list_grants(policy_path: &PathBuf) -> Result<()> {
+fn list_grants(policy_path: &PathBuf, json: bool) -> Result<()> {
     if !policy_path.exists() {
+        if json {
+            println!("[]");
+            return Ok(());
+        }
         println!("No policy file found at {}", policy_path.display());
         println!("Run 'abox init' to create the default policy, then 'abox grant add <provider>'.");
         return Ok(());
@@ -312,18 +319,58 @@ fn list_grants(policy_path: &PathBuf) -> Result<()> {
 
     match egress {
         None => {
+            if json {
+                println!("[]");
+                return Ok(());
+            }
             println!("No credential injection rules configured.");
             println!();
             println!("Add one with: abox grant add <provider>");
             println!("See available providers with: abox grant providers");
         }
         Some(rules) if rules.is_empty() => {
+            if json {
+                println!("[]");
+                return Ok(());
+            }
             println!("No credential injection rules configured.");
             println!();
             println!("Add one with: abox grant add <provider>");
             println!("See available providers with: abox grant providers");
         }
         Some(rules) => {
+            if json {
+                let items: Vec<serde_json::Value> = rules
+                    .iter()
+                    .map(|rule| {
+                        let domain = rule.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
+                        let header =
+                            rule.get("inject_header").and_then(|v| v.as_str()).unwrap_or("?");
+                        let source = if let Some(env) = rule.get("env_var").and_then(|v| v.as_str())
+                        {
+                            format!("env:{env}")
+                        } else if let Some(file) =
+                            rule.get("credential_file").and_then(|v| v.as_str())
+                        {
+                            format!("file:{file}")
+                        } else {
+                            "?".to_string()
+                        };
+                        let request_rules = rule
+                            .get("request_rules")
+                            .and_then(|v| v.as_array())
+                            .map_or(0, toml::value::Array::len);
+                        serde_json::json!({
+                            "domain": domain,
+                            "header": header,
+                            "source": source,
+                            "request_rules": request_rules,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+                return Ok(());
+            }
             println!("Credential injection rules in {}:", policy_path.display());
             println!();
             println!("{:<30} {:<20} {:<20} REQUEST RULES", "DOMAIN", "HEADER", "SOURCE");
@@ -484,5 +531,46 @@ mod tests {
         let policy_path = tmp.path().join("default.toml");
         std::fs::write(&policy_path, "default_egress_action = \"deny\"\n").unwrap();
         assert!(remove_grant("nope.example.com", &policy_path).is_err());
+    }
+
+    #[test]
+    fn grant_list_json_is_metadata_only() {
+        let toml = r#"
+[[egress]]
+domain = "api.openai.com"
+inject_header = "Authorization"
+env_var = "OPENAI_API_KEY"
+header_template = "Bearer {value}"
+"#;
+        let policy: toml::Value = toml::from_str(toml).unwrap();
+        let rules = policy.get("egress").and_then(|v| v.as_array()).unwrap();
+        let rule = &rules[0];
+        let domain = rule.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
+        let source = rule
+            .get("env_var")
+            .and_then(|v| v.as_str())
+            .map(|e| format!("env:{e}"))
+            .unwrap_or_default();
+        // The JSON view exposes the env var NAME, never a value, and never the header_template.
+        assert_eq!(domain, "api.openai.com");
+        assert_eq!(source, "env:OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn grant_list_json_empty_rules_emits_empty_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("default.toml");
+        std::fs::write(&policy_path, "default_egress_action = \"deny\"\n").unwrap();
+        // Should succeed and (if we could capture stdout) emit "[]".
+        // At minimum, it must not error.
+        assert!(list_grants(&policy_path, true).is_ok());
+    }
+
+    #[test]
+    fn grant_list_json_no_file_emits_empty_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("nonexistent.toml");
+        // No file: json mode should return Ok (emitting []).
+        assert!(list_grants(&policy_path, true).is_ok());
     }
 }

@@ -35,6 +35,15 @@ pub struct CredentialToStage {
     pub content: Vec<u8>,
 }
 
+/// A host file to stage read-only into `/abox-meta/inputs/<guest_name>`.
+#[derive(Debug, Clone)]
+pub struct InputFile {
+    /// Absolute path to the file on the host.
+    pub host_path: PathBuf,
+    /// File name inside `/abox-meta/inputs/` (validated single component).
+    pub guest_name: String,
+}
+
 /// Configuration for creating a new sandbox VM.
 #[derive(Debug, Clone)]
 pub struct VmConfig {
@@ -81,6 +90,9 @@ pub struct VmConfig {
     /// guest loopback ports to the host's Docker containers over vsock.
     #[allow(dead_code)]
     pub services: Vec<crate::services::GuestServiceBridge>,
+    /// Arbitrary host files staged read-only under `/abox-meta/inputs/`.
+    /// Decoupled from the managed-agent prompt; usable by any `--` command.
+    pub input_files: Vec<InputFile>,
 }
 
 /// Information about a running or stopped VM.

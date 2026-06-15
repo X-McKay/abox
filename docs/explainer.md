@@ -129,6 +129,15 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 **Why this is safer than a TCP socket:** No IP stack, no NICs, no routing tables. The guest cannot accidentally talk to anything except CID 2. There is no network the guest can scan, no SSRF vector, no way for the guest to send a misdirected packet to the user's office network. The attack surface is exactly one syscall.
 
+> **Exception — declared host-port bridges.** In `scoped`/`open` mode a repo may
+> declare `[[host_ports]]` in `.abox/project.toml` to splice a specific guest
+> loopback port to an existing host loopback service. This is the one
+> operator-authorized, version-controlled exception to "no unmediated outbound":
+> it is refused in `safe` mode and every connection is recorded in the audit log
+> (`host-port-bridge` at setup, `host-port-connect` per connection). Prefer the
+> egress proxy + a `scoped` egress rule whenever the service is reachable over
+> the network; the bridge exists for loopback-only host services.
+
 **Why this is the *attribution* boundary:** Every connection that arrives on the per-VM host-side path *provably* came from one specific VM, because Cloud Hypervisor binds the socket and only that VM has access to it. The bridge tags every request with `sandbox_id=Fixed(<task>)` and the audit log records that as ground truth — the guest cannot spoof its own id.
 
 **What would break without it:** We'd need either an IP network to the guest (with all the firewall + routing complexity that entails) or a serial-console-based protocol (which is slow and conflicts with stdout). vsock is the modern, narrow channel.
@@ -210,6 +219,15 @@ the same policy / transport machinery described below:
 - public package registries and other unmanaged destinations use passthrough by
   default
 - the guest still has no direct NIC-based outbound path
+
+> **Exception — declared host-port bridges.** In `scoped`/`open` mode a repo may
+> declare `[[host_ports]]` in `.abox/project.toml` to splice a specific guest
+> loopback port to an existing host loopback service. This is the one
+> operator-authorized, version-controlled exception to "no unmediated outbound":
+> it is refused in `safe` mode and every connection is recorded in the audit log
+> (`host-port-bridge` at setup, `host-port-connect` per connection). Prefer the
+> egress proxy + a `scoped` egress rule whenever the service is reachable over
+> the network; the bridge exists for loopback-only host services.
 
 **How it works:**
 
