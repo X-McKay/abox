@@ -392,13 +392,7 @@ impl AuditChainWriter {
 
     /// Log a host-port bridge event (`host-port-bridge` at setup,
     /// `host-port-connect` per connection). Target encodes the port mapping.
-    pub fn log_host_port(
-        &self,
-        sandbox_id: &str,
-        event: &str,
-        guest_port: u16,
-        host_port: u16,
-    ) {
+    pub fn log_host_port(&self, sandbox_id: &str, event: &str, guest_port: u16, host_port: u16) {
         self.append(
             event,
             sandbox_id,

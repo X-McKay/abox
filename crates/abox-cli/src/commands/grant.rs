@@ -343,12 +343,10 @@ fn list_grants(policy_path: &PathBuf, json: bool) -> Result<()> {
                 let items: Vec<serde_json::Value> = rules
                     .iter()
                     .map(|rule| {
-                        let domain =
-                            rule.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
+                        let domain = rule.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
                         let header =
                             rule.get("inject_header").and_then(|v| v.as_str()).unwrap_or("?");
-                        let source = if let Some(env) =
-                            rule.get("env_var").and_then(|v| v.as_str())
+                        let source = if let Some(env) = rule.get("env_var").and_then(|v| v.as_str())
                         {
                             format!("env:{env}")
                         } else if let Some(file) =

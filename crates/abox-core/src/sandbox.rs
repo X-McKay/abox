@@ -588,10 +588,8 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         // is a deliberate, audited exception to the egress boundary.
         let mut host_port_handles = Vec::new();
         for plan in &host_port_bridges {
-            let socket = self
-                .config
-                .runtime_dir()
-                .join(format!("vsock-{task_id}.sock_{}", plan.vsock_port));
+            let socket =
+                self.config.runtime_dir().join(format!("vsock-{task_id}.sock_{}", plan.vsock_port));
             let guest_port = plan.guest_port;
             let host_port = plan.host_port;
             let sandbox_id = task_id.clone();

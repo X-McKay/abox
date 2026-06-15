@@ -177,21 +177,19 @@ fn parse_input_file_arg(s: &str) -> Result<InputFileSpec> {
             );
         }
         _ => {
-            let derived = Path::new(s)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--input-file {s:?}: cannot derive a guest file name; \
+            let derived =
+                Path::new(s).file_name().and_then(|n| n.to_str()).map(str::to_string).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                            "--input-file {s:?}: cannot derive a guest file name; \
                          specify one as <hostpath>:<name>"
-                    )
-                })?;
+                        )
+                    },
+                )?;
             (s.to_string(), derived)
         }
     };
-    validate_guest_name(&guest_name)
-        .map_err(|e| anyhow::anyhow!("--input-file {s:?}: {e}"))?;
+    validate_guest_name(&guest_name).map_err(|e| anyhow::anyhow!("--input-file {s:?}: {e}"))?;
     Ok(InputFileSpec { host_path: PathBuf::from(host_str), guest_name })
 }
 
@@ -933,8 +931,8 @@ mod tests {
 
     #[test]
     fn host_ports_refused_in_safe_mode() {
-        use abox_core::services::HostPortBridge;
         use abox_core::project::NetworkMode;
+        use abox_core::services::HostPortBridge;
         let hp = vec![HostPortBridge { guest: 4000, host: 4000 }];
         assert!(ensure_host_ports_allowed(&hp, NetworkMode::Safe).is_err());
         assert!(ensure_host_ports_allowed(&hp, NetworkMode::Scoped).is_ok());

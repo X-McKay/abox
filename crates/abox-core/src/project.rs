@@ -1672,7 +1672,7 @@ mod tests {
                 }),
                 agent: None,
                 services: std::collections::HashMap::new(),
-            host_ports: vec![],
+                host_ports: vec![],
             };
 
             let err = config.validate(&repo_root).expect_err("symlink escape should be rejected");

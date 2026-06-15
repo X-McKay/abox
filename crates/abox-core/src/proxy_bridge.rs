@@ -398,7 +398,9 @@ impl AuditSink for crate::audit::AuditChainWriter {
     }
 
     fn log_host_port(&self, sandbox_id: &str, event: &str, guest_port: u16, host_port: u16) {
-        crate::audit::AuditChainWriter::log_host_port(self, sandbox_id, event, guest_port, host_port);
+        crate::audit::AuditChainWriter::log_host_port(
+            self, sandbox_id, event, guest_port, host_port,
+        );
     }
 }
 
