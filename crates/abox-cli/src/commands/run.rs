@@ -76,6 +76,13 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "prompt")]
     pub prompt_file: Option<PathBuf>,
 
+    /// Stage an arbitrary host file into `/abox-meta/inputs/` (read-only) for
+    /// any `--` command. Format: `<hostpath>[:<guestname>]`. Repeatable.
+    /// The guest sees `ABOX_INPUT_DIR=/abox-meta/inputs`, plus
+    /// `ABOX_INPUT_FILE` when exactly one is given.
+    #[arg(long = "input-file")]
+    pub input_files: Vec<String>,
+
     /// Kill sandbox after N seconds (exit code 124, like GNU timeout).
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -127,6 +134,65 @@ fn parse_env_var(s: &str) -> Result<(String, String)> {
     validate_env_key(&key).map_err(|e| anyhow::anyhow!("--env {s:?}: {e}"))?;
 
     Ok((key, value))
+}
+
+/// A parsed `--input-file` argument: a host file plus the name it will take
+/// inside `/abox-meta/inputs/` in the guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputFileSpec {
+    host_path: PathBuf,
+    guest_name: String,
+}
+
+/// Validate a guest-side input file name. Must be a single safe path component
+/// so it cannot escape `/abox-meta/inputs/` or collide with reserved meta files.
+fn validate_guest_name(name: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." {
+        anyhow::bail!("{name:?} is not a valid file name");
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        anyhow::bail!("{name:?} may contain only ASCII letters, digits, '.', '_', '-'");
+    }
+    Ok(())
+}
+
+/// Parse `<hostpath>[:<guestname>]`. The guest name is taken after the last
+/// `:` when that suffix is a plain file name (no `/`); otherwise the whole
+/// string is the host path and the guest name is the host file's basename.
+///
+/// If a `:` is present and the suffix after it is non-empty but contains a
+/// `/`, it is treated as an invalid explicit guest name (path traversal attempt)
+/// rather than falling back to basename derivation.
+fn parse_input_file_arg(s: &str) -> Result<InputFileSpec> {
+    let (host_str, guest_name) = match s.rsplit_once(':') {
+        Some((host, name)) if !name.is_empty() && !name.contains('/') => {
+            (host.to_string(), name.to_string())
+        }
+        Some((_host, name)) if !name.is_empty() => {
+            // Non-empty suffix that contains '/' — reject immediately rather
+            // than silently deriving a basename, since the user clearly tried
+            // to specify a guest path and that is not allowed.
+            anyhow::bail!(
+                "--input-file {s:?}: guest name {name:?} must be a plain file name, not a path"
+            );
+        }
+        _ => {
+            let derived = Path::new(s)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--input-file {s:?}: cannot derive a guest file name; \
+                         specify one as <hostpath>:<name>"
+                    )
+                })?;
+            (s.to_string(), derived)
+        }
+    };
+    validate_guest_name(&guest_name)
+        .map_err(|e| anyhow::anyhow!("--input-file {s:?}: {e}"))?;
+    Ok(InputFileSpec { host_path: PathBuf::from(host_str), guest_name })
 }
 
 /// Start the project's declared service sidecars and return their host→guest
@@ -569,8 +635,8 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapt_command_for_prompt, ensure_managed_agent_ready, parse_env_var, resolve_prompt_input,
-        selected_managed_agent, strip_detach_flag, RunArgs,
+        adapt_command_for_prompt, ensure_managed_agent_ready, parse_env_var, parse_input_file_arg,
+        resolve_prompt_input, selected_managed_agent, strip_detach_flag, RunArgs,
     };
     use abox_core::config::AboxConfig;
     use abox_core::project::{EnvironmentProfile, NetworkMode, ResolvedProjectConfig};
@@ -746,6 +812,7 @@ mod tests {
             network: None,
             prompt: None,
             prompt_file: None,
+            input_files: vec![],
             timeout: None,
             ephemeral: false,
             no_warm: false,
@@ -772,5 +839,26 @@ mod tests {
 
         let prompt = resolve_prompt_input(&args, Some(&resolved)).unwrap();
         assert_eq!(prompt.as_deref(), Some("hello from repo prompt"));
+    }
+
+    #[test]
+    fn input_file_derives_guest_name_from_basename() {
+        let spec = parse_input_file_arg("/tmp/data/bundle.json").unwrap();
+        assert_eq!(spec.host_path, std::path::PathBuf::from("/tmp/data/bundle.json"));
+        assert_eq!(spec.guest_name, "bundle.json");
+    }
+
+    #[test]
+    fn input_file_accepts_explicit_guest_name() {
+        let spec = parse_input_file_arg("/tmp/x.json:task.json").unwrap();
+        assert_eq!(spec.host_path, std::path::PathBuf::from("/tmp/x.json"));
+        assert_eq!(spec.guest_name, "task.json");
+    }
+
+    #[test]
+    fn input_file_rejects_traversal_guest_name() {
+        assert!(parse_input_file_arg("/tmp/x.json:..").is_err());
+        assert!(parse_input_file_arg("/tmp/x.json:a/b").is_err());
+        assert!(parse_input_file_arg("/tmp/x.json:.").is_err());
     }
 }
