@@ -56,6 +56,8 @@ pub struct CreateSandboxParams {
     /// the agent can reach them; teardown stops the containers. Empty for the
     /// common case (no services), in which nothing changes.
     pub service_bridges: Vec<crate::services::ServiceBridge>,
+    /// Arbitrary host files to stage read-only under `/abox-meta/inputs/`.
+    pub input_files: Vec<crate::vm::InputFile>,
 }
 
 /// Full sandbox status combining workspace and VM info.
@@ -284,6 +286,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 .iter()
                 .map(crate::services::ServiceBridge::guest)
                 .collect(),
+            input_files: params.input_files.clone(),
         };
 
         // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just

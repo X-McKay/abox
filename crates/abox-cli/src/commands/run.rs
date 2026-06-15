@@ -434,6 +434,7 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
             .as_ref()
             .map_or_else(Vec::new, |resolved| resolved.mount_excludes.clone()),
         service_bridges,
+        input_files: Vec::new(),
     };
 
     println!("Sandbox '{}' starting...", args.task);
