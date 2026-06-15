@@ -8,6 +8,7 @@ use crate::vm::{StartMode, VmConfig, VmInfo, VmPort, VmState};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -93,6 +94,34 @@ fn auxiliary_virtiofsd_args(
         "--sandbox=namespace".to_string(),
         "--log-level=warn".to_string(),
     ]
+}
+
+/// True only for the exact, known-benign virtiofsd messages emitted when its
+/// passthrough credential code restores uid/gid to 0 inside our rootless user
+/// namespace (no CAP_SETUID for uid 0 there). Matched tightly so a real
+/// virtiofsd privilege error is never downgraded.
+fn is_benign_virtiofsd_credential_noise(line: &str) -> bool {
+    line.contains("failed to change uid back to root: Invalid argument")
+        || line.contains("failed to change gid back to root: Invalid argument")
+}
+
+/// Drain a virtiofsd child's stderr, downgrading the benign credential noise to
+/// debug and forwarding every other line at warn so real errors stay visible.
+fn forward_virtiofsd_stderr(mut child: Child, label: &'static str) -> Child {
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if is_benign_virtiofsd_credential_noise(&line) {
+                    tracing::debug!(target: "virtiofsd", instance = label, "{line}");
+                } else {
+                    tracing::warn!(target: "virtiofsd", instance = label, "{line}");
+                }
+            }
+        });
+    }
+    child
 }
 
 /// Manages Cloud Hypervisor and virtiofsd process lifecycles.
@@ -402,9 +431,10 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &virtiofsd_args {
             cmd.arg(a);
         }
-        let virtiofsd_child = cmd.kill_on_drop(true).spawn().context(
+        let virtiofsd_child = cmd.stderr(Stdio::piped()).kill_on_drop(true).spawn().context(
             "Failed to start workspace virtiofsd. Run scripts/bootstrap_vm.sh to install it.",
         )?;
+        let virtiofsd_child = forward_virtiofsd_stderr(virtiofsd_child, "workspace");
 
         // Meta virtiofsd (read-only in practice; serves boot metadata).
         // Uses auxiliary_virtiofsd_args which adds --sandbox=namespace for
@@ -414,8 +444,12 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &meta_args {
             meta_cmd.arg(a);
         }
-        let meta_virtiofsd_child =
-            meta_cmd.kill_on_drop(true).spawn().context("Failed to start meta virtiofsd")?;
+        let meta_virtiofsd_child = meta_cmd
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("Failed to start meta virtiofsd")?;
+        let meta_virtiofsd_child = forward_virtiofsd_stderr(meta_virtiofsd_child, "meta");
 
         // Status virtiofsd (read-write; for exit-code reporting).
         // Uses auxiliary_virtiofsd_args which adds --sandbox=namespace for
@@ -425,8 +459,12 @@ impl VmPort for CloudHypervisorAdapter {
         for a in &status_args {
             status_cmd.arg(a);
         }
-        let status_virtiofsd_child =
-            status_cmd.kill_on_drop(true).spawn().context("Failed to start status virtiofsd")?;
+        let status_virtiofsd_child = status_cmd
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("Failed to start status virtiofsd")?;
+        let status_virtiofsd_child = forward_virtiofsd_stderr(status_virtiofsd_child, "status");
         let cache_virtiofsd_child = if let (Some(cache_socket), Some(cache_dir)) =
             (cache_socket.as_ref(), config.cache_mount_dir.as_ref())
         {
@@ -435,7 +473,14 @@ impl VmPort for CloudHypervisorAdapter {
             for a in &cache_args {
                 cache_cmd.arg(a);
             }
-            Some(cache_cmd.kill_on_drop(true).spawn().context("Failed to start cache virtiofsd")?)
+            Some(forward_virtiofsd_stderr(
+                cache_cmd
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .context("Failed to start cache virtiofsd")?,
+                "cache",
+            ))
         } else {
             None
         };
@@ -840,6 +885,20 @@ mod tests {
             !args.iter().any(|a| a.starts_with("--gid-map")),
             "auxiliary virtiofsd must NOT include --gid-map; got: {args:?}"
         );
+    }
+
+    #[test]
+    fn classifies_benign_virtiofsd_credential_noise() {
+        assert!(is_benign_virtiofsd_credential_noise(
+            "[ERROR virtiofsd::passthrough::credentials] failed to change uid back to root: Invalid argument (os error 22)"
+        ));
+        assert!(is_benign_virtiofsd_credential_noise(
+            "[ERROR virtiofsd::passthrough::credentials] failed to change gid back to root: Invalid argument (os error 22)"
+        ));
+        // A genuine error must NOT be classified as benign.
+        assert!(!is_benign_virtiofsd_credential_noise(
+            "[ERROR virtiofsd] failed to mount shared dir: Permission denied"
+        ));
     }
 
     #[test]
