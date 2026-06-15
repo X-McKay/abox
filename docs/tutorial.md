@@ -264,14 +264,19 @@ Only when the model gateway is bound to host loopback (e.g. a LiteLLM gateway on
 `localhost:4000`) and cannot be exposed otherwise, declare a host-port bridge:
 
 ```toml
-# .abox/project.toml — requires network.mode = "scoped" (or "open")
+# .abox/project.toml
+[network]
+mode = "scoped"   # host-port bridges are refused in "safe" mode
+
 [[host_ports]]
 guest = 4000
 host  = 4000
 ```
 
-The agent then reaches the gateway at `127.0.0.1:4000` inside the guest. Pair
-this with `--input-file` to hand a custom runner its task payload.
+A declared host-port bridge counts as a `scoped` addition, so `mode = "scoped"`
+with only `[[host_ports]]` is valid — no egress domain is required, and egress
+stays restrictive. The agent then reaches the gateway at `127.0.0.1:4000` inside
+the guest. Pair this with `--input-file` to hand a custom runner its task payload.
 
 ## 9. What just happened?
 

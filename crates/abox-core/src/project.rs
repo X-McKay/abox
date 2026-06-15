@@ -270,6 +270,10 @@ pub struct ResolvedProjectConfig {
     pub project_id: String,
     /// The normalized default network mode from repo config.
     pub default_network_mode: NetworkMode,
+    /// Whether the repo declares any `[[host_ports]]` bridges. A declared
+    /// host-port bridge counts as a `scoped` addition, so a `scoped` config
+    /// whose only addition is a host-port bridge is not normalized to `safe`.
+    pub has_host_ports: bool,
     /// Scoped bundles declared by the repo.
     pub bundles: Vec<String>,
     /// Scoped exact hostnames declared by the repo.
@@ -383,6 +387,7 @@ impl ProjectConfig {
         if self.network.mode == NetworkMode::Scoped
             && self.network.bundles.is_empty()
             && self.network.domains.is_empty()
+            && self.host_ports.is_empty()
         {
             default_network_mode = NetworkMode::Safe;
             notes.push(
@@ -445,6 +450,7 @@ impl ProjectConfig {
             config_path,
             project_id,
             default_network_mode,
+            has_host_ports: !self.host_ports.is_empty(),
             bundles,
             domains,
             environment_profile,
@@ -602,7 +608,9 @@ impl ResolvedProjectConfig {
                 NetworkScope { mode, bundles: self.bundles.clone(), domains: self.domains.clone() }
             }
         };
-        validate_network_scope(&scope)?;
+        // A declared host-port bridge is itself a reviewable `scoped` addition,
+        // so a scoped config whose only addition is a host-port bridge is valid.
+        validate_network_scope(&scope, self.has_host_ports)?;
         Ok(scope)
     }
 
@@ -770,7 +778,8 @@ pub fn starter_config_toml_with_profile(profile: Option<EnvironmentProfile>) -> 
 /// Build a network scope when no repo-local config exists.
 pub fn standalone_network_scope(mode: NetworkMode) -> Result<NetworkScope> {
     let scope = NetworkScope { mode, bundles: Vec::new(), domains: Vec::new() };
-    validate_network_scope(&scope)?;
+    // Standalone (no repo config) has no host-port bridges to count as an addition.
+    validate_network_scope(&scope, false)?;
     Ok(scope)
 }
 
@@ -974,7 +983,7 @@ pub fn bundle_description(bundle: &str) -> Option<&'static str> {
     bundle_spec(bundle).map(|spec| spec.description)
 }
 
-fn validate_network_scope(scope: &NetworkScope) -> Result<()> {
+fn validate_network_scope(scope: &NetworkScope, allow_empty_scoped: bool) -> Result<()> {
     for bundle in &scope.bundles {
         if bundle_hosts(bundle).is_none() {
             anyhow::bail!(
@@ -996,8 +1005,10 @@ fn validate_network_scope(scope: &NetworkScope) -> Result<()> {
             }
         }
         NetworkMode::Scoped => {
-            if scope.bundles.is_empty() && scope.domains.is_empty() {
-                anyhow::bail!("scoped mode requires at least one bundle or domain");
+            if scope.bundles.is_empty() && scope.domains.is_empty() && !allow_empty_scoped {
+                anyhow::bail!(
+                    "scoped mode requires at least one bundle, domain, or host-port bridge"
+                );
             }
         }
         NetworkMode::Open => {
@@ -1779,6 +1790,7 @@ mod tests {
             config_path: PathBuf::from(".abox/project.toml"),
             project_id: "repo".into(),
             default_network_mode: NetworkMode::Safe,
+            has_host_ports: false,
             bundles: vec![],
             domains: vec![],
             environment_profile: EnvironmentProfile::Base,
@@ -1880,6 +1892,48 @@ host = 4000
 ";
         let cfg: ProjectConfig = toml::from_str(toml).unwrap();
         assert!(cfg.validate(std::path::Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn scoped_with_only_host_ports_stays_scoped() {
+        // A scoped config whose only addition is a host-port bridge must NOT be
+        // normalized to safe, and must resolve to an effective scoped scope
+        // (otherwise the gated, version-controlled bridge would be unusable).
+        let toml = r"
+[network]
+mode = 'scoped'
+
+[[host_ports]]
+guest = 4000
+host = 4000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let tmp = tempdir().unwrap();
+        let cfg_path = ProjectConfig::default_path(tmp.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, toml).unwrap();
+
+        let resolved = cfg.resolve(tmp.path()).unwrap();
+        assert_eq!(resolved.default_network_mode, NetworkMode::Scoped);
+        assert!(resolved.has_host_ports);
+        let scope = resolved.effective_network_scope(None).unwrap();
+        assert_eq!(scope.mode, NetworkMode::Scoped);
+    }
+
+    #[test]
+    fn scoped_without_additions_still_normalizes_to_safe() {
+        let toml = r"
+[network]
+mode = 'scoped'
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let tmp = tempdir().unwrap();
+        let cfg_path = ProjectConfig::default_path(tmp.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, toml).unwrap();
+
+        let resolved = cfg.resolve(tmp.path()).unwrap();
+        assert_eq!(resolved.default_network_mode, NetworkMode::Safe);
     }
 
     #[test]

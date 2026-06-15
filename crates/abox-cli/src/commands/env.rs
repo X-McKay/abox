@@ -810,6 +810,7 @@ mod tests {
             config_path: PathBuf::from(".abox/project.toml"),
             project_id: "repo".into(),
             default_network_mode: abox_core::project::NetworkMode::Safe,
+            has_host_ports: false,
             bundles: vec![],
             domains: vec![],
             environment_profile: EnvironmentProfile::Base,
