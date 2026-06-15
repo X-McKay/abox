@@ -74,6 +74,9 @@ Official guest profiles are also available for repo-owned workflows:
 - `base`
 - `node`
 - `python`
+- `python-glibc` — Python on a Debian/glibc base so `pip`/`uv` install
+  `manylinux` wheels (numpy, pandas, scipy, …). Larger image than the musl
+  `python` profile; choose it when you need prebuilt scientific wheels.
 - `rust`
 
 These install as separate rootfs images under `~/.abox/vm/profiles/` and are
@@ -294,6 +297,9 @@ For profile-backed repo environments:
 - `node` is validated for `npm`
 - `python` is validated for `uv` / `pip3`, and prepare flows should prefer
   `uv`-managed virtual environments over `uv pip install --system`
+- `python-glibc` is the same as `python` but runs on a Debian/glibc base;
+  use it when your prepare flow installs packages that only ship `manylinux`
+  wheels (numpy, pandas, scipy, etc.)
 - `rust` is validated for `cargo`, but the current guest toolchain is
   `rustc/cargo 1.76.0`; repos requiring Cargo edition 2024 or Cargo.lock v4
   need a newer guest toolchain before warming

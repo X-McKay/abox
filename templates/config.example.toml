@@ -81,3 +81,14 @@ egress_port = 18443
 #
 # [auth.advanced.stub_files.stub]
 # access_token = "abox-proxy-managed"
+
+# ─── Repo-owned environment (project.toml, not config.toml) ───────────────────
+#
+# Guest profile selection lives in .abox/project.toml for each repo, not here.
+# This block is shown for reference only.
+#
+# [environment]
+# profile = "python"          # default Python profile (Alpine/musl)
+# profile = "python-glibc"   # Python on glibc; pip/uv get manylinux wheels (larger image)
+# profile = "node"
+# profile = "rust"

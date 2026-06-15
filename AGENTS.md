@@ -129,7 +129,7 @@ Tests are organized into four tiers by their requirements:
 
 **Before a release:** Run `just pre-release`. It detects host capabilities, runs all applicable tiers, compares benchmarks against the previous release, and writes attestation stamps. `release.sh` verifies these stamps before tagging.
 
-**During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just tier-vm` after VM/guest changes. If you changed `guest/init.sh` or `scripts/build_rootfs.sh`, run `just rebuild-rootfs` before the VM-backed checks so they exercise the current guest image rather than a stale rootfs.
+**During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just tier-vm` after VM/guest changes. If you changed `guest/init.sh` or `scripts/build_rootfs.sh`, run `just rebuild-rootfs` before the VM-backed checks so they exercise the current guest image rather than a stale rootfs. Glibc profiles (e.g. `python-glibc`) are produced from `scripts/glibc/<profile>.Dockerfile` via `bootstrap_vm.sh`'s `produce_glibc_base` function; any change to `scripts/glibc/**` or the rootfs build pipeline still requires `just rebuild-rootfs` followed by `just e2e-vm` per the pre-PR checklist.
 
 ## Files You Should NOT Modify Without Good Reason
 
