@@ -1884,6 +1884,23 @@ host = 5000
     }
 
     #[test]
+    fn rejects_host_port_colliding_with_service() {
+        // postgres listens on its default guest port 5432; a host-port bridge
+        // declaring guest = 5432 would stage a second in-guest listener.
+        let toml = r"
+[services]
+postgres = { version = '17' }
+
+[[host_ports]]
+guest = 5432
+host = 9000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let err = cfg.validate(std::path::Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("5432"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn rejects_host_port_zero() {
         let toml = r"
 [[host_ports]]

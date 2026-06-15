@@ -936,4 +936,37 @@ mod tests {
         assert_eq!(mode & 0o777, 0o444);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn stage_input_files_handles_multiple() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("abox-inputs-multi-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let meta_dir = tmp.join("meta");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(src_dir.join("a.txt"), b"aaa").unwrap();
+        std::fs::write(src_dir.join("b.txt"), b"bbbb").unwrap();
+
+        let files = vec![
+            crate::vm::InputFile {
+                host_path: src_dir.join("a.txt"),
+                guest_name: "a.txt".to_string(),
+            },
+            crate::vm::InputFile {
+                host_path: src_dir.join("b.txt"),
+                guest_name: "renamed.txt".to_string(),
+            },
+        ];
+        super::stage_input_files(&meta_dir, &files).unwrap();
+
+        let inputs = meta_dir.join("inputs");
+        assert_eq!(std::fs::read(inputs.join("a.txt")).unwrap(), b"aaa");
+        assert_eq!(std::fs::read(inputs.join("renamed.txt")).unwrap(), b"bbbb");
+        for name in ["a.txt", "renamed.txt"] {
+            let mode = std::fs::metadata(inputs.join(name)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o444, "{name} should be read-only");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
