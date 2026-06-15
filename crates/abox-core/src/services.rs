@@ -124,6 +124,20 @@ pub struct GuestServiceBridge {
     pub vsock_port: u32,
 }
 
+/// A repo-declared bridge from a guest loopback port to an existing host
+/// loopback service. Unlike `[services]` sidecars, abox launches nothing —
+/// it splices the guest port to a port the operator already runs on the host.
+///
+/// This is an explicit hole in the egress boundary: it is refused in `safe`
+/// network mode and every connection through it is written to the audit log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostPortBridge {
+    /// Port the agent connects to inside the guest (`127.0.0.1:<guest>`).
+    pub guest: u16,
+    /// Existing host loopback port to splice to (`127.0.0.1:<host>`).
+    pub host: u16,
+}
+
 impl ServiceBridge {
     /// Project the host-side bridge to the guest-visible subset.
     pub fn guest(&self) -> GuestServiceBridge {

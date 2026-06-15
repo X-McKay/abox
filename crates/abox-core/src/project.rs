@@ -243,6 +243,11 @@ pub struct ProjectConfig {
     /// ```
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub services: std::collections::HashMap<String, crate::services::ServiceConfig>,
+    /// Repo-declared host-port bridges. Each splices a guest loopback port to
+    /// an existing host loopback service. Refused in `safe` network mode and
+    /// audited per connection — an explicit egress-boundary exception.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_ports: Vec<crate::services::HostPortBridge>,
 }
 
 /// The normalized scoped network input used by policy compilation.
@@ -1378,6 +1383,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1396,6 +1402,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         config.validate(Path::new(".")).unwrap();
@@ -1422,6 +1429,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1442,6 +1450,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(Path::new(".")).unwrap_err();
@@ -1469,6 +1478,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1497,6 +1507,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(temp.path()).unwrap_err();
@@ -1515,6 +1526,7 @@ mod tests {
             environment: None,
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let temp = tempdir().unwrap();
@@ -1601,6 +1613,7 @@ mod tests {
                 default_prompt_file: Some(PathBuf::from(".abox/prompt.md")),
             }),
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -1627,6 +1640,7 @@ mod tests {
                 default_prompt_file: Some(PathBuf::from("../outside-secret.txt")),
             }),
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(&repo_root).expect_err("prompt path should be rejected");
@@ -1658,6 +1672,7 @@ mod tests {
                 }),
                 agent: None,
                 services: std::collections::HashMap::new(),
+            host_ports: vec![],
             };
 
             let err = config.validate(&repo_root).expect_err("symlink escape should be rejected");
@@ -1683,6 +1698,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
 
         let err = config.validate(&repo_root).expect_err("watch escape should be rejected");
@@ -1711,6 +1727,7 @@ mod tests {
             }),
             agent: None,
             services: std::collections::HashMap::new(),
+            host_ports: vec![],
         };
         let config_path = ProjectConfig::default_path(repo_root);
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -1792,6 +1809,19 @@ mod tests {
             image_path_for_profile(&config, EnvironmentProfile::Python),
             temp.path().join("vm/profiles/python/rootfs.raw")
         );
+    }
+
+    #[test]
+    fn parses_host_ports_section() {
+        let toml = r"
+[[host_ports]]
+guest = 4000
+host = 4000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.host_ports.len(), 1);
+        assert_eq!(cfg.host_ports[0].guest, 4000);
+        assert_eq!(cfg.host_ports[0].host, 4000);
     }
 
     #[test]
