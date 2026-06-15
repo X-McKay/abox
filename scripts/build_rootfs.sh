@@ -49,17 +49,19 @@ profile_output_dir() {
 }
 
 profile_image_size_mib() {
-    case "$ABOX_PROFILE" in
-        base|node)
-            printf '%s\n' "768"
-            ;;
-        python)
-            printf '%s\n' "1024"
-            ;;
-        rust)
-            printf '%s\n' "2048"
-            ;;
-    esac
+    # Size the ext4 image from the actual staged content plus headroom, so it
+    # auto-scales per profile and never overflows as toolchains/CLIs grow (the
+    # Codex CLI alone ships a ~220 MiB vendored binary). `stage` is visible here
+    # via bash dynamic scoping from the build function, and this runs after
+    # everything is staged. Falls back to a generous default if `stage` is unset.
+    local stage_dir="${stage:-}"
+    if [[ -z "$stage_dir" || ! -d "$stage_dir" ]]; then
+        printf '%s\n' "2560"
+        return
+    fi
+    local stage_size_mib
+    stage_size_mib="$(du -sm "$stage_dir" | cut -f1)"
+    printf '%s\n' "$(( stage_size_mib + 512 ))"
 }
 
 host_mode() {
@@ -202,8 +204,11 @@ inner_mode() {
     echo "  installing Claude Code and Codex CLIs..."
     local npm_prefix="$stage/usr/local"
     mkdir -p "$npm_prefix/lib" "$npm_prefix/bin"
+    # `--loglevel=error` suppresses npm progress noise but keeps full error
+    # output, so a failed install (e.g. a network error) is fully visible in
+    # the build log rather than truncated by a `tail`.
     npm install --global --prefix "$npm_prefix" \
-        @anthropic-ai/claude-code@2.1.109 @openai/codex@0.121.0 2>&1 | tail -5
+        @anthropic-ai/claude-code@2.1.177 @openai/codex@0.139.0 --loglevel=error
     find "$npm_prefix/bin" -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +
 
     echo "  building system CA trust bundle..."
