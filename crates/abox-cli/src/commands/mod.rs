@@ -10,6 +10,7 @@ pub mod grant_mcp;
 pub mod init;
 pub mod list;
 pub mod merge;
+pub mod path;
 pub mod project;
 pub mod run;
 pub mod services;

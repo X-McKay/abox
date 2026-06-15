@@ -65,6 +65,9 @@ enum Commands {
     /// Stop a sandbox.
     Stop(commands::stop::StopArgs),
 
+    /// Print the host worktree path for a sandbox (for collecting results).
+    Path(commands::path::PathArgs),
+
     /// Show file divergence across sandboxes.
     #[command(alias = "diff")]
     Divergence(commands::divergence::DivergenceArgs),
@@ -259,6 +262,7 @@ async fn main() -> Result<()> {
         Commands::Attach(args) => commands::attach::execute(args, &orchestrator).await,
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,
         Commands::Divergence(ref args) => commands::divergence::execute(args, &orchestrator),
+        Commands::Path(ref args) => commands::path::execute(args, &orchestrator),
         Commands::Merge(ref args) => commands::merge::execute(args, &orchestrator),
         Commands::Template(ref args) => match &args.action {
             commands::template::TemplateAction::Create { name, from } => {
