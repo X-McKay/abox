@@ -542,6 +542,37 @@ impl ProjectConfig {
             validate_mount_excludes(&environment.mount_excludes)?;
         }
 
+        // Each host-port bridge becomes a guest-side socat TCP listener, so guest
+        // ports must be non-zero and unique across host-port bridges and the
+        // well-known ports of declared [services] sidecars — otherwise the
+        // in-guest listeners would collide at boot.
+        {
+            use std::collections::HashSet;
+            let mut guest_ports: HashSet<u16> = HashSet::new();
+            for name in self.services.keys() {
+                if let Some(def) = crate::services::find_service_def(name) {
+                    guest_ports.insert(def.default_port);
+                }
+            }
+            for hp in &self.host_ports {
+                if hp.guest == 0 || hp.host == 0 {
+                    anyhow::bail!(
+                        "[[host_ports]] entry has an invalid port 0 (guest = {}, host = {})",
+                        hp.guest,
+                        hp.host
+                    );
+                }
+                if !guest_ports.insert(hp.guest) {
+                    anyhow::bail!(
+                        "[[host_ports]] guest port {} is declared more than once (or collides \
+                         with a [services] sidecar port); each guest port maps to exactly one \
+                         in-guest listener",
+                        hp.guest
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1822,6 +1853,48 @@ host = 4000
         assert_eq!(cfg.host_ports.len(), 1);
         assert_eq!(cfg.host_ports[0].guest, 4000);
         assert_eq!(cfg.host_ports[0].host, 4000);
+    }
+
+    #[test]
+    fn rejects_duplicate_host_port_guest() {
+        let toml = r"
+[[host_ports]]
+guest = 4000
+host = 4000
+
+[[host_ports]]
+guest = 4000
+host = 5000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        let err = cfg.validate(std::path::Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("4000"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_host_port_zero() {
+        let toml = r"
+[[host_ports]]
+guest = 0
+host = 4000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.validate(std::path::Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn accepts_distinct_host_port_guests() {
+        let toml = r"
+[[host_ports]]
+guest = 4000
+host = 4000
+
+[[host_ports]]
+guest = 4001
+host = 5000
+";
+        let cfg: ProjectConfig = toml::from_str(toml).unwrap();
+        cfg.validate(std::path::Path::new(".")).unwrap();
     }
 
     #[test]

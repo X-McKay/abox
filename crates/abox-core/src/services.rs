@@ -740,4 +740,55 @@ mod tests {
         assert_eq!(&out, b"hello");
         bridge.abort();
     }
+
+    #[tokio::test]
+    async fn host_port_bridge_audits_each_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A fake host service: a TCP echo server on the host loopback.
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host_port = upstream.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = upstream.accept().await {
+                let mut buf = [0u8; 5];
+                let _ = s.read_exact(&mut buf).await;
+                let _ = s.write_all(&buf).await; // echo
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("vsock-test.sock_5200");
+        let audit_path = dir.path().join("audit.jsonl");
+        let audit: std::sync::Arc<dyn crate::proxy_bridge::AuditSink> =
+            std::sync::Arc::new(crate::proxy_bridge::FileAuditSink::open(&audit_path).unwrap());
+
+        let sock2 = sock.clone();
+        let bridge = tokio::spawn(async move {
+            let _ = serve_host_port_bridge(sock2, 4000, host_port, "audit-task".to_string(), audit)
+                .await;
+        });
+
+        for _ in 0..100 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut out = [0u8; 5];
+        client.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"hello");
+
+        // The connect event is appended synchronously on accept (before
+        // forwarding); a short pause covers filesystem flush on slow CI.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        bridge.abort();
+
+        let log = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(log.contains("host-port-bridge"), "setup event missing:\n{log}");
+        assert!(log.contains("host-port-connect"), "per-connection event missing:\n{log}");
+        assert!(log.contains("guest:4000->host:"), "port mapping missing:\n{log}");
+    }
 }
