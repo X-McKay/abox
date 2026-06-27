@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.6.0 — 2026-06-27
+
+### Features
+
+- feat: add python-glibc guest profile (Debian/glibc base) for manylinux wheels (#30) (78429fd)
+- feat: orchestrator integration — input-file, host-port bridge, --json, path, virtiofsd quieting (#24-#28) (#29) (076fc37)
+
+### Fixes
+
+- fix(deps): upgrade git2 to 0.21 (RUSTSEC-2026-0183/0184) (#31) (6db4aca)
+
+### Chores
+
+- chore(ci): bump action-gh-release to v3 (Node 24 runtime) (#23) (21edf7f)
+
+
 ## v0.5.0 — 2026-06-14
 
 ### Features
