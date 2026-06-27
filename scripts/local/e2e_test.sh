@@ -627,6 +627,87 @@ else
         echo "$STUB_OUT" | tail -10 | sed "s/^/    /"
     fi
 
+    # ─── Phase 6b: python-glibc manylinux wheels (gated on profile image) ──
+    # The python-glibc (Debian/glibc) guest profile must resolve `manylinux`
+    # wheels, unlike the musl `python` profile. The authoritative, package-
+    # independent discriminator is the interpreter's supported wheel platform
+    # tags (`pip debug --verbose`): glibc → manylinux_*, musl → musllinux_*.
+    #
+    # Profile selection is repo-config driven (.abox/project.toml → [environment]
+    # profile = "python-glibc"); there is no per-run `--profile` flag. So we use
+    # a dedicated scratch repo with that profile, trusted non-interactively.
+    #
+    # `image_path_for_profile` resolves non-base profiles to
+    # <state_dir>/vm/profiles/<profile>/rootfs.raw (it ignores the [vm_defaults]
+    # image_path override, which only applies to the base profile). state_dir is
+    # under $SCRATCH, so we symlink the real bootstrapped image into place.
+    if [[ -f "$ABOX_VM/profiles/python-glibc/rootfs.raw" ]]; then
+        section "phase 6b — python-glibc manylinux wheels (gated)"
+
+        # Make the bootstrapped glibc rootfs discoverable at the path the
+        # profile resolver computes from the scratch state_dir.
+        GLIBC_PROFILE_DIR="$SCRATCH/state/vm/profiles/python-glibc"
+        mkdir -p "$GLIBC_PROFILE_DIR"
+        ln -sf "$ABOX_VM/profiles/python-glibc/rootfs.raw" "$GLIBC_PROFILE_DIR/rootfs.raw"
+
+        # Dedicated scratch repo pinned to the python-glibc profile.
+        GLIBC_REPO="$SCRATCH/glibc-repo"
+        mkdir -p "$GLIBC_REPO"
+        (
+            cd "$GLIBC_REPO"
+            git init -q -b main
+            git config user.email "e2e@abox.test"
+            git config user.name "abox-e2e"
+            echo "# python-glibc e2e repo" > README.md
+            git add README.md
+            git commit -q -m "init"
+        )
+        ABOX_GLIBC="$ABOX_BIN --config $SCRATCH/config.toml --repo $GLIBC_REPO"
+        # Pin the repo to the python-glibc profile.
+        mkdir -p "$GLIBC_REPO/.abox"
+        cat > "$GLIBC_REPO/.abox/project.toml" <<'EOF'
+[network]
+mode = "safe"
+
+[environment]
+profile = "python-glibc"
+EOF
+        # Trust it non-interactively (the e2e runs piped, so an untrusted repo
+        # config would otherwise bail before launch).
+        $ABOX_GLIBC project trust >/dev/null 2>&1 || true
+
+        step "python-glibc reports manylinux platform tags (and not musllinux)"
+        how 'abox run --task glibc-tags --ephemeral -- /bin/sh -lc "pip debug --verbose"'
+        expect "output advertises manylinux_* tags and no musllinux_* tags"
+        # The tag check needs no network and is the authoritative discriminator.
+        TAGS=$(timeout 120 $ABOX_GLIBC run --task glibc-tags --ephemeral \
+            -- /bin/sh -lc 'pip debug --verbose 2>/dev/null' 2>&1 || true)
+        if grep -q "manylinux" <<<"$TAGS" && ! grep -q "musllinux" <<<"$TAGS"; then
+            pass "python-glibc advertises manylinux tags"
+        else
+            fail "python-glibc manylinux tags" "expected manylinux and no musllinux"
+            tail -20 <<<"$TAGS" | sed "s/^/    /"
+        fi
+        $ABOX_GLIBC stop glibc-tags --clean 2>/dev/null || true
+
+        step "python-glibc installs a manylinux wheel and imports it"
+        how 'abox run --task glibc-wheel --ephemeral --network open -- pip install cryptography && import it'
+        expect "pip installs a manylinux wheel for cryptography and import prints a version"
+        # Smoke test (not the discriminator). cryptography ships manylinux
+        # wheels. Debian bookworm's pip is PEP-668 externally managed, so a
+        # system install needs --break-system-packages. --network open routes
+        # the wheel download through abox's egress proxy to PyPI (open mode
+        # permits proxy-mediated HTTPS passthrough — no policy change needed).
+        OUT=$(timeout 240 $ABOX_GLIBC run --task glibc-wheel --ephemeral --network open \
+            -- /bin/sh -lc 'pip install --quiet --break-system-packages --only-binary=:all: cryptography && python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1 || true)
+        if grep -qE "^[0-9]+\." <<<"$OUT"; then
+            pass "python-glibc installed + imported a manylinux wheel"
+        else
+            fail "python-glibc manylinux install" "$OUT"
+        fi
+        $ABOX_GLIBC stop glibc-wheel --clean 2>/dev/null || true
+    fi
+
     step "abox stop --clean removes the sandbox completely"
     how "abox stop lifecycle --clean && abox list"
     expect "no active sandboxes"

@@ -46,10 +46,10 @@ PROFILES=(base)
 add_profile() {
     local profile="$1"
     case "$profile" in
-        base|node|python|rust)
+        base|node|python|python-glibc|rust)
             ;;
         *)
-            echo "ERROR: unsupported profile '$profile' (expected base, node, python, or rust)" >&2
+            echo "ERROR: unsupported profile '$profile' (expected base, node, python, python-glibc, or rust)" >&2
             exit 1
             ;;
     esac
@@ -98,7 +98,7 @@ Usage: $(basename "$0") [--no-symlink] [--yes] [--profile <name>] [--from-bundle
                         Honored from the BOOTSTRAP_YES=1 environment variable too.
   --profile <name>      Build an additional official guest profile image.
                         Repeat to add more profiles. Supported values:
-                        base, node, python, rust.
+                        base, node, python, python-glibc, rust.
   --from-bundle <path>  Restore VM assets from a pre-built tarball instead of
                         downloading components individually. The tarball should
                         be an abox-vm-assets-*.tar.gz from a GitHub release.
@@ -283,10 +283,47 @@ if [ ! -f "$HOME/.abox/ca/root.crt" ]; then
     cargo run -p abox-core --example ca_init
 fi
 
+# Build a glibc profile's Debian base on the host (Docker handles apt/network
+# unprivileged) and `docker export` it to a rootfs tarball consumed by
+# build_rootfs.sh — no docker-in-docker. Cached by the Dockerfile's content hash.
+produce_glibc_base() {
+    local profile="$1"
+    local dockerfile="$REPO_ROOT/scripts/glibc/${profile}.Dockerfile"
+    local out="$ABOX_VM_DIR/${profile}-rootfs.tar.gz"
+    local stamp="$out.dockerfile.sha256"
+    [ -f "$dockerfile" ] || { echo "ERROR: missing $dockerfile" >&2; exit 1; }
+    local want
+    want="$(sha256sum "$dockerfile" | cut -d' ' -f1)"
+    if [[ -f "$out" && -f "$stamp" && "$(cat "$stamp")" == "$want" ]]; then
+        echo "  glibc base for '$profile' is up to date (cached)"
+        return
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "ERROR: 'docker' is required to build the '$profile' (glibc) base, but was not found in PATH." >&2
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "ERROR: the Docker daemon is not running or not accessible (needed to build the '$profile' glibc base)." >&2
+        exit 1
+    fi
+    echo "  building glibc base for '$profile' via Docker..."
+    local tag="abox-rootfs-${profile}:$(printf '%s' "$want" | cut -c1-16)"
+    docker build -f "$dockerfile" -t "$tag" "$REPO_ROOT/scripts/glibc"
+    local cid
+    cid="$(docker create "$tag")"
+    docker export "$cid" | gzip > "$out"
+    docker rm "$cid" >/dev/null
+    printf '%s\n' "$want" > "$stamp"
+    echo "  glibc base for '$profile' -> $out ($(du -h "$out" | cut -f1))"
+}
+
 # ─── Phase 5: Assemble the guest rootfs ──────────────────────────────────
 echo "[5/5] Assembling guest rootfs image(s)..."
 for profile in "${PROFILES[@]}"; do
     echo "  profile: $profile"
+    case "$profile" in
+        *-glibc) produce_glibc_base "$profile" ;;
+    esac
     SHIM_BIN="$SHIM_BIN" \
     ABOX_VM_DIR="$ABOX_VM_DIR" \
     ABOX_PROFILE="$profile" \

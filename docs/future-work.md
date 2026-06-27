@@ -147,3 +147,21 @@ latency buckets, denial reasons) for Prometheus ingestion.
 
 Age-encrypt the JSONL audit log on rotation for deployments where the
 log itself is sensitive.
+
+### L9. Expand the glibc profile family
+
+Now that the libc axis exists (`python-glibc`), adding `node-glibc` and
+`rust-glibc` profiles is a one-Dockerfile-plus-one-enum-arm change each,
+built on the same `produce_glibc_base` path.
+
+### L10. Profile naming symmetry: `python-musl` alias
+
+A `python-musl` alias for the existing `python` profile would make the
+libc axis read consistently across all profile names, without renaming or
+breaking existing configurations.
+
+### L11. `abox init` / `abox doctor` steering for data-science users
+
+When a user's repo installs numpy/pandas/scipy without `python-glibc`, an
+`abox doctor` hint (or `abox init` question) could steer them to the right
+profile before they hit a confusing wheel-resolution failure.

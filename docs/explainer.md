@@ -363,6 +363,24 @@ If any of these get re-published or corrupted in transit, the bootstrap fails fa
 
 ---
 
+## 10a. The libc axis: musl vs. glibc guest profiles
+
+All standard profiles (`base`, `node`, `python`, `rust`) are built on **Alpine Linux**, which uses **musl libc**. Alpine is small and fast, but musl has one practical consequence for Python workflows: `pip` and `uv` detect the guest as a `musllinux` platform and will only install `musllinux` wheels. Most scientific Python packages (numpy, pandas, scipy, and the wider PyData stack) only publish `manylinux` wheels — wheels built against glibc — and do not publish `musllinux` variants. This means `pip install numpy` inside the `python` profile either pulls a source distribution (slow, requires a C compiler in the guest) or fails entirely. Installing `gcompat` on musl does **not** fix this: `gcompat` provides a glibc-compatible runtime shim, but `pip`'s platform tag is determined at package-resolution time from the OS ABI, not from what runtime libraries are installed. The platform tag stays `musllinux` and `manylinux`-only packages remain unavailable.
+
+The **`python-glibc`** profile solves this by replacing the Alpine base with **Debian bookworm-slim** (pinned by digest in `scripts/glibc/python-glibc.Dockerfile`). On a glibc host the platform tag becomes `manylinux`, so prebuilt wheels resolve normally. The Dockerfile is built on the host via `bootstrap_vm.sh`'s `produce_glibc_base` function (a `docker build` + `docker export` that produces a tarball consumed by the same `build_rootfs.sh` pipeline used for all other profiles). The resulting rootfs is installed under `~/.abox/vm/profiles/python-glibc/rootfs.raw` alongside the musl profile images. Because Debian provides `gosu` (a drop-in for `su-exec`), the guest boot path in `runner.sh` / `init.sh` is identical to musl profiles — no special casing for the libc flavor at runtime.
+
+Select the `python-glibc` profile via your repo config:
+
+```toml
+# .abox/project.toml
+[environment]
+profile = "python-glibc"
+```
+
+Or install it up-front with `./scripts/bootstrap_vm.sh --yes --profile python-glibc`. It is an opt-in profile because the Debian base image is larger than the Alpine one; repos that do not need `manylinux` wheels should stay on the default `python` profile.
+
+---
+
 ## 11. The end-to-end test: `scripts/local/e2e_test.sh`
 
 **What it is:** A seven-phase bash script (`./scripts/local/e2e_test.sh` or `just e2e`) that exercises every major component without needing a CI runner with KVM enabled.

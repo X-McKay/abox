@@ -78,6 +78,7 @@ pub enum InitProfileArg {
     Base,
     Node,
     Python,
+    PythonGlibc,
     Rust,
 }
 
@@ -252,6 +253,7 @@ impl InitProfileArg {
             Self::Base => "base",
             Self::Node => "node",
             Self::Python => "python",
+            Self::PythonGlibc => "python-glibc",
             Self::Rust => "rust",
         }
     }
