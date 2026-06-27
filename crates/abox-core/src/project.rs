@@ -990,7 +990,7 @@ pub fn kernel_path_for_profile(config: &AboxConfig) -> PathBuf {
 pub fn default_prepare_base_branch(repo_root: &Path) -> String {
     if let Ok(repo) = Repository::discover(repo_root) {
         if let Ok(head) = repo.head() {
-            if let Some(name) = head.shorthand() {
+            if let Ok(name) = head.shorthand() {
                 return name.to_string();
             }
         }
@@ -1055,15 +1055,15 @@ fn derive_project_identity(repo_root: &Path, project: Option<&ProjectSection>) -
 
     if let Ok(repo) = Repository::discover(repo_root) {
         if let Ok(remote) = repo.find_remote("origin") {
-            if let Some(url) = remote.url() {
+            if let Ok(url) = remote.url() {
                 return Ok(normalize_remote_url(url));
             }
         }
 
         if let Ok(remotes) = repo.remotes() {
-            for name in remotes.iter().flatten() {
+            for name in remotes.iter().filter_map(|r| r.ok().flatten()) {
                 if let Ok(remote) = repo.find_remote(name) {
-                    if let Some(url) = remote.url() {
+                    if let Ok(url) = remote.url() {
                         return Ok(normalize_remote_url(url));
                     }
                 }

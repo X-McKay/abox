@@ -124,7 +124,7 @@ impl WorkspacePort for Git2Workspace {
         let base_branch = resolve_default_branch(&repo);
 
         for name in &wt_names {
-            let Some(name) = name else {
+            let Ok(Some(name)) = name else {
                 continue;
             };
 
@@ -161,7 +161,7 @@ impl WorkspacePort for Git2Workspace {
         let wt_names = repo.worktrees()?;
 
         for name in &wt_names {
-            let Some(name) = name else {
+            let Ok(Some(name)) = name else {
                 continue;
             };
 
