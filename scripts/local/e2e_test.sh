@@ -714,14 +714,22 @@ EOF
         # system install needs --break-system-packages. --network open routes
         # the wheel download through abox's egress proxy to PyPI (open mode
         # permits proxy-mediated HTTPS passthrough — no policy change needed).
-        OUT=$(timeout 240 $ABOX_GLIBC run --task glibc-wheel --ephemeral --network open \
-            -- /bin/sh -lc 'pip install --quiet --break-system-packages --only-binary=:all: cryptography && python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1 || true)
-        if grep -qE "^[0-9]+\." <<<"$OUT"; then
+        # Retry once: this is a network-dependent smoke (PyPI download over the
+        # egress proxy) and can flake on a transient hiccup, unlike the
+        # authoritative tag check above. Two attempts avoid reding the suite on
+        # a one-off blip.
+        WHEEL_OK=""
+        for attempt in 1 2; do
+            OUT=$(timeout 240 $ABOX_GLIBC run --task "glibc-wheel-$attempt" --ephemeral --network open \
+                -- /bin/sh -lc 'pip install --quiet --break-system-packages --only-binary=:all: cryptography && python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1 || true)
+            $ABOX_GLIBC stop "glibc-wheel-$attempt" --clean 2>/dev/null || true
+            if grep -qE "^[0-9]+\." <<<"$OUT"; then WHEEL_OK=1; break; fi
+        done
+        if [ -n "$WHEEL_OK" ]; then
             pass "python-glibc installed + imported a manylinux wheel"
         else
             fail "python-glibc manylinux install" "$OUT"
         fi
-        $ABOX_GLIBC stop glibc-wheel --clean 2>/dev/null || true
     fi
 
     step "abox stop --clean removes the sandbox completely"
