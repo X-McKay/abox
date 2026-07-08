@@ -702,7 +702,8 @@ EOF
             -- /bin/true >/dev/null 2>&1; then
             pass "python-glibc powered off cleanly (rc=0)"
         else
-            fail "python-glibc clean poweroff" "abox returned rc=$? (124 = forced stop = guest could not poweroff)"
+            rc=$?
+            fail "python-glibc clean poweroff" "abox returned rc=$rc (124 = forced stop = guest could not poweroff)"
         fi
         $ABOX_GLIBC stop glibc-poweroff --clean 2>/dev/null || true
 
