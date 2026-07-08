@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg socat iproute2 \
+        ca-certificates curl gnupg socat iproute2 busybox-static \
         python3 python3-pip python3-venv; \
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -; \
     apt-get install -y --no-install-recommends nodejs; \
@@ -32,6 +32,15 @@ RUN set -eux; \
     gpgconf --kill all; rm -rf "$GNUPGHOME" /tmp/gosu.asc; \
     chmod +x /usr/local/bin/gosu; \
     ln -s /usr/local/bin/gosu /usr/local/bin/su-exec; \
+    # guest/init.sh shuts the VM down via `exec poweroff -f`. debian-slim ships
+    # no poweroff (it comes from systemd/sysvinit); provide the busybox applets
+    # like the Alpine profile does, else PID 1 panics at shutdown and the VM
+    # hangs. Symlink only the shutdown applets — do NOT `busybox --install`,
+    # which would shadow Debian coreutils.
+    bb="$(command -v busybox)"; \
+    busybox --list 2>/dev/null | grep -qx poweroff \
+        || { echo "ERROR: busybox lacks the poweroff applet" >&2; exit 1; }; \
+    for c in poweroff halt reboot; do ln -sf "$bb" "/sbin/$c"; done; \
     gosu --version; \
     uv --version; \
     node --version; \

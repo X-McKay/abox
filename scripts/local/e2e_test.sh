@@ -690,6 +690,23 @@ EOF
         fi
         $ABOX_GLIBC stop glibc-tags --clean 2>/dev/null || true
 
+        step "python-glibc VM powers off cleanly (rc=0, not a forced --timeout stop)"
+        how 'abox run --task glibc-poweroff --ephemeral --timeout 60 -- /bin/true'
+        expect "guest runs /bin/true, powers off, abox returns rc=0 (124 = poweroff missing)"
+        # Regression guard: without a poweroff binary the guest panics at
+        # shutdown ("exec: poweroff: not found" -> kill init), the VM never
+        # drains, and abox force-stops at the timeout returning 124. A correct
+        # image exits 0 in ~1s. This asserts the exit CODE (earlier steps only
+        # asserted output, which masked the missing-poweroff bug in 0.6.0).
+        if timeout 90 $ABOX_GLIBC run --task glibc-poweroff --ephemeral --timeout 60 \
+            -- /bin/true >/dev/null 2>&1; then
+            pass "python-glibc powered off cleanly (rc=0)"
+        else
+            rc=$?
+            fail "python-glibc clean poweroff" "abox returned rc=$rc (124 = forced stop = guest could not poweroff)"
+        fi
+        $ABOX_GLIBC stop glibc-poweroff --clean 2>/dev/null || true
+
         step "python-glibc installs a manylinux wheel and imports it"
         how 'abox run --task glibc-wheel --ephemeral --network open -- pip install cryptography && import it'
         expect "pip installs a manylinux wheel for cryptography and import prints a version"
@@ -698,14 +715,22 @@ EOF
         # system install needs --break-system-packages. --network open routes
         # the wheel download through abox's egress proxy to PyPI (open mode
         # permits proxy-mediated HTTPS passthrough — no policy change needed).
-        OUT=$(timeout 240 $ABOX_GLIBC run --task glibc-wheel --ephemeral --network open \
-            -- /bin/sh -lc 'pip install --quiet --break-system-packages --only-binary=:all: cryptography && python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1 || true)
-        if grep -qE "^[0-9]+\." <<<"$OUT"; then
+        # Retry once: this is a network-dependent smoke (PyPI download over the
+        # egress proxy) and can flake on a transient hiccup, unlike the
+        # authoritative tag check above. Two attempts avoid reding the suite on
+        # a one-off blip.
+        WHEEL_OK=""
+        for attempt in 1 2; do
+            OUT=$(timeout 240 $ABOX_GLIBC run --task "glibc-wheel-$attempt" --ephemeral --network open \
+                -- /bin/sh -lc 'pip install --quiet --break-system-packages --only-binary=:all: cryptography && python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1 || true)
+            $ABOX_GLIBC stop "glibc-wheel-$attempt" --clean 2>/dev/null || true
+            if grep -qE "^[0-9]+\." <<<"$OUT"; then WHEEL_OK=1; break; fi
+        done
+        if [ -n "$WHEEL_OK" ]; then
             pass "python-glibc installed + imported a manylinux wheel"
         else
             fail "python-glibc manylinux install" "$OUT"
         fi
-        $ABOX_GLIBC stop glibc-wheel --clean 2>/dev/null || true
     fi
 
     step "abox stop --clean removes the sandbox completely"
