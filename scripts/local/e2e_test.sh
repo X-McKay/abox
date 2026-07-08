@@ -690,6 +690,22 @@ EOF
         fi
         $ABOX_GLIBC stop glibc-tags --clean 2>/dev/null || true
 
+        step "python-glibc VM powers off cleanly (rc=0, not a forced --timeout stop)"
+        how 'abox run --task glibc-poweroff --ephemeral --timeout 60 -- /bin/true'
+        expect "guest runs /bin/true, powers off, abox returns rc=0 (124 = poweroff missing)"
+        # Regression guard: without a poweroff binary the guest panics at
+        # shutdown ("exec: poweroff: not found" -> kill init), the VM never
+        # drains, and abox force-stops at the timeout returning 124. A correct
+        # image exits 0 in ~1s. This asserts the exit CODE (earlier steps only
+        # asserted output, which masked the missing-poweroff bug in 0.6.0).
+        if timeout 90 $ABOX_GLIBC run --task glibc-poweroff --ephemeral --timeout 60 \
+            -- /bin/true >/dev/null 2>&1; then
+            pass "python-glibc powered off cleanly (rc=0)"
+        else
+            fail "python-glibc clean poweroff" "abox returned rc=$? (124 = forced stop = guest could not poweroff)"
+        fi
+        $ABOX_GLIBC stop glibc-poweroff --clean 2>/dev/null || true
+
         step "python-glibc installs a manylinux wheel and imports it"
         how 'abox run --task glibc-wheel --ephemeral --network open -- pip install cryptography && import it'
         expect "pip installs a manylinux wheel for cryptography and import prints a version"
