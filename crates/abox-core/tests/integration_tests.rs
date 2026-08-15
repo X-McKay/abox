@@ -802,6 +802,59 @@ async fn test_orchestrator_stop_with_clean() {
 }
 
 #[tokio::test]
+async fn test_orchestrator_stop_propagates_runtime_error_but_still_cleans() {
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+    let vm = MockRuntime::with_behavior(
+        tmp.path().to_path_buf(),
+        MockBehavior {
+            exit_code: Some(0),
+            stop_error: Some("VM refused to stop".to_string()),
+            ..MockBehavior::default()
+        },
+    );
+    let orch = SandboxOrchestrator::new(config, ws, vm);
+
+    orch.create_sandbox(CreateSandboxParams {
+        task_id: "task-1".to_string(),
+        base_branch: "main".to_string(),
+        memory_mib: None,
+        vcpus: None,
+        user: None,
+        env_vars: vec![],
+        command: vec!["claude".to_string()],
+        resolved_prompt: None,
+        cache_mount_dir: None,
+        staged_prepare_script: None,
+        environment_profile: EnvironmentProfile::Base,
+        timeout_secs: None,
+        ephemeral: false,
+        ca_cert_pem: None,
+        mount_excludes: vec![],
+        service_bridges: Vec::new(),
+        host_port_bridges: Vec::new(),
+        input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    // A genuine runtime stop failure must surface as an error — `abox stop`
+    // must not claim success while the VM keeps running (issue #37)…
+    let result = orch.stop_sandbox("task-1", true).await;
+    assert!(result.is_err(), "runtime stop failure must propagate");
+    // `{:#}` prints the full anyhow context chain, not just the outer layer.
+    assert!(format!("{:#}", result.unwrap_err()).contains("VM refused to stop"));
+
+    // …but the recovery guarantee holds: --clean still removed the worktree.
+    assert!(!wt_base.join("task-1").exists(), "worktree cleanup must still happen");
+}
+
+#[tokio::test]
 async fn test_orchestrator_divergence() {
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");

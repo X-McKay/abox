@@ -349,15 +349,14 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
     /// `clean` is true. This guarantees there is always a CLI path to recover
     /// from orphaned state.
     pub async fn stop_sandbox(&self, task_id: &str, clean: bool) -> Result<()> {
-        match self.runtime.stop(task_id).await {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::warn!(
-                    task_id,
-                    error = %e,
-                    "Sandbox stop returned error (likely already stopped); continuing"
-                );
-            }
+        // A runtime stop error is a real failure (the adapter treats
+        // "already stopped / unknown sandbox" as success), but worktree
+        // cleanup must still run first so there is always a recovery path
+        // for orphaned state. The error is surfaced afterwards — claiming
+        // success while the VM keeps running is worse (issue #37).
+        let stop_result = self.runtime.stop(task_id).await;
+        if let Err(e) = &stop_result {
+            tracing::warn!(task_id, error = %e, "Sandbox stop failed");
         }
 
         if clean {
@@ -366,7 +365,7 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
                 .with_context(|| format!("Failed to remove worktree '{task_id}'"))?;
         }
 
-        Ok(())
+        stop_result.with_context(|| format!("Failed to stop sandbox '{task_id}'"))
     }
 
     /// List all active sandboxes.
