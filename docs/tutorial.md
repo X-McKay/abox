@@ -1,6 +1,6 @@
 # abox in 10 minutes
 
-A zero-to-first-sandbox walkthrough for a Rust-familiar developer who has never seen abox before. Real commands, real captured output. By the end you will have booted a Cloud Hypervisor microVM, run a guest command inside it, watched the audit log attribute the call to your sandbox, and cleaned up.
+A zero-to-first-sandbox walkthrough for a Rust-familiar developer who has never seen abox before. Real commands, real captured output. By the end you will have booted a MicroSandbox microVM, run a guest command inside it, watched the audit log attribute the call to your sandbox, and cleaned up.
 
 If you want the *why* — what each component does and how they fit together — read [`docs/explainer.md`](explainer.md) after this. This page is "do".
 
@@ -8,7 +8,9 @@ If you want the *why* — what each component does and how they fit together —
 
 ## 1. Prerequisites
 
-- **Linux** with KVM available to your user. Check:
+- **Linux (x86_64 or aarch64)** with KVM available to your user, **or macOS
+  on Apple Silicon** (Hypervisor.framework — no setup needed). On Linux,
+  check:
 
   ```bash
   ls -la /dev/kvm
@@ -22,11 +24,12 @@ If you want the *why* — what each component does and how they fit together —
 
   If you don't see `+` or aren't in the `kvm` group: `sudo usermod -aG kvm $USER`, then log out and back in.
 
-- **Rust toolchain** via `rustup`. The musl target will be installed by `bootstrap_vm.sh` if you pass `--yes`.
+- **Rust toolchain** via `rustup`.
 
 - **`just` command runner**: `cargo install just`.
 
-- **About 1 GB of disk** for the VM stack: Cloud Hypervisor + virtiofsd + a Linux kernel + a tiny Alpine rootfs + your `target/` build directory.
+- **About 1 GB of disk** for the MicroSandbox runtime assets, the guest OCI
+  image cache, and your `target/` build directory.
 
 ---
 
@@ -42,7 +45,7 @@ Build takes a couple of minutes the first time and hits the disk for ~700 MB of 
 
 ---
 
-## 3. Bootstrap the VM stack
+## 3. First-run setup
 
 First, put the newly built binary on your `PATH` so you can run it:
 
@@ -56,29 +59,20 @@ Now run the guided setup wizard:
 abox init
 ```
 
-This runs [`scripts/bootstrap_vm.sh`](../scripts/bootstrap_vm.sh) under the hood, which:
+This walks every prerequisite in order:
 
-1. Downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the `vmlinux` kernel, the Alpine 3.19 minirootfs, and the `socat` apk.
-2. Builds `abox-shim` for the static-musl target so it can run inside the minimal Alpine guest.
-3. Assembles a 768 MiB sparse ext4 rootfs containing bash, Node.js/npm, Python 3, `su-exec`, the system CA bundle, the shim, pinned Claude Code / Codex CLIs, and a guest init script.
-4. Symlinks `cloud-hypervisor`, `ch-remote`, and `virtiofsd` into `~/.local/bin/` so `abox run` can find them on a normal `PATH`.
+1. Checks hardware virtualization (`/dev/kvm` on Linux, Hypervisor.framework on macOS).
+2. Installs the MicroSandbox runtime assets (`msb` + libkrunfw guest firmware) into `$MSB_HOME` (default `~/.microsandbox`).
+3. Generates the abox root CA (for HTTPS credential injection).
+4. Writes `~/.abox/config.toml`.
+5. Installs `policies/default.toml` to `~/.abox/policies/default.toml`.
+6. Detects managed-agent credentials (Claude Code / Codex) on the host.
+7. Checks host-staged guest binaries and verifies each requested guest profile resolves to an OCI image, printing the image it will pull.
 
-Total time on a warm cache: ~5-10 seconds. First run with cold cache (~60 MB downloads): about 1 minute.
-
-If `~/.local/bin` is not on your PATH, the bootstrap will print:
-
-```
-WARNING: /home/you/.local/bin is not on your PATH.
-Add this to your shell profile (e.g., ~/.bashrc):
-  export PATH="$HOME/.local/bin:$PATH"
-```
-
-If the `x86_64-unknown-linux-musl` rust target isn't installed, `abox init` will install it automatically.
-
-After downloading the VM artifacts, `abox init` will automatically:
-1. Write `~/.abox/config.toml` with the correct paths pre-filled.
-2. Install `policies/default.toml` to `~/.abox/policies/default.toml`.
-3. Verify that the installed `virtiofsd` supports namespace sandboxing and print the exact `setcap` remediation if `cap_sys_admin+ep` is still missing.
+There is no VM bootstrap, kernel download, or rootfs build — guest
+environments are OCI images pulled on first use. (The old
+`bootstrap_vm.sh` flow still exists for the deprecated Cloud Hypervisor
+backend only; see [`vm-setup.md`](vm-setup.md).)
 
 The default policy allows common `git` and constrained `gh` operations, denies dangerous mutations such as `git push --force`, and default-denies unknown HTTPS egress. Matching HTTPS requests go through the MITM proxy, which injects host-side credentials for Anthropic and OpenAI/Codex. GitHub stays on the host through managed `git` / `gh` execution. Domains listed in `bypass_tls` remain plain TCP passthrough for cert-pinned clients.
 
@@ -88,8 +82,9 @@ To verify your environment is ready, run:
 abox doctor
 ```
 
-If you already know you want the official ecosystem profiles too, install them
-up front:
+If you already know you want the official ecosystem profiles too, name them
+up front and `abox init` will verify each resolves in the image manifest and
+print the image it will pull:
 
 ```bash
 abox init --profile node --profile python --profile rust
@@ -117,7 +112,10 @@ Now boot a sandbox in this repo:
 abox run --task hello -- /bin/sh -c "echo hello from inside the sandbox; /usr/local/bin/git log --oneline"
 ```
 
-You'll see something like (real captured output):
+You'll see the sandbox start, your command's output, and a clean exit
+(this capture is from the legacy Cloud Hypervisor backend — the exact log
+lines differ under MicroSandbox, and the first run per profile also pulls
+the guest OCI image):
 
 ```
 Sandbox 'hello' starting...
@@ -137,7 +135,7 @@ ea68f62 init
 Sandbox 'hello' exited cleanly.
 ```
 
-What just happened, in one paragraph: `abox run` created a git worktree on a new branch `agent/hello`, started one `virtiofsd` for that worktree + one for boot metadata + one for status, started Cloud Hypervisor with vsock + console wired to the host, the guest kernel mounted the three virtiofs shares, `init.sh` ran the runner script which executed `echo hello…; git log --oneline`. The `git` invocation inside the guest is actually a symlink to `abox-shim`, which forwarded the request over vsock to the host's per-VM proxy bridge. The bridge evaluated the policy (allow), executed the real `git log` on the host worktree, returned the output, and the shim printed it. When the runner exited, init.sh wrote `0` to `/abox-status/exit-code`, the VM powered off, and the host read the exit code back through the third virtiofs share.
+What just happened, in one paragraph: `abox run` created a git worktree on a new branch `agent/hello`, started a MicroSandbox microVM from the `base` guest image with that worktree bind-mounted read-write at `/workspace`, bound the per-sandbox broker and egress sockets on the host, and exec'd your command inside the guest as the unprivileged `abox` user. The `git` invocation inside the guest is actually a symlink to `abox-shim`, which forwarded the request over vsock to the host's per-sandbox proxy bridge. The bridge evaluated the policy (allow), executed the real `git log` on the host worktree, returned the output, and the shim printed it. When the command exited, its exit code propagated directly back through the runtime and the sandbox stopped.
 
 ---
 
@@ -282,14 +280,14 @@ the guest. Pair this with `--input-file` to hand a custom runner its task payloa
 
 In about 10 minutes you:
 
-1. Installed a self-contained VM stack (Cloud Hypervisor + virtiofsd + Linux kernel + Alpine rootfs) with one command.
-2. Booted a real microVM, mounted a git worktree into it via `virtiofs`, and executed a guest command inside it.
+1. Installed the MicroSandbox runtime assets and abox config with one command.
+2. Booted a real microVM, mounted a git worktree into it, and executed a guest command inside it.
 3. Watched the policy proxy intercept a `git` call from the guest, evaluate it against your policy, and execute it on the host with attribution.
 4. Saw the guest agent's exit code propagate cleanly back to your shell.
 5. Cleaned everything up.
 
-If you want to know **why** every piece exists (what the third virtiofs share is for, why we use vsock instead of TCP, what the shim is doing under the hood, why Cloud Hypervisor specifically), read [`docs/explainer.md`](explainer.md). It's longer but covers every component in depth.
+If you want to know **why** every piece exists (why we use vsock instead of TCP, what the shim is doing under the hood, how the runtime stages the guest), read [`docs/explainer.md`](explainer.md) and [`docs/runtime.md`](runtime.md). They're longer but cover every component in depth.
 
 If you want to set up your own policies, see [`policies/default.toml`](../policies/default.toml) as a starting point and [`docs/decisions/001-architecture.md`](decisions/001-architecture.md) for the rationale.
 
-If something didn't work, [`docs/vm-setup.md`](vm-setup.md#troubleshooting) has the top failure modes and their fixes.
+If something didn't work, [`docs/runtime.md`](runtime.md#troubleshooting) has the top failure modes and their fixes ([`docs/vm-setup.md`](vm-setup.md#troubleshooting) covers the legacy backend).

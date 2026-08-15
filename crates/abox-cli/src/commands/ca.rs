@@ -8,7 +8,7 @@ use clap::Subcommand;
 pub enum CaCommand {
     /// Show the CA certificate info.
     Show,
-    /// Regenerate the root CA (invalidates all leaf certs and requires rootfs rebuild).
+    /// Regenerate the root CA (invalidates all leaf certs).
     Rotate,
     /// Print the CA directory path.
     Path,
@@ -58,10 +58,11 @@ pub fn execute(cmd: &CaCommand) -> Result<()> {
             let _ca = RootCa::generate_and_persist(&ca_dir).context("Failed to generate new CA")?;
             println!("New CA generated.");
             println!();
-            println!("IMPORTANT: You must rebuild the guest rootfs for the new CA to take effect:");
-            println!("  just bootstrap-vm");
+            println!("Sandboxes trust the CA staged at launch, so new runs pick up the");
+            println!("new CA automatically. Any running sandboxes must be restarted.");
             println!();
-            println!("Any running sandboxes will need to be restarted.");
+            println!("Legacy cloud-hypervisor backend only: the CA is baked into the");
+            println!("guest rootfs — rebuild it with 'just bootstrap-vm'.");
         }
         CaCommand::Path => {
             println!("{}", ca_dir.display());

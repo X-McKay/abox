@@ -13,17 +13,17 @@ Follow [`docs/contributing/pre-pr-checklist.md`](../docs/contributing/pre-pr-che
 - [ ] Conventional-Commits subject lines (they feed the auto-generated `CHANGELOG.md`).
 - [ ] No `unwrap()` added in `abox-core`.
 
-## VM / guest / proxy changes
+## Runtime / guest / proxy changes
 
-If this PR touches any of `guest/**`, `scripts/build_rootfs.sh`, `scripts/bootstrap_vm.sh`, `crates/abox-core/**`, `crates/abox-proxyd/**`, `crates/abox-protocol/**`, `crates/abox-shim/**`, or `templates/config.example.toml`:
+If this PR touches any of `guest/**`, `images/**`, `scripts/build_rootfs.sh`, `scripts/bootstrap_vm.sh`, `crates/abox-core/**`, `crates/abox-proxyd/**`, `crates/abox-protocol/**`, `crates/abox-shim/**`, or `templates/config.example.toml`:
 
-- [ ] `just e2e-vm` passed locally (phases 6–7).
-- [ ] I have added the `vm-attested` label.
-- [ ] I have posted a comment below with the run timestamp and machine, e.g. `just e2e-vm passed 2026-04-14T10:23Z on alice-dev`.
+- [ ] `just e2e-runtime` passed locally (and `just e2e-vm` if the legacy Cloud Hypervisor backend is affected).
+- [ ] I have added the `runtime-attested` label (`vm-attested` is accepted as a legacy alias).
+- [ ] I have posted a comment below with the run timestamp and machine, e.g. `just e2e-runtime passed 2026-08-15T10:23Z on alice-dev`.
 
 If this PR does **not** touch those paths, check this instead:
 
-- [ ] This PR does not touch VM / guest / proxy paths.
+- [ ] This PR does not touch runtime / guest / proxy paths.
 
 ## Documentation updates
 

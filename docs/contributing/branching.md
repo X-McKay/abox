@@ -29,7 +29,7 @@ Rules for slugs:
 2. Do the work. Commit early and often with Conventional-Commits subjects.
 3. Before opening the PR, walk [`pre-pr-checklist.md`](./pre-pr-checklist.md).
 4. `git push -u origin feat/my-thing`.
-5. Open the PR. The PR template will ask you to confirm the checklist and, if applicable, add the `vm-attested` label.
+5. Open the PR. The PR template will ask you to confirm the checklist and, if applicable, add the `runtime-attested` label.
 6. Address review feedback by adding new commits (not by force-pushing a rewritten history) until the PR is approved.
 7. Merge via **squash-merge**. The squash commit's subject is the final Conventional-Commits message that lands in `main`'s log and in the auto-generated `CHANGELOG.md`.
 8. Delete the remote branch after merge.
@@ -44,7 +44,7 @@ Configure in GitHub repo settings:
   - `check` (fmt + clippy + test, via `just check`)
   - `cargo-deny`
   - `e2e-phases-1-5`
-  - `vm-attestation`
+  - `runtime-attestation` (formerly `vm-attestation`)
   - `doc-staleness-reminder` is advisory, **not** a required check.
 - Require linear history. Enforce squash-merge only.
 - Require branches to be up to date before merging.

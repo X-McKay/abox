@@ -1,3 +1,8 @@
+> **Legacy note (ADR-008):** this prompt predates the MicroSandbox runtime
+> migration and exercises the deprecated Cloud Hypervisor backend flow
+> (`bootstrap_vm`, raw rootfs). Adapt paths and setup to `docs/runtime.md`
+> before reusing it.
+
 # abox Soak Test — Targeted Validation Prompt
 
 > Self-contained prompt for a fresh Claude Code session. Reads cold — no prior

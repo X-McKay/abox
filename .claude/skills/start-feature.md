@@ -52,7 +52,7 @@ git checkout -b <prefix>/<slug>
 
 ### 5. Worktree recommendation (for high-risk work)
 
-If the work will touch any of the VM-attestation paths (see [`docs/contributing/pre-pr-checklist.md`](../../docs/contributing/pre-pr-checklist.md)) or involves long-lived experimentation, suggest the `superpowers:using-git-worktrees` skill before diving in. Isolated worktrees prevent cross-contamination with other in-flight changes on the same machine.
+If the work will touch any of the runtime-attestation paths (see [`docs/contributing/pre-pr-checklist.md`](../../docs/contributing/pre-pr-checklist.md)) or involves long-lived experimentation, suggest the `superpowers:using-git-worktrees` skill before diving in. Isolated worktrees prevent cross-contamination with other in-flight changes on the same machine.
 
 ### 6. Hand off
 

@@ -2,24 +2,25 @@
 
 ## Project Overview
 
-`abox` is a Rust workspace for parallel AI agent sandboxing using Cloud Hypervisor microVMs, git worktrees, and a dual-layer credential proxy. It follows Hexagonal Architecture (Ports & Adapters).
+`abox` is a Rust workspace implementing a least-privilege execution and authorization layer for autonomous coding agents: git worktrees, a command/request policy engine, host-held credentials, and a tamper-evident audit log, with the MicroSandbox runtime (libkrun microVMs) providing isolation underneath (ADR-008). It follows Hexagonal Architecture (Ports & Adapters). The legacy Cloud Hypervisor backend remains as a deprecated fallback.
 
 ## Workspace Structure
 
 | Crate | Type | Purpose |
 |---|---|---|
-| `abox-core` | Library | Domain logic: workspace, VM, policy, config, snapshot, protocol types |
-| `abox-cli` | Binary (`abox`) | CLI commands + TUI dashboard |
+| `abox-core` | Library | Domain logic: workspace, policy, config, protocol types; the `runtime` module (`SandboxRuntimePort` + spec + OCI image manifest); adapters (`adapters::microsandbox` default, `adapters::cloud_hypervisor_runtime` legacy, `adapters::selector`) |
+| `abox-cli` | Binary (`abox`) | CLI commands + TUI dashboard (+ `msb` helper module for runtime assets) |
 | `abox-proxyd` | Binary | Host-side credential proxy daemon |
-| `abox-shim` | Binary | Guest-side static musl binary (minimal deps, no tokio) |
+| `abox-shim` | Binaries (`abox-shim`, `abox-bridge`) | Guest-side static musl binaries: the command shim and the TCP/Unix↔vsock forwarder (minimal deps, no tokio) |
+
+Guest profile OCI images live in `images/` (one Docker build context per profile + `manifest.toml`, the profile → pinned image map embedded in the binary).
 
 ## Development Workflow
 
 ### Before Making Changes
 
 1. Read the relevant source files to understand the current implementation.
-2. Read `.plans/implementation-plan.md` for architectural context and design decisions.
-3. Read `docs/decisions/001-architecture.md` for the ADR.
+2. Read `docs/decisions/` for architectural context — in particular `008-microsandbox-runtime-and-product-boundary.md` (the runtime/product boundary) and `001-architecture.md`.
 
 ### Making Changes
 
@@ -36,7 +37,7 @@
 - **Formatting:** `cargo fmt --all -- --check` must pass clean.
 - **All tests pass:** `cargo test --workspace` must pass.
 - **No `unwrap()` in library code** (`abox-core`). Use `?` with `anyhow::Result` or typed errors from `abox_core::error`.
-- **`abox-shim` stays minimal.** It must not depend on `abox-core`, `tokio`, or any heavy crate. It compiles as a static musl binary.
+- **`abox-shim` stays minimal.** It must not depend on `abox-core`, `tokio`, or any heavy crate. Its binaries compile as static musl.
 
 ### Commit Messages
 
@@ -61,18 +62,18 @@ Walk the canonical [`docs/contributing/pre-pr-checklist.md`](docs/contributing/p
 Key gates at a glance:
 
 - `just tier-ci` passes (fmt + clippy + test + supply-chain audit).
-- `scripts/local/e2e_test.sh` phases 1–5 pass locally (or `just tier-vm` for all phases with KVM).
-- If the diff touches VM/guest/proxy code (see the checklist for the exact path list), `just e2e-vm` passes and the PR carries the `vm-attested` label.
+- `scripts/local/e2e_test.sh` phases 1–5 pass locally.
+- If the diff touches runtime/guest/proxy code (see the checklist for the exact path list, which includes `images/**`), `just e2e-runtime` passes and the PR carries the `runtime-attested` label (`vm-attested` is accepted as a legacy alias). Run `just e2e-vm` additionally when the legacy backend is affected.
 
 ### When You Change `just`, CI, or Release Steps
 
 Tooling changes ship with their documentation update **in the same PR**. If you:
 
 - Add or modify a recipe in `justfile` →
-- Add or modify a workflow under `.github/workflows/` →
+- Add or modify a workflow under `.github/workflows/` (including the `runtime-attestation` gate or the image publish workflow) →
 - Change a step in `scripts/release.sh` or `scripts/pre_release.sh` →
 
-…then the same PR must update `AGENTS.md` and any affected skill in `.claude/skills/`. The pre-PR checklist and an advisory CI reminder both flag this; the PR is not complete until the docs reflect the new reality. This keeps AI assistants (Copilot, Codex, Claude Code) from steering future contributors toward stale commands.
+…then the same PR must update `AGENTS.md` and any affected skill in `.claude/skills/`. The pre-PR checklist and an advisory CI reminder both flag this; the PR is not complete until the docs reflect the new reality. This keeps AI assistants (Copilot, Codex, Claude Code) from steering future contributors toward stale commands. If you rename a CI gate or label (e.g. `vm-attested` → `runtime-attested`), the checklist, PR template, and skills must all move in the same PR.
 
 When you touch GitHub-hosted workflows, keep first-party `actions/*` references on Node 24-compatible major versions. GitHub has started warning on Node 20-backed action runtimes, and release/CI workflow edits should clear those warnings rather than baking them in.
 
@@ -83,6 +84,10 @@ CHANGELOG is auto-generated by `scripts/release.sh` from Conventional-Commits me
 ### Key Patterns
 
 **Hexagonal Architecture:** Domain logic lives in `abox-core` as traits (ports). Implementations (adapters) live in `abox_core::adapters`. The CLI and proxyd depend on `abox-core` but `abox-core` never depends on them.
+
+**Runtime boundary:** `SandboxRuntimePort` (in `abox_core::runtime`) is the runtime-neutral port for sandbox execution — it replaced the old `VmPort`. The orchestrator builds a `SandboxRuntimeSpec` (workspace mount, profile, resources, staged inputs, control channels, network plan, lifecycle); adapters translate it. Never leak hypervisor concepts (kernel paths, API sockets, virtiofsd names) above the adapter layer. Use the shared `MockRuntime` (feature `test-support`) in tests instead of hand-rolling mocks.
+
+**Network plans are policy-owned:** `abox_core::policy::compile_runtime_network_plan` compiles `safe`/`scoped`/`open` into `RuntimeNetworkPlan`s; adapters translate them mechanically and must never widen them (`open` is never unrestricted). Credential rules are classified by `CredentialExecutionStrategy`; unrepresentable configurations fail closed.
 
 **Shared Protocol Types:** The proxy request/response types are defined in `abox_core::protocol`. The shim duplicates these types locally (documented) because it cannot depend on `abox-core`.
 
@@ -112,28 +117,31 @@ cargo test --workspace -- --nocapture
 ### Test Categories
 - **Unit tests** (`#[test]`): Run everywhere, no external dependencies.
 - **Async tests** (`#[tokio::test]`): For orchestrator and proxy tests.
-- **Integration tests** (`#[ignore]`): Require KVM/Cloud Hypervisor. Run with `cargo test -- --ignored`.
+- **Live end-to-end suites** (bash, under `scripts/local/`): boot real microVMs and skip cleanly when the host lacks virtualization or runtime assets.
 
 ### Test Tiers
 
-Tests are organized into four tiers by their requirements:
+Tests are organized into tiers by their requirements:
 
 | Tier | Recipe | What Runs | Requires |
 |------|--------|-----------|----------|
 | 1 | `just tier-ci` | fmt + clippy + test + cargo deny | Nothing special |
-| 2 | `just tier-vm` | e2e_test.sh (all phases) + rootfs freshness check | `/dev/kvm` + bootstrapped VM |
+| runtime e2e | `just e2e-runtime` | msb_e2e_test.sh — live MicroSandbox microVMs (broker, egress, isolation, exit codes) | virtualization (KVM or Hypervisor.framework) + msb assets under `$MSB_HOME`; skips cleanly otherwise |
+| 2 (legacy) | `just tier-vm` | e2e_test.sh (all phases) + rootfs freshness check — legacy Cloud Hypervisor backend | `/dev/kvm` + bootstrapped VM |
 | 3 | `just tier-bench` | criterion + VM latency benchmarks (5 runs) | `/dev/kvm` + bootstrapped VM |
 | 4 | `just tier-smoke` | real Claude/Codex API calls through MITM proxy | KVM + real OAuth credentials |
 
-**CI-safe vs local-only:** Scripts in `scripts/ci/` are safe for GitHub Actions. Scripts in `scripts/local/` require KVM, VM artifacts, or credentials — never wire them into CI workflows.
+**CI-safe vs local-only:** Scripts in `scripts/ci/` are safe for GitHub Actions. Scripts in `scripts/local/` require virtualization, runtime assets, or credentials — never wire them into CI workflows.
 
 **Before a release:** Run `just pre-release`. It detects host capabilities, runs all applicable tiers, compares benchmarks against the previous release, and writes attestation stamps. `release.sh` verifies these stamps before tagging.
 
-**During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just tier-vm` after VM/guest changes. If you changed `guest/init.sh` or `scripts/build_rootfs.sh`, run `just rebuild-rootfs` before the VM-backed checks so they exercise the current guest image rather than a stale rootfs. Glibc profiles (e.g. `python-glibc`) are produced from `scripts/glibc/<profile>.Dockerfile` via `bootstrap_vm.sh`'s `produce_glibc_base` function; any change to `scripts/glibc/**` or the rootfs build pipeline still requires `just rebuild-rootfs` followed by `just e2e-vm` per the pre-PR checklist.
+**During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just e2e-runtime` after runtime/guest/broker changes. `just build-guest-bins` builds the static musl guest binaries (`abox-shim` + `abox-bridge`) and is a prerequisite for staging fresh guest binaries; the e2e-runtime suite builds them itself. Legacy-backend-only: if you changed `guest/init.sh`, `scripts/build_rootfs.sh`, or `scripts/glibc/**`, run `just rebuild-rootfs` before `just e2e-vm` so the legacy checks exercise the current rootfs rather than a stale one.
 
 ## Files You Should NOT Modify Without Good Reason
 
 - `Cargo.toml` (workspace root): Lint policy, dependency versions.
+- `crates/abox-core/Cargo.toml`: the exact `microsandbox = "=x.y.z"` pin — upgraded only via dedicated qualified PRs (see `docs/runtime-upgrades.md`).
+- `images/manifest.toml`: the `digest = "..."` fields are CI-managed (rewritten by the image publish workflow); never hand-edit digests.
 - `rustfmt.toml`, `clippy.toml`: Formatting and lint configuration.
 - `rust-toolchain.toml`: Pinned Rust version.
 - `.pre-commit-config.yaml`: Pre-commit hooks.

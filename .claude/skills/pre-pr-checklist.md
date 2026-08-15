@@ -1,6 +1,6 @@
 ---
 name: pre-pr-checklist
-description: Use before opening a PR, committing a finished change, or merging. Walks the canonical pre-PR checklist (docs/contributing/pre-pr-checklist.md), runs the required commands, and surfaces the VM-attestation requirement when the diff touches guest/proxy code.
+description: Use before opening a PR, committing a finished change, or merging. Walks the canonical pre-PR checklist (docs/contributing/pre-pr-checklist.md), runs the required commands, and surfaces the runtime-attestation requirement when the diff touches runtime/guest/proxy code.
 ---
 
 # Pre-PR Checklist
@@ -32,7 +32,7 @@ just tier-ci
 
 `just tier-ci` = `fmt-check + lint + test + cargo deny check`. The e2e script runs phases 1–5 on any host (no VM needed). If any of these fail, stop and fix. Do not report success until they are green.
 
-### 3. Evaluate path-triggered VM attestation
+### 3. Evaluate path-triggered runtime attestation
 
 Get the list of changed paths:
 
@@ -40,9 +40,10 @@ Get the list of changed paths:
 git diff --name-only main...HEAD
 ```
 
-If any changed path matches one of these globs, VM attestation is required:
+If any changed path matches one of these globs, runtime attestation is required:
 
 - `guest/**`
+- `images/**`
 - `scripts/build_rootfs.sh`
 - `scripts/bootstrap_vm.sh`
 - `crates/abox-core/**`
@@ -53,9 +54,9 @@ If any changed path matches one of these globs, VM attestation is required:
 
 If required:
 
-- If `guest/init.sh` or `scripts/build_rootfs.sh` changed, run `just rebuild-rootfs` first.
-- Run `just e2e-vm` and wait for completion. This needs a bootstrapped VM and `/dev/kvm`.
-- Record the timestamp. When you report the result to the user, include: "VM attestation required. Run `just e2e-vm` passed at <ISO-8601>. After opening the PR, add the `vm-attested` label and post a PR comment with this timestamp."
+- Run `just e2e-runtime` and wait for completion. This needs virtualization (KVM or Hypervisor.framework) and the msb runtime assets under `$MSB_HOME`; it skips cleanly without them, but a skip does not count as attestation.
+- If the legacy Cloud Hypervisor backend is affected (`guest/**`, `scripts/build_rootfs.sh`, `scripts/bootstrap_vm.sh`): run `just rebuild-rootfs` first if `guest/init.sh` or `scripts/build_rootfs.sh` changed, then also run `just e2e-vm` (needs a bootstrapped VM and `/dev/kvm`).
+- Record the timestamp. When you report the result to the user, include: "Runtime attestation required. `just e2e-runtime` passed at <ISO-8601>. After opening the PR, add the `runtime-attested` label and post a PR comment with this timestamp." (`vm-attested` is accepted by CI as a legacy alias.)
 
 ### 3b. Note on release vs PR gates
 
@@ -80,7 +81,7 @@ Read the last N commit subject lines (`git log main..HEAD --format='%s'`). For e
 Summarize for the user:
 
 - All Always gates: pass / fail (with failing output).
-- VM attestation: not required / required + timestamp / required but skipped (why).
+- Runtime attestation: not required / required + timestamp / required but skipped (why).
 - Doc updates made in this PR.
 - Any commits with weak subject lines.
 

@@ -4,6 +4,18 @@ This is the long-form companion to [`docs/tutorial.md`](tutorial.md). The tutori
 
 If a section feels too basic, skip it. If a section feels too dense, file an issue and we'll improve it.
 
+> **Runtime note (ADR-008, 2026-08):** the default isolation runtime is now
+> **MicroSandbox** (libkrun: KVM on Linux, Hypervisor.framework on macOS Apple
+> Silicon) — see [`runtime.md`](runtime.md). The product concepts in this
+> document — worktrees, the shim, the policy broker, the egress proxy, audit
+> and attribution — apply unchanged. The *mechanics* sections that describe
+> Cloud Hypervisor, virtiofs shares, guest init/socat, the status share, and
+> `bootstrap_vm.sh` (sections 3–5, 10, and the stage-by-stage lifecycle in
+> section 12) describe the deprecated legacy backend; under MicroSandbox the
+> workspace is a bind mount with an ownership overlay, staged files arrive as
+> pre-boot rootfs patches, `abox-bridge` replaces socat, the agent's exit code
+> propagates directly (no status share), and there is no VM bootstrap step.
+
 ---
 
 ## 1. The big picture
@@ -64,7 +76,7 @@ The agent runs **inside** a microVM. The two narrow channels between the agent a
 
 1. **The shim/bridge path** for command-line tools (`git`, `gh`, and other intercepted CLIs). The shim is a static-musl binary masquerading as `git` etc. inside the guest. It serializes the command, sends it over a Unix socket → `socat` → `vsock` → host bridge, the bridge consults the policy engine, runs the command on the host with real credentials, and sends back the output.
 
-2. **The egress proxy path** for HTTPS API calls (Anthropic, OpenAI, GitHub, etc.). Today this is a passthrough; future work will turn it into a TLS-terminating MITM that injects API-key headers from host environment variables. See [`docs/plans/2026-04-08-credential-injection.md`](plans/2026-04-08-credential-injection.md).
+2. **The egress proxy path** for HTTPS API calls (Anthropic, OpenAI, GitHub, etc.). A TLS-terminating MITM proxy that injects host-held credentials into allowed requests — see section 8.
 
 Everything else — the boot kernel, the rootfs, the virtiofs shares, the bootstrap script — exists to make those two channels work cleanly without the user needing to think about it.
 
@@ -97,7 +109,7 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 **Why a VM at all:** Because containers share the host kernel. If the agent process inside a Docker container exploits a kernel bug, it can escape to the host. The Linux kernel is huge (~30 million lines of C) and historically has had a steady stream of privilege-escalation bugs. A VM puts a hardware boundary (the CPU's virtualization extensions) between the guest and the host kernel; an agent has to break out of the guest kernel **and** out of the VMM itself before it touches your host. That's a much larger attack surface to defeat.
 
-**Why Cloud Hypervisor specifically over Firecracker:** virtiofs. Firecracker doesn't support virtiofs as of 2026; it offers block devices and 9p instead. We need to mount a git worktree into the guest with full read-write semantics so the agent can edit files normally. virtiofs gives us that with near-native performance; 9p is slow, and block devices would require copying the whole worktree into a disk image. See [ADR-001](decisions/001-architecture.md) for the full rationale.
+**Why Cloud Hypervisor specifically over Firecracker (legacy backend):** virtiofs. Firecracker doesn't support virtiofs as of 2026; it offers block devices and 9p instead. We need to mount a git worktree into the guest with full read-write semantics so the agent can edit files normally. virtiofs gives us that with near-native performance; 9p is slow, and block devices would require copying the whole worktree into a disk image. See [ADR-001](decisions/001-architecture.md) for the original rationale — since [ADR-008](decisions/008-microsandbox-runtime-and-product-boundary.md) the default runtime is MicroSandbox, which meets the same requirement with a read-write bind mount of the worktree.
 
 **What would break without microVMs:** We'd be back to either trusting the agent enough to give it host access (no), or building container-level isolation that has known weaker boundaries. The threat model is "this agent might run untrusted code or be compromised by prompt injection" — we want a real boundary.
 
@@ -328,9 +340,15 @@ repo-owned behavior before launch:
 
 ---
 
-## 10. The bootstrap script: `bootstrap_vm.sh`
+## 10. The bootstrap script: `bootstrap_vm.sh` (legacy backend only)
 
-**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles ext4 guest images. The default `base` image contains busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. Official profile images (`node`, `python`, `rust`) are built alongside it under `~/.abox/vm/profiles/`. The guest rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). Rootfs assembly now runs inside a cached Dockerized Alpine builder so file ownership and modes in the image match a real root-owned guest filesystem. CLI versions are pinned in `build_rootfs.sh` for reproducible builds. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
+> Under the default MicroSandbox runtime there is no bootstrap step:
+> `abox init` installs the runtime assets via the SDK and guest environments
+> are pulled as OCI images ([`runtime.md`](runtime.md)). Everything below
+> applies only to the deprecated Cloud Hypervisor backend, and only on
+> x86_64 Linux hosts.
+
+**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles ext4 guest images. The default `base` image contains busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. Official profile images (`node`, `python`, `rust`) are built alongside it under `~/.abox/vm/profiles/`. The guest rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). Rootfs assembly now runs inside a cached Dockerized Alpine builder so file ownership and modes in the image match a real root-owned guest filesystem. CLI versions are pinned in `build_rootfs.sh` for reproducible builds. x86_64 hosts only (the script exits with a clear message on aarch64; use the MicroSandbox runtime there). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
 
 **Why it's bash and not Rust:** Bootstrapping is a one-time operation per machine. Bash is universal, easy to read, and avoids the chicken-and-egg problem of "you need cargo to build the bootstrap, but the bootstrap installs cargo's musl target". The `vendor/` cache and SHA256 checksums make it idempotent and recoverable from network blips. The 200 lines are ~50% comments and pinned-version constants — the actual logic is small.
 
@@ -377,13 +395,13 @@ Select the `python-glibc` profile via your repo config:
 profile = "python-glibc"
 ```
 
-Or install it up-front with `./scripts/bootstrap_vm.sh --yes --profile python-glibc`. It is an opt-in profile because the Debian base image is larger than the Alpine one; repos that do not need `manylinux` wheels should stay on the default `python` profile.
+It is an opt-in profile because the Debian base image is larger than the Alpine one; repos that do not need `manylinux` wheels should stay on the default `python` profile. Under the default MicroSandbox runtime the profile is backed by the `images/python-glibc` OCI image (pulled on first use); the `scripts/glibc/` Dockerfile + `bootstrap_vm.sh --profile python-glibc` path builds the raw-rootfs variant for the legacy backend only.
 
 ---
 
 ## 11. The end-to-end test: `scripts/local/e2e_test.sh`
 
-**What it is:** A seven-phase bash script (`./scripts/local/e2e_test.sh` or `just e2e`) that exercises every major component without needing a CI runner with KVM enabled.
+**What it is:** A seven-phase bash script (`./scripts/local/e2e_test.sh`, or `just e2e-vm`) that exercises every major component without needing a CI runner with KVM enabled. Its VM-backed phases boot the legacy Cloud Hypervisor backend; the equivalent live suite for the default MicroSandbox runtime is `just e2e-runtime` (`scripts/local/msb_e2e_test.sh`).
 
 **The seven phases:**
 
@@ -402,6 +420,13 @@ Or install it up-front with `./scripts/bootstrap_vm.sh --yes --profile python-gl
 ---
 
 ## 12. Putting it all together: the lifecycle of one `abox run`
+
+> This stage-by-stage walkthrough shows the **legacy Cloud Hypervisor**
+> mechanics (virtiofsd processes, guest `init.sh`, socat, the status share).
+> Stages 1–5 and 13–14 are identical under MicroSandbox; the VM stages differ
+> as summarized in [`runtime.md`](runtime.md): staged files arrive as rootfs
+> patches, `abox-bridge` provides the in-guest bridging, the agent runs as a
+> deferred non-root exec, and its exit code propagates directly.
 
 Let's walk through what happens when you press Enter on:
 

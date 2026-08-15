@@ -1,7 +1,17 @@
-# VM Setup
+# VM Setup (legacy Cloud Hypervisor backend)
 
-`abox` runs each AI coding agent inside a Cloud Hypervisor microVM for
-hardware-enforced isolation. To boot real VMs you need:
+> **Legacy.** Since [ADR-008](decisions/008-microsandbox-runtime-and-product-boundary.md),
+> the default sandbox runtime is MicroSandbox — see [`runtime.md`](runtime.md)
+> for current setup, architecture, and troubleshooting. Nothing on this page
+> is required unless you explicitly select the deprecated Cloud Hypervisor
+> fallback (`[runtime] backend = "cloud-hypervisor"` or
+> `ABOX_RUNTIME_BACKEND=cloud-hypervisor`; see
+> [`rollback.md`](rollback.md#switching-back-to-the-legacy-runtime-backend)).
+> The legacy backend receives migration-critical fixes only and will be
+> deleted per the ADR's criteria.
+
+Under the legacy backend, `abox` runs each AI coding agent inside a Cloud
+Hypervisor microVM for hardware-enforced isolation. To boot real VMs you need:
 
 1. A Linux host with `/dev/kvm` accessible to your user.
    If `ls -la /dev/kvm` shows `crw-rw----+ root kvm`, just
@@ -135,11 +145,11 @@ re-running the bootstrap is fast (seconds) and offline-friendly.
 
 ## Troubleshooting
 
-**Running on aarch64 (ARM64)**
-aarch64 support is in progress. `bootstrap_vm.sh` will exit with a clear
-"not yet available" message if you run it on an aarch64 host. See
-[`docs/future-work.md`](future-work.md) for tracking status. x86_64 is
-the only supported architecture at this time.
+**Running on aarch64 (ARM64) or macOS**
+The legacy backend supports x86_64 Linux only; `bootstrap_vm.sh` exits with
+a clear "not yet available" message on an aarch64 host. aarch64 Linux and
+macOS Apple Silicon are supported by the default MicroSandbox runtime — use
+that instead (see [`runtime.md`](runtime.md)).
 
 **`Permission denied (os error 13)` on `/dev/kvm`**
 Your user isn't in the `kvm` group. Run `sudo usermod -aG kvm $USER`,

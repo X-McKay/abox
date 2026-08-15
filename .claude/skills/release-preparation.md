@@ -33,7 +33,7 @@ Use `just release-dry <version>` first to see the plan without committing or tag
 ## What the script does (summary; see `scripts/release.sh --help` for the definitive list)
 
 1. Preflight (clean tree, version validity).
-2. Verify attestation stamps (vm, bench, smoke must match HEAD and pass).
+2. Verify attestation stamps against HEAD. `just pre-release` writes one per passing tier: `runtime` (MicroSandbox e2e, `just e2e-runtime`), `vm` (legacy Cloud Hypervisor e2e), `bench`, and `smoke`.
 3. Bump `Cargo.toml` + `Cargo.lock`.
 4. Build `--release`.
 5. Update benchmark table in `README.md` (data from attestation + criterion).
