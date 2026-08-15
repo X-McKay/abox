@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+### MicroSandbox runtime migration (ADR-008)
+
+abox's sandbox substrate migrates from a bespoke Cloud Hypervisor stack to
+MicroSandbox (libkrun). abox now concentrates on autonomous-agent
+governance — worktrees, repo trust, command/request authorization,
+host-held credentials, attribution, tamper-evident audit — and delegates
+generic isolation (microVM, OCI images, mounts, resource limits, native
+network isolation) to the runtime.
+
+- **New default runtime: MicroSandbox** (pinned 0.6.9). The legacy Cloud
+  Hypervisor backend remains as an explicit, deprecated fallback
+  (`[runtime] backend = "cloud-hypervisor"` / `ABOX_RUNTIME_BACKEND`)
+  and will be deleted per the criteria in ADR-008.
+- **macOS Apple Silicon host support** via Hypervisor.framework.
+- Guest profiles keep their names but are OCI images
+  (`ghcr.io/x-mckay/abox-guest-*`, digest-pinned manifest) instead of raw
+  rootfs artifacts; no kernel/virtiofsd/rootfs bootstrap under the
+  default backend.
+- Runtime-neutral `SandboxRuntimePort` domain boundary; guest exit codes
+  propagate directly from the agent exec (no status-share protocol).
+- Network modes compile to runtime plans: `safe` = host-mediated only;
+  `scoped` = native allowlist (DNS-pinned, SNI-verified, TCP 443 + DNS);
+  `open` = public-internet-only (host/loopback/private/link-local/cloud
+  metadata always denied). `HTTPS_PROXY` still routes cooperating clients
+  through the audited abox egress proxy in every mode.
+- Command broker rides per-sandbox vsock routes (persistent multiplexed
+  uplink via the new `abox-bridge` guest binary; no socat); command
+  policy, attribution, and audit semantics unchanged.
+- Credential model unchanged (stubs in guest, host-side injection,
+  method/path request rules); new per-rule `native_substitution` opt-in
+  delegates simple env-var rules to runtime-native substitution with
+  host-side source references. `abox project explain` reports the
+  compiled network plan and per-rule enforcement.
+- `abox init`/`doctor` are runtime-aware: SDK-driven runtime asset
+  install, guest-image manifest checks, host virtualization checks on
+  both platforms.
+- Deprecated: `abox snapshot`/`abox template` memory checkpoints
+  (legacy-runtime only; `abox env warm` is the replacement) and
+  `abox attach` under the new runtime.
+
 ## v0.6.0 — 2026-06-27
 
 ### Features

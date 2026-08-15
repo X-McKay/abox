@@ -112,6 +112,11 @@ ci: fmt-check lint test deny
 pre-release:
     ./scripts/pre_release.sh
 
+# MicroSandbox-era additions (ADR-008): `just e2e-runtime` runs the live
+# MicroSandbox e2e suite (scripts/local/msb_e2e_test.sh; skips cleanly when
+# the msb runtime assets are absent), and `just build-guest-bins` builds the
+# static musl guest binaries (abox-shim + abox-bridge) it stages into guests.
+
 # Tier 1: CI-safe checks (fmt + clippy + test + supply-chain audit). No KVM needed.
 tier-ci: check deny
 
@@ -193,3 +198,23 @@ clean-vm:
 # Run the e2e test, including phase 6 (live VM) if the bootstrap is present.
 e2e-vm:
     ./scripts/local/e2e_test.sh
+
+# Run the MicroSandbox live e2e suite (real microVMs; skips cleanly when the
+# msb runtime assets under $MSB_HOME are absent or virtualization is missing).
+e2e-runtime:
+    ./scripts/local/msb_e2e_test.sh
+
+# Build the static musl guest binaries (abox-shim + abox-bridge) for the
+# HOST architecture. Used by the MicroSandbox e2e suite and by developers
+# staging fresh guest binaries into <state_dir>/guest/<arch>/.
+build-guest-bins:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -m)" in
+        arm64|aarch64)  TARGET="aarch64-unknown-linux-musl" ;;
+        x86_64|amd64)   TARGET="x86_64-unknown-linux-musl" ;;
+        *) echo "unsupported host arch: $(uname -m)" >&2; exit 1 ;;
+    esac
+    RUSTFLAGS="-C linker=rust-lld -C link-self-contained=yes" \
+        cargo build --release --target "$TARGET" -p abox-shim
+    echo "guest binaries: target/$TARGET/release/{abox-shim,abox-bridge}"

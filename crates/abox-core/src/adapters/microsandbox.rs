@@ -72,6 +72,9 @@ struct TaskEntry {
     /// deliberately NOT started in `start()` so the orchestrator can bind the
     /// command-broker/egress listeners on the control sockets first.
     launch: Option<AgentLaunch>,
+    /// Guest ports with vsock routes, so their host sockets can be unlinked
+    /// when the sandbox is reaped.
+    control_ports: Vec<u32>,
 }
 
 /// MicroSandbox runtime adapter.
@@ -106,6 +109,14 @@ impl MicrosandboxRuntime {
     /// are recognizable in `msb`'s own state.
     fn sandbox_name(id: &str) -> String {
         format!("abox-{id}")
+    }
+
+    /// Remove the per-sandbox control sockets once the sandbox is reaped so
+    /// they don't accumulate in long-lived runtime directories.
+    fn remove_control_sockets(&self, id: &str, ports: &[u32]) {
+        for port in ports {
+            let _ = std::fs::remove_file(self.control_socket(id, *port));
+        }
     }
 }
 
@@ -344,10 +355,9 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
 
         // Workspace + caches. Bind paths must be symlink-free — the runtime's
         // filesystem broker rejects symlinked ancestors (e.g. macOS /tmp).
-        let workspace_host =
-            spec.workspace.host_path().canonicalize().with_context(|| {
-                format!("worktree path {} not found", spec.workspace.host_path().display())
-            })?;
+        let workspace_host = spec.workspace.host_path().canonicalize().with_context(|| {
+            format!("worktree path {} not found", spec.workspace.host_path().display())
+        })?;
         builder = builder.volume("/workspace", |m| m.bind(workspace_host.display().to_string()));
         for cache in &spec.caches {
             let host = cache
@@ -525,10 +535,11 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
 
         let launch = AgentLaunch { command: spec.command.clone(), env, user };
 
+        let control_ports: Vec<u32> = spec.control_channels.iter().map(|c| c.guest_port).collect();
         self.tasks
             .lock()
             .unwrap()
-            .insert(id.clone(), TaskEntry { sandbox, pid, launch: Some(launch) });
+            .insert(id.clone(), TaskEntry { sandbox, pid, launch: Some(launch), control_ports });
 
         Ok(RuntimeInstance { id, state: RuntimeState::Running, pid })
     }
@@ -537,7 +548,10 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
         let entry = self.tasks.lock().unwrap().remove(id);
         match entry {
             Some(entry) => {
-                entry.sandbox.stop().await.with_context(|| format!("Failed to stop '{id}'"))
+                let result =
+                    entry.sandbox.stop().await.with_context(|| format!("Failed to stop '{id}'"));
+                self.remove_control_sockets(id, &entry.control_ports);
+                result
             }
             None => anyhow::bail!("sandbox '{id}' is not managed by this process"),
         }
@@ -547,7 +561,10 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
         let entry = self.tasks.lock().unwrap().remove(id);
         match entry {
             Some(entry) => {
-                entry.sandbox.kill().await.with_context(|| format!("Failed to kill '{id}'"))
+                let result =
+                    entry.sandbox.kill().await.with_context(|| format!("Failed to kill '{id}'"));
+                self.remove_control_sockets(id, &entry.control_ports);
+                result
             }
             None => anyhow::bail!("sandbox '{id}' is not managed by this process"),
         }
@@ -600,7 +617,9 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
         // Agent exit ends the sandbox (parity with the legacy guest init,
         // which powered the VM off after the agent finished).
         let _ = sandbox.stop().await;
-        self.tasks.lock().unwrap().remove(id);
+        if let Some(entry) = self.tasks.lock().unwrap().remove(id) {
+            self.remove_control_sockets(id, &entry.control_ports);
+        }
 
         Ok(RuntimeExit { exit_code })
     }
