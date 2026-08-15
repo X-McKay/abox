@@ -31,6 +31,77 @@ pub struct AboxConfig {
     /// Managed authentication and advanced stub configuration.
     #[serde(default)]
     pub auth: AuthConfig,
+
+    /// Sandbox runtime selection (transitional; see ADR-008).
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+
+    /// Guest OCI image configuration for the MicroSandbox runtime.
+    #[serde(default)]
+    pub images: ImagesConfig,
+}
+
+/// Sandbox runtime backend selection.
+///
+/// Transitional (ADR-008): `microsandbox` is the default; `cloud-hypervisor`
+/// remains available as an explicit, deprecated fallback until the legacy
+/// stack is deleted, at which point this section disappears. Host-owned
+/// configuration only — repo config can never select the runtime.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeBackend {
+    /// MicroSandbox (libkrun) — the supported runtime.
+    #[default]
+    Microsandbox,
+    /// Legacy Cloud Hypervisor stack — deprecated, migration fallback only.
+    CloudHypervisor,
+}
+
+impl std::fmt::Display for RuntimeBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Microsandbox => write!(f, "microsandbox"),
+            Self::CloudHypervisor => write!(f, "cloud-hypervisor"),
+        }
+    }
+}
+
+/// `[runtime]` section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RuntimeConfig {
+    /// Which sandbox runtime backend to use. The `ABOX_RUNTIME_BACKEND`
+    /// environment variable overrides this at process start.
+    #[serde(default)]
+    pub backend: RuntimeBackend,
+}
+
+impl RuntimeConfig {
+    /// Resolve the effective backend, honoring the `ABOX_RUNTIME_BACKEND`
+    /// environment override (`microsandbox` | `cloud-hypervisor`).
+    pub fn effective_backend(&self) -> anyhow::Result<RuntimeBackend> {
+        match std::env::var("ABOX_RUNTIME_BACKEND") {
+            Ok(value) => match value.as_str() {
+                "microsandbox" => Ok(RuntimeBackend::Microsandbox),
+                "cloud-hypervisor" => Ok(RuntimeBackend::CloudHypervisor),
+                other => anyhow::bail!(
+                    "invalid ABOX_RUNTIME_BACKEND value {other:?} \
+                     (expected \"microsandbox\" or \"cloud-hypervisor\")"
+                ),
+            },
+            Err(_) => Ok(self.backend),
+        }
+    }
+}
+
+/// `[images]` section — guest OCI image behavior for the MicroSandbox
+/// runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ImagesConfig {
+    /// Development escape hatch: per-profile image reference overrides,
+    /// e.g. `overrides = { node = "localhost:5000/dev-guest:latest" }`.
+    /// Host-owned only; repo config can never choose an image.
+    #[serde(default)]
+    pub overrides: std::collections::HashMap<String, String>,
 }
 
 /// Default VM resource allocation.
@@ -225,6 +296,8 @@ impl Default for AboxConfig {
             vm_defaults: VmDefaults::default(),
             proxy: ProxyConfig::default(),
             auth: AuthConfig::default(),
+            runtime: RuntimeConfig::default(),
+            images: ImagesConfig::default(),
         }
     }
 }

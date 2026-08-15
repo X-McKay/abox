@@ -153,6 +153,7 @@ async fn handle_mitm(
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    ensure_crypto_provider();
     let client_config =
         rustls::ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
@@ -353,6 +354,19 @@ async fn handle_mitm_with_injection(
     Ok(())
 }
 
+/// Install the process-level rustls crypto provider exactly once.
+///
+/// abox uses rustls's default aws-lc-rs provider, but the MicroSandbox
+/// dependency tree also enables the `ring` provider feature. With more than
+/// one provider feature enabled, rustls refuses to pick one implicitly, so
+/// every TLS config construction site goes through this explicit install.
+pub fn ensure_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// Build a rustls `ServerConfig` from PEM-encoded leaf cert + key, chained with the CA cert.
 pub fn build_server_config(
     leaf_cert_pem: &str,
@@ -376,6 +390,7 @@ pub fn build_server_config(
     let mut cert_chain = leaf_certs;
     cert_chain.extend(ca_certs);
 
+    ensure_crypto_provider();
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)

@@ -5,8 +5,8 @@ mod kvm;
 mod tui;
 mod virtiofsd;
 
-use abox_core::adapters::cloud_hypervisor_runtime::CloudHypervisorRuntime;
 use abox_core::adapters::git2_workspace::Git2Workspace;
+use abox_core::adapters::selector::SelectedRuntime;
 use abox_core::config::AboxConfig;
 use abox_core::sandbox::SandboxOrchestrator;
 use anyhow::{Context, Result};
@@ -215,7 +215,8 @@ async fn main() -> Result<()> {
 
     // Build the orchestrator
     let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
-    let runtime = CloudHypervisorRuntime::new(config.clone())?;
+    let runtime = SelectedRuntime::from_config(&config)?;
+    tracing::debug!(backend = %runtime.backend(), "sandbox runtime selected");
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, runtime);
 
     // The root CA is only consumed by `abox run` (it backs the per-sandbox
@@ -234,13 +235,14 @@ async fn main() -> Result<()> {
                 abox_core::ca::RootCa::load_or_generate(&ca_dir)
                     .context("Failed to load or generate root CA")?,
             );
-            commands::run::execute(
+            // Boxed: the runtime-selector enum makes these futures large.
+            Box::pin(commands::run::execute(
                 args,
                 &repo_path,
                 &orchestrator,
                 std::sync::Arc::clone(&policy),
                 root_ca,
-            )
+            ))
             .await
         }
         Commands::Env(args) => {
@@ -249,13 +251,13 @@ async fn main() -> Result<()> {
                 abox_core::ca::RootCa::load_or_generate(&ca_dir)
                     .context("Failed to load or generate root CA")?,
             );
-            commands::env::execute_warm(
+            Box::pin(commands::env::execute_warm(
                 &args,
                 &repo_path,
                 &orchestrator,
                 std::sync::Arc::clone(&policy),
                 root_ca,
-            )
+            ))
             .await
         }
         Commands::List(ref args) => commands::list::execute(args, &orchestrator).await,
@@ -271,7 +273,8 @@ async fn main() -> Result<()> {
             _ => unreachable!(),
         },
         Commands::Snapshot(ref args) => {
-            commands::snapshot::execute_with_orchestrator(args, &orchestrator, &config).await
+            Box::pin(commands::snapshot::execute_with_orchestrator(args, &orchestrator, &config))
+                .await
         }
         Commands::Ca(_)
         | Commands::Grant(_)

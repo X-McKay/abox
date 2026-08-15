@@ -36,6 +36,13 @@ tokio-rustls = "0.26"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
 rustix = { version = "1", features = ["fs"] }
+# MicroSandbox runtime (ADR-008). Pinned exactly during the migration;
+# updated only through dedicated dependency PRs qualified by the runtime
+# contract + security suites. `prebuilt` installs the msb runtime +
+# libkrunfw guest firmware into ~/.microsandbox (idempotent; also driven at
+# runtime by `abox init`); `keyring` is deliberately off (no dbus — abox
+# pulls public images anonymously).
+microsandbox = { version = "=0.6.9", default-features = false, features = ["net", "prebuilt"] }
 
 [features]
 # Exposes `runtime::testing::MockRuntime` for downstream test suites.
