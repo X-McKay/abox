@@ -49,7 +49,8 @@ echo "  date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "  sha:  $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 
 # ─── Tier result tracking ───────────────────────────────────────────────────
-TIER_CI="skip";    TIER_CI_REASON=""
+TIER_CI="skip";      TIER_CI_REASON=""
+TIER_RUNTIME="skip"; TIER_RUNTIME_REASON=""
 TIER_VM="skip";    TIER_VM_REASON=""
 TIER_BENCH="skip"; TIER_BENCH_REASON=""
 TIER_SMOKE="skip"; TIER_SMOKE_REASON=""
@@ -65,6 +66,30 @@ if [[ -c /dev/kvm ]] && [[ -r /dev/kvm ]]; then
     ok "/dev/kvm exists and is readable"
 else
     warn "/dev/kvm not available"
+fi
+
+# Hardware virtualization for the MicroSandbox runtime (KVM on Linux,
+# Hypervisor.framework on macOS arm64).
+HAS_VIRT=false
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    if [[ "$(uname -m)" == "arm64" ]] && [[ "$(sysctl -n kern.hv_support 2>/dev/null)" == "1" ]]; then
+        HAS_VIRT=true
+        ok "Hypervisor.framework available"
+    else
+        warn "Hypervisor.framework not available"
+    fi
+elif $HAS_KVM; then
+    HAS_VIRT=true
+fi
+
+# MicroSandbox runtime assets (msb + libkrunfw)
+MSB_HOME_DIR="${MSB_HOME:-$HOME/.microsandbox}"
+HAS_MSB=false
+if [[ -x "$MSB_HOME_DIR/bin/msb" ]] && compgen -G "$MSB_HOME_DIR/lib/libkrunfw*" >/dev/null; then
+    HAS_MSB=true
+    ok "MicroSandbox runtime present ($MSB_HOME_DIR)"
+else
+    warn "MicroSandbox runtime missing (run 'abox init')"
 fi
 
 # VM bootstrap
@@ -123,7 +148,21 @@ section "Plan"
 CAN_CI=true
 info "tier-ci:    WILL RUN (always)"
 
-# Tier 2: requires KVM + VM bootstrap + fresh rootfs
+# Tier 1.5: MicroSandbox runtime e2e — requires virtualization + msb assets
+CAN_RUNTIME=false
+if $HAS_VIRT && $HAS_MSB; then
+    CAN_RUNTIME=true
+    info "tier-runtime: WILL RUN"
+else
+    if ! $HAS_VIRT; then
+        TIER_RUNTIME_REASON="no hardware virtualization"
+    else
+        TIER_RUNTIME_REASON="MicroSandbox runtime not installed"
+    fi
+    info "tier-runtime: SKIP ($TIER_RUNTIME_REASON)"
+fi
+
+# Tier 2 (legacy backend): requires KVM + VM bootstrap + fresh rootfs
 CAN_VM=false
 if $HAS_KVM && $HAS_VM_BOOTSTRAP && $ROOTFS_FRESH; then
     CAN_VM=true
@@ -194,8 +233,23 @@ if $CAN_CI; then
     fi
 fi
 
-# --- Tier 2: VM ---
-section "Tier 2: VM end-to-end"
+# --- Tier 1.5: MicroSandbox runtime e2e ---
+section "Tier 1.5: MicroSandbox runtime end-to-end"
+if $CAN_RUNTIME; then
+    if just e2e-runtime; then
+        TIER_RUNTIME="pass"
+        ok "tier-runtime passed"
+    else
+        TIER_RUNTIME="fail"
+        TIER_RUNTIME_REASON="e2e-runtime failed"
+        err "tier-runtime failed"
+    fi
+else
+    skip "tier-runtime" "$TIER_RUNTIME_REASON"
+fi
+
+# --- Tier 2: VM (legacy backend) ---
+section "Tier 2: VM end-to-end (legacy backend)"
 if $CAN_VM; then
     if just tier-vm; then
         TIER_VM="pass"
@@ -380,7 +434,7 @@ else
     GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     HW_ARCH=$(uname -m)
-    HW_CORES=$(nproc)
+    HW_CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu)
     HW_KERNEL=$(uname -r)
 
     # write_stamp <tier> <summary> [extra_json_file]
@@ -421,7 +475,14 @@ print(out_path)
 PYEOF
     }
 
-    # VM stamp
+    # Runtime stamp
+    if [[ "$TIER_RUNTIME" == "pass" ]]; then
+        STAMP_PATH=$(write_stamp "runtime" "MicroSandbox runtime e2e passed")
+        ok "wrote $STAMP_PATH"
+        STAMPS_WRITTEN=$((STAMPS_WRITTEN + 1))
+    fi
+
+    # VM stamp (legacy backend)
     if [[ "$TIER_VM" == "pass" ]]; then
         STAMP_PATH=$(write_stamp "vm" "VM end-to-end tests passed")
         ok "wrote $STAMP_PATH"
@@ -509,7 +570,8 @@ print_tier_status() {
     esac
 }
 
-print_tier_status "tier-ci"    "$TIER_CI"    "$TIER_CI_REASON"
+print_tier_status "tier-ci"      "$TIER_CI"      "$TIER_CI_REASON"
+print_tier_status "tier-runtime" "$TIER_RUNTIME" "$TIER_RUNTIME_REASON"
 print_tier_status "tier-vm"    "$TIER_VM"    "$TIER_VM_REASON"
 print_tier_status "tier-bench" "$TIER_BENCH" "$TIER_BENCH_REASON"
 print_tier_status "tier-smoke" "$TIER_SMOKE" "$TIER_SMOKE_REASON"
@@ -519,7 +581,8 @@ info "$STAMPS_WRITTEN attestation stamp(s) written"
 
 # Exit code: 0 if all runnable tiers passed, 1 if any failed
 ANY_FAILED=false
-if [[ "$TIER_CI" == "fail" ]] || [[ "$TIER_VM" == "fail" ]] || \
+if [[ "$TIER_CI" == "fail" ]] || [[ "$TIER_RUNTIME" == "fail" ]] || \
+   [[ "$TIER_VM" == "fail" ]] || \
    [[ "$TIER_BENCH" == "fail" ]] || [[ "$TIER_SMOKE" == "fail" ]]; then
     ANY_FAILED=true
 fi
