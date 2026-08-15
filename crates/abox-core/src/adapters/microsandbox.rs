@@ -40,6 +40,14 @@ use tokio::io::AsyncWriteExt;
 /// the HTTPS egress control channel by `abox-bridge`.
 const GUEST_EGRESS_TCP_PORT: u16 = 18443;
 
+/// Guest Unix socket the shim connects to; bridged to the command-broker
+/// control channel by `abox-bridge`. The broker deliberately rides the
+/// long-lived bridge process: the current MicroSandbox VMM drops host→guest
+/// delivery for vsock connections opened by short-lived guest processes
+/// after the first, while a persistent process's connections are reliable.
+/// Attribution is unaffected (per-sandbox host route).
+const GUEST_BROKER_SOCKET: &str = "/run/abox-proxy.sock";
+
 /// Where the shim's transport declaration is staged in the guest.
 const GUEST_TRANSPORT_PATH: &str = "/etc/abox/transport";
 
@@ -69,6 +77,11 @@ struct TaskEntry {
 pub struct MicrosandboxRuntime {
     runtime_dir: PathBuf,
     manifest: ImageManifest,
+    /// Host-staged guest binaries (abox-shim, abox-bridge), when installed
+    /// under `<state_dir>/guest/<arch>/`. Patched into every guest at start
+    /// so shim protocol stays in lockstep with the host binary even when the
+    /// OCI image bakes an older copy.
+    guest_bin_dir: Option<PathBuf>,
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
 }
 
@@ -79,13 +92,31 @@ impl MicrosandboxRuntime {
         let runtime_dir = config.runtime_dir();
         std::fs::create_dir_all(&runtime_dir)
             .with_context(|| format!("Failed to create runtime dir {}", runtime_dir.display()))?;
-        Ok(Self { runtime_dir, manifest, tasks: Arc::new(Mutex::new(HashMap::new())) })
+        let guest_bin_dir = guest_binaries_dir(&config.state_dir);
+        Ok(Self {
+            runtime_dir,
+            manifest,
+            guest_bin_dir,
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     /// The MicroSandbox sandbox name for a task. Prefixed so abox sandboxes
     /// are recognizable in `msb`'s own state.
     fn sandbox_name(id: &str) -> String {
         format!("abox-{id}")
+    }
+}
+
+/// Locate host-staged guest binaries for the guest architecture (which
+/// always matches the host architecture under both KVM and
+/// Hypervisor.framework). Returns `None` unless both binaries are present.
+fn guest_binaries_dir(state_dir: &std::path::Path) -> Option<PathBuf> {
+    let dir = state_dir.join("guest").join(std::env::consts::ARCH);
+    if dir.join("abox-shim").is_file() && dir.join("abox-bridge").is_file() {
+        Some(dir)
+    } else {
+        None
     }
 }
 
@@ -122,6 +153,16 @@ fn guest_setup_script(spec: &SandboxRuntimeSpec, chown_user: &str) -> String {
             let _ = writeln!(script, "chown -R {chown_user} {}", sh_escape(&cache.guest_path));
         }
     }
+
+    // Proxied host commands resolve to the shim. Official images bake these
+    // symlinks; create them for any image that lacks them.
+    script.push_str(
+        "if [ -x /usr/local/bin/abox-shim ]; then\n\
+           for c in git gh aws; do\n\
+             [ -e \"/usr/local/bin/$c\" ] || ln -s abox-shim \"/usr/local/bin/$c\"\n\
+           done\n\
+         fi\n",
+    );
 
     // Private scratch tmpdir (exec allowed; see ADR-005 rationale).
     script.push_str("mkdir -p /run/abox-tmp\n");
@@ -164,8 +205,12 @@ fn guest_setup_script(spec: &SandboxRuntimeSpec, chown_user: &str) -> String {
 /// Assemble `abox-bridge` arguments for the guest-side loopback bridges:
 /// the HTTPS egress port plus one per service/host-port bridge.
 fn bridge_args(spec: &SandboxRuntimeSpec) -> Vec<String> {
-    let mut args =
-        vec![GUEST_EGRESS_TCP_PORT.to_string(), crate::runtime::HTTPS_EGRESS_PORT.to_string()];
+    let mut args = vec![
+        GUEST_BROKER_SOCKET.to_string(),
+        COMMAND_BROKER_PORT.to_string(),
+        GUEST_EGRESS_TCP_PORT.to_string(),
+        crate::runtime::HTTPS_EGRESS_PORT.to_string(),
+    ];
     for svc in &spec.services {
         args.push(svc.guest_port.to_string());
         args.push(svc.vsock_port.to_string());
@@ -211,11 +256,20 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
             builder = builder.max_duration(timeout.saturating_add(60));
         }
 
-        // Workspace + caches.
-        let workspace_host = spec.workspace.host_path();
+        // Workspace + caches. Bind paths must be symlink-free — the runtime's
+        // filesystem broker rejects symlinked ancestors (e.g. macOS /tmp).
+        let workspace_host =
+            spec.workspace.host_path().canonicalize().with_context(|| {
+                format!("worktree path {:?} not found", spec.workspace.host_path())
+            })?;
         builder = builder.volume("/workspace", |m| m.bind(workspace_host.display().to_string()));
         for cache in &spec.caches {
-            let host = cache.host_path.display().to_string();
+            let host = cache
+                .host_path
+                .canonicalize()
+                .with_context(|| format!("cache path {:?} not found", cache.host_path))?
+                .display()
+                .to_string();
             let read_only = cache.read_only;
             builder = builder.volume(cache.guest_path.clone(), move |m| {
                 let m = m.bind(host);
@@ -244,9 +298,27 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
 
         // Staged guest files (pre-boot rootfs patches).
         let transport_decl =
-            format!("# staged by abox — do not edit\nvsock:{COMMAND_BROKER_PORT}\n");
+            format!("# staged by abox — do not edit\nunix:{GUEST_BROKER_SOCKET}\n");
+        let guest_bin_dir = self.guest_bin_dir.clone();
+        if guest_bin_dir.is_none() {
+            tracing::debug!(
+                task_id = %id,
+                "no host-staged guest binaries; relying on the image's own \
+                 abox-shim/abox-bridge"
+            );
+        }
         builder = builder.patch(|mut p| {
             p = p.mkdir("/abox-meta", Some(0o755));
+            if let Some(dir) = &guest_bin_dir {
+                p = p
+                    .copy_file(dir.join("abox-shim"), "/usr/local/bin/abox-shim", Some(0o755), true)
+                    .copy_file(
+                        dir.join("abox-bridge"),
+                        "/usr/local/bin/abox-bridge",
+                        Some(0o755),
+                        true,
+                    );
+            }
             p = p.text(GUEST_TRANSPORT_PATH, transport_decl.clone(), Some(0o444), true);
             if let Some(prompt) = &spec.resolved_prompt {
                 p = p.text("/abox-meta/prompt.md", prompt.clone(), Some(0o444), true);
@@ -325,6 +397,13 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
                     // stream ends when the sandbox stops.
                     while let Some(event) = handle.recv().await {
                         match event {
+                            microsandbox::ExecEvent::Stderr(bytes) => {
+                                tracing::warn!(
+                                    task_id = %bridge_id,
+                                    msg = %String::from_utf8_lossy(&bytes),
+                                    "abox-bridge stderr"
+                                );
+                            }
                             microsandbox::ExecEvent::Failed(e) => {
                                 tracing::warn!(
                                     task_id = %bridge_id,
@@ -573,7 +652,7 @@ mod tests {
             vsock_port: 5100,
         });
         let args = bridge_args(&spec);
-        assert_eq!(args, vec!["18443", "5001", "5432", "5100"]);
+        assert_eq!(args, vec!["/run/abox-proxy.sock", "5000", "18443", "5001", "5432", "5100"]);
     }
 
     #[test]

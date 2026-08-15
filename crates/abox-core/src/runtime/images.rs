@@ -31,6 +31,10 @@ impl RuntimeImage {
     /// The reference to actually pull: digest-pinned when available,
     /// tag-addressed otherwise.
     pub fn pull_reference(&self) -> String {
+        // Local rootfs path (development override) — used verbatim.
+        if self.reference.starts_with('/') || self.reference.starts_with("./") {
+            return self.reference.clone();
+        }
         if self.digest.is_empty() {
             format!("{}:{}", self.reference, self.tag)
         } else {
@@ -104,6 +108,14 @@ impl ImageManifest {
     pub fn image_for_profile(&self, profile: EnvironmentProfile) -> Result<RuntimeImage> {
         let name = profile.as_str();
         if let Some(reference) = self.overrides.get(name) {
+            // A local path override (bind rootfs) is used verbatim.
+            if reference.starts_with('/') || reference.starts_with("./") {
+                return Ok(RuntimeImage {
+                    reference: reference.clone(),
+                    tag: String::new(),
+                    digest: String::new(),
+                });
+            }
             let (reference, tag, digest) = split_reference(reference);
             return Ok(RuntimeImage { reference, tag, digest });
         }

@@ -53,11 +53,16 @@ pub enum TransportStream {
 
 impl TransportStream {
     /// Half-close the write side so the peer sees EOF.
+    ///
+    /// No-op for vsock: the request/response protocol is newline-framed, so
+    /// the peer never needs the EOF — and the vsock forwarding path (libkrun
+    /// host routing) does not propagate half-close reliably, tearing down
+    /// the whole connection before the response arrives.
     pub fn shutdown_write(&self) -> std::io::Result<()> {
         match self {
             Self::Unix(s) => s.shutdown(std::net::Shutdown::Write),
             #[cfg(target_os = "linux")]
-            Self::Vsock(s) => s.shutdown(std::net::Shutdown::Write),
+            Self::Vsock(_) => Ok(()),
         }
     }
 }

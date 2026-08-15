@@ -22,7 +22,7 @@
 mod transport;
 
 use abox_protocol::{ProxyRequest, ProxyResponse};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -118,20 +118,14 @@ fn send_request(request: &ProxyRequest) -> Result<ProxyResponse, Box<dyn std::er
     stream.flush()?;
     stream.shutdown_write()?;
 
-    // Read the JSON response line (move the stream: writes are done).
+    // Read the JSON response line (move the stream: writes are done). The
+    // response is exactly one line; the shim must NOT read to EOF — the
+    // broker keeps persistent connections open for multiplexing clients.
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
-    let mut response: ProxyResponse = serde_json::from_str(&line)?;
-
-    // Any remaining data is additional stdout (for large outputs)
-    let mut remaining = String::new();
-    reader.read_to_string(&mut remaining)?;
-    if !remaining.is_empty() {
-        response.stdout.push_str(&remaining);
-    }
-
+    let response: ProxyResponse = serde_json::from_str(&line)?;
     Ok(response)
 }
 

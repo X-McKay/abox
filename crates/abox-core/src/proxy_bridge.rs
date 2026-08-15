@@ -149,6 +149,11 @@ impl ProxyBridge {
     }
 }
 
+/// Serve one connection. Handles any number of newline-framed
+/// request/response exchanges: one-shot clients (the shim over a Unix
+/// socket) close after the first response, while the persistent guest
+/// bridge under the MicroSandbox runtime keeps a single uplink connection
+/// alive and multiplexes sequential shim invocations over it.
 async fn handle(
     stream: UnixStream,
     policy: &PolicyEngine,
@@ -158,12 +163,27 @@ async fn handle(
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    if line.trim().is_empty() {
-        return Ok(());
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 {
+            return Ok(());
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        handle_one(line.trim(), &mut writer, policy, audit, attribution, cwd_map).await?;
     }
-    let mut request: ProxyRequest = serde_json::from_str(line.trim())?;
+}
+
+async fn handle_one(
+    line: &str,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    policy: &PolicyEngine,
+    audit: &dyn AuditSink,
+    attribution: &SandboxAttribution,
+    cwd_map: Option<&(String, PathBuf)>,
+) -> Result<()> {
+    let mut request: ProxyRequest = serde_json::from_str(line)?;
 
     let sandbox_id = match attribution {
         SandboxAttribution::Fixed(id) => id.clone(),
@@ -186,7 +206,7 @@ async fn handle(
             let json = serde_json::to_string(&ProxyResponse::denied(&reason))?;
             writer.write_all(json.as_bytes()).await?;
             writer.write_all(b"\n").await?;
-            writer.shutdown().await?;
+            writer.flush().await?;
             return Ok(());
         }
     };
@@ -234,7 +254,7 @@ async fn handle(
     let json = serde_json::to_string(&response)?;
     writer.write_all(json.as_bytes()).await?;
     writer.write_all(b"\n").await?;
-    writer.shutdown().await?;
+    writer.flush().await?;
     Ok(())
 }
 

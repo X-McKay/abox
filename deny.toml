@@ -69,6 +69,11 @@ allow = [
   "Zlib",
   "MPL-2.0",
   "CDLA-Permissive-2.0",
+  # Public-domain-equivalent licenses pulled in by the MicroSandbox runtime's
+  # userspace network stack (smoltcp/managed: 0BSD; notify: CC0-1.0). Both
+  # are maximally permissive with no attribution requirement.
+  "0BSD",
+  "CC0-1.0",
 ]
 # Require SPDX expressions to be at least 80% confident before accepting.
 confidence-threshold = 0.8
