@@ -5,7 +5,7 @@ description: Use when the user asks to cut a release, run release.sh, or tag a n
 
 # Release Preparation
 
-Cutting a release runs `scripts/release.sh <version>`. That script is the 12-step source of truth; this skill makes sure the preconditions are met and the outputs are understood.
+Cutting a release runs `scripts/release.sh <version>`. That script is the 8-step source of truth; this skill makes sure the preconditions are met and the outputs are understood.
 
 ## When to invoke
 
@@ -15,7 +15,7 @@ Cutting a release runs `scripts/release.sh <version>`. That script is the 12-ste
 ## Preconditions (check before running)
 
 - `git status` shows a clean working tree on `main` (up to date with `origin/main`).
-- **`just pre-release` has been run** and all attestation stamps in `.abox-attestations/` match HEAD. If stamps are missing or stale, run `just pre-release` first.
+- **`just pre-release` has been run** and the attestation stamps in `.abox-attestations/` (`runtime.json`, `smoke.json`) match HEAD. If stamps are missing or stale, run `just pre-release` first.
 - The version number follows SemVer: `v<major>.<minor>.<patch>`. The leading `v` is optional; `release.sh` normalizes.
 
 If any precondition fails, stop and report. Do not use `--skip-attestation` unless the user explicitly requests it for an emergency.
@@ -33,17 +33,15 @@ Use `just release-dry <version>` first to see the plan without committing or tag
 ## What the script does (summary; see `scripts/release.sh --help` for the definitive list)
 
 1. Preflight (clean tree, version validity).
-2. Verify attestation stamps (vm, bench, smoke must match HEAD and pass).
+2. Verify attestation stamps against HEAD. `just pre-release` writes one per passing tier: `runtime` (MicroSandbox e2e, `just e2e-runtime`) and `smoke` (agent smoke tests).
 3. Bump `Cargo.toml` + `Cargo.lock`.
 4. Build `--release`.
-5. Update benchmark table in `README.md` (data from attestation + criterion).
-6. Save benchmark JSON to `benchmarks/<version>.json`.
-7. Generate `CHANGELOG.md` entry from `git log` since last tag.
-8. `cargo install --path` locally so the developer has the new binary.
-9. `git commit` version bump + benchmarks + changelog.
-10. `git tag v<version>` (no push).
+5. Generate `CHANGELOG.md` entry from `git log` since last tag.
+6. `cargo install --path` locally so the developer has the new binary.
+7. `git commit` version bump + changelog.
+8. `git tag v<version>` (no push).
 
-After step 10, the developer pushes manually: `git push origin main --tags`. The tag push triggers the `release.yml` GitHub Actions workflow.
+After step 8, the developer pushes manually: `git push origin main --tags`. The tag push triggers the `release.yml` GitHub Actions workflow (binaries for Linux x86_64/aarch64 and macOS aarch64, the `abox-guest-bins-<arch>.tar.gz` guest-binary tarballs, and `SHA256SUMS`).
 
 ## After tag push
 

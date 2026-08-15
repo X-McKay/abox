@@ -1,4 +1,3 @@
-pub mod attach;
 pub mod audit;
 pub mod ca;
 pub mod capabilities;
@@ -14,9 +13,7 @@ pub mod path;
 pub mod project;
 pub mod run;
 pub mod services;
-pub mod snapshot;
 pub mod stop;
-pub mod template;
 
 use anyhow::Result;
 use std::path::Path;

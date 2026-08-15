@@ -12,18 +12,14 @@ use std::time::Duration;
 /// known and you need the full safety check.
 pub const TASK_ID_MAX_LEN: usize = 64;
 
-/// Maximum length of a Unix-domain socket path on Linux (`SUN_LEN`).
-pub const UNIX_SOCKET_PATH_MAX_LEN: usize = 108;
+/// Maximum length of a Unix-domain socket path (`sun_path`). Linux allows
+/// 108 bytes; macOS allows 104 — use the smaller cross-platform bound.
+pub const UNIX_SOCKET_PATH_MAX_LEN: usize = 104;
 
-const RUNTIME_SOCKET_NAME_PARTS: &[(&str, &str)] = &[
-    ("ch-api-", ".sock"),
-    ("vsock-", ".sock"),
-    ("vfs-", ".sock"),
-    ("vfs-meta-", ".sock"),
-    ("vfs-status-", ".sock"),
-    ("vsock-", ".sock_5000"),
-    ("vsock-", ".sock_5001"),
-];
+/// Per-sandbox control-socket name shapes (`msb-<id>.sock_<port>`), with the
+/// longest port suffix currently in use (service bridge ports are 51xx).
+const RUNTIME_SOCKET_NAME_PARTS: &[(&str, &str)] =
+    &[("msb-", ".sock_5000"), ("msb-", ".sock_5001"), ("msb-", ".sock_5199")];
 
 /// Format a byte count into a human-readable string (KiB, MiB, GiB).
 pub fn format_size(bytes: u64) -> String {
@@ -111,10 +107,10 @@ pub fn validate_task_id(id: &str) -> Result<(), String> {
 
 /// Return the maximum task ID length supported by a specific runtime dir.
 ///
-/// abox embeds the sandbox ID in several runtime socket names, with the
-/// longest currently being `vfs-status-<id>.sock` and `vsock-<id>.sock_5000`.
-/// This helper computes how many characters remain for `<id>` once the
-/// runtime dir, path separator, and longest static suffix are accounted for.
+/// abox embeds the sandbox ID in the per-sandbox control-socket names
+/// (`msb-<id>.sock_<port>`). This helper computes how many characters remain
+/// for `<id>` once the runtime dir, path separator, and longest static
+/// suffix are accounted for.
 pub fn max_task_id_len_for_runtime_dir(runtime_dir: &Path) -> usize {
     let runtime_len = runtime_dir.as_os_str().len();
     let longest_overhead = RUNTIME_SOCKET_NAME_PARTS
@@ -487,7 +483,7 @@ mod tests {
 
     #[test]
     fn validate_task_id_for_runtime_dir_accepts_shorter_id_on_deep_runtime_dir() {
-        let runtime = PathBuf::from("/tmp").join("x".repeat(80));
+        let runtime = PathBuf::from("/tmp").join("x".repeat(78));
         assert!(validate_task_id_for_runtime_dir("short", &runtime).is_ok());
     }
 

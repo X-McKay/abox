@@ -29,7 +29,7 @@ Rules for slugs:
 2. Do the work. Commit early and often with Conventional-Commits subjects.
 3. Before opening the PR, walk [`pre-pr-checklist.md`](./pre-pr-checklist.md).
 4. `git push -u origin feat/my-thing`.
-5. Open the PR. The PR template will ask you to confirm the checklist and, if applicable, add the `vm-attested` label.
+5. Open the PR. The PR template will ask you to confirm the checklist and, if applicable, add the `runtime-attested` label.
 6. Address review feedback by adding new commits (not by force-pushing a rewritten history) until the PR is approved.
 7. Merge via **squash-merge**. The squash commit's subject is the final Conventional-Commits message that lands in `main`'s log and in the auto-generated `CHANGELOG.md`.
 8. Delete the remote branch after merge.
@@ -43,8 +43,8 @@ Configure in GitHub repo settings:
 - Require status checks to pass before merging:
   - `check` (fmt + clippy + test, via `just check`)
   - `cargo-deny`
-  - `e2e-phases-1-5`
-  - `vm-attestation`
+  - `e2e-runtime` (live runtime e2e on KVM-enabled runners)
+  - `runtime-attestation`
   - `doc-staleness-reminder` is advisory, **not** a required check.
 - Require linear history. Enforce squash-merge only.
 - Require branches to be up to date before merging.
@@ -53,7 +53,7 @@ These settings live in repo config, not in code. They are documented here so the
 
 ## Working with git worktrees
 
-For risky or long-lived feature work — especially anything touching the VM boot path, the proxy, or the policy engine — prefer `git worktree add` so the work is isolated from other local changes:
+For risky or long-lived feature work — especially anything touching the runtime adapter, the brokers, or the policy engine — prefer `git worktree add` so the work is isolated from other local changes:
 
 ```bash
 git worktree add ../abox-feat-my-thing -b feat/my-thing

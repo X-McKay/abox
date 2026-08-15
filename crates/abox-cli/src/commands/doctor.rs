@@ -6,7 +6,8 @@
 use abox_core::config::{
     default_claude_host_credential_file, default_codex_host_credential_file, AboxConfig,
 };
-use abox_core::project::{image_path_for_profile, EnvironmentProfile, ProjectConfig};
+use abox_core::project::ProjectConfig;
+use abox_core::runtime::images::ImageManifest;
 use abox_core::util::{max_task_id_len_for_runtime_dir, TASK_ID_MAX_LEN};
 use anyhow::Result;
 use std::path::Path;
@@ -129,6 +130,15 @@ impl Check {
 
 // ── Main execute ─────────────────────────────────────────────────────────────
 
+/// Print a titled section of checks and collect them for the summary.
+fn print_and_collect(title: &str, checks: Vec<Check>, all: &mut Vec<Check>) {
+    print_section(title);
+    for c in &checks {
+        c.print();
+    }
+    all.extend(checks);
+}
+
 /// Run all doctor checks and print a summary. Returns `Ok(true)` if all
 /// checks pass (or only warnings), `Ok(false)` if any check fails.
 pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
@@ -140,110 +150,93 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
     );
     println!();
 
-    let vm_dir = config.state_dir.join("vm");
+    let manifest = ImageManifest::embedded()?.with_overrides(config.images.overrides.clone());
+    let mut all: Vec<Check> = Vec::new();
 
-    // ── Section 1: Host ──────────────────────────────────────────────────────
-    print_section("Host");
-    let kvm = check_kvm();
-    kvm.print();
+    print_and_collect("Host", vec![check_host_virtualization()], &mut all);
+    print_and_collect(
+        "Runtime (MicroSandbox)",
+        vec![
+            check_msb_binary(),
+            check_libkrunfw(),
+            check_guest_binaries(&config.state_dir),
+            check_image_manifest(&manifest),
+        ],
+        &mut all,
+    );
 
-    // ── Section 2: VM Stack ──────────────────────────────────────────────────
-    print_section("VM Stack");
-    let vm_checks = [
-        check_vm_artifact(&vm_dir, "cloud-hypervisor", "VMM binary"),
-        check_vm_artifact(&vm_dir, "virtiofsd", "virtiofs daemon"),
-        check_virtiofsd_caps(&vm_dir),
-        check_virtiofsd_uid_map(&vm_dir),
-        check_vm_artifact(&vm_dir, "vmlinux", "guest kernel"),
-        check_vm_artifact(&vm_dir, "rootfs.raw", "guest root filesystem"),
-        check_rootfs_freshness(&vm_dir),
-    ];
-    for c in &vm_checks {
-        c.print();
-    }
+    // ── Configuration ────────────────────────────────────────────────────────
+    print_and_collect(
+        "Configuration",
+        vec![
+            check_config_file(config),
+            check_policy_file(config),
+            check_socket_path_length(config),
+        ],
+        &mut all,
+    );
 
-    // ── Section 3: Configuration ─────────────────────────────────────────────
-    print_section("Configuration");
-    let cfg_checks =
-        [check_config_file(config), check_policy_file(config), check_socket_path_length(config)];
-    for c in &cfg_checks {
-        c.print();
-    }
+    // ── Managed Auth ─────────────────────────────────────────────────────────
+    print_and_collect(
+        "Managed Auth",
+        vec![
+            check_managed_provider(
+                "Claude Code",
+                "auth.providers.claude",
+                config.auth.claude_enabled(),
+                &default_claude_host_credential_file(),
+            ),
+            check_managed_provider(
+                "Codex",
+                "auth.providers.codex",
+                config.auth.codex_enabled(),
+                &default_codex_host_credential_file(),
+            ),
+        ],
+        &mut all,
+    );
 
-    // ── Section 4: Managed Auth ──────────────────────────────────────────────
-    print_section("Managed Auth");
-    let auth_checks = [
-        check_managed_provider(
-            "Claude Code",
-            "auth.providers.claude",
-            config.auth.claude_enabled(),
-            &default_claude_host_credential_file(),
-        ),
-        check_managed_provider(
-            "Codex",
-            "auth.providers.codex",
-            config.auth.codex_enabled(),
-            &default_codex_host_credential_file(),
-        ),
-    ];
-    for c in &auth_checks {
-        c.print();
-    }
+    // ── CA Certificate ───────────────────────────────────────────────────────
+    print_and_collect(
+        "CA Certificate (HTTPS Credential Injection)",
+        vec![check_ca_files(config), check_ca_trust(config)],
+        &mut all,
+    );
 
-    // ── Section 5: CA Certificate ────────────────────────────────────────────
-    print_section("CA Certificate (HTTPS Credential Injection)");
-    let ca_checks = [check_ca_files(config), check_ca_trust(config)];
-    for c in &ca_checks {
-        c.print();
-    }
+    // ── Agent-Specific Validation ────────────────────────────────────────────
+    print_and_collect(
+        "Agent Validation",
+        vec![
+            check_agent_credential_injection(
+                "Claude Code",
+                config.auth.claude_enabled(),
+                &abox_core::config::default_claude_host_credential_file(),
+            ),
+            check_agent_credential_injection(
+                "Codex",
+                config.auth.codex_enabled(),
+                &abox_core::config::default_codex_host_credential_file(),
+            ),
+        ],
+        &mut all,
+    );
 
-    // ── Section 6: Agent-Specific Validation ─────────────────────────────────
-    print_section("Agent Validation");
-    let agent_checks = [
-        check_agent_credential_injection(
-            "Claude Code",
-            config.auth.claude_enabled(),
-            &abox_core::config::default_claude_host_credential_file(),
-        ),
-        check_agent_credential_injection(
-            "Codex",
-            config.auth.codex_enabled(),
-            &abox_core::config::default_codex_host_credential_file(),
-        ),
-    ];
-    for c in &agent_checks {
-        c.print();
-    }
+    // ── Audit Log ────────────────────────────────────────────────────────────
+    print_and_collect("Audit Log", vec![check_audit_log(config)], &mut all);
 
-    // ── Section 7: Audit Log ─────────────────────────────────────────────────
-    print_section("Audit Log");
-    let audit_check = check_audit_log(config);
-    audit_check.print();
-
-    // ── Section 8: Environment ───────────────────────────────────────────────
-    print_section("Environment");
-    let env_check = check_local_bin_on_path(&vm_dir);
-    env_check.print();
-    let installed_profiles = check_installed_guest_profiles(config);
-    installed_profiles.print();
-    let repo_profile = check_repo_requested_profile(config, repo_root);
-    repo_profile.print();
+    // ── Environment ──────────────────────────────────────────────────────────
+    print_and_collect(
+        "Environment",
+        vec![
+            check_profile_image_resolution(&manifest),
+            check_repo_requested_profile_msb(repo_root, &manifest),
+        ],
+        &mut all,
+    );
 
     // ── Summary ──────────────────────────────────────────────────────────────
-    let all_checks: Vec<&Check> = std::iter::once(&kvm)
-        .chain(vm_checks.iter())
-        .chain(cfg_checks.iter())
-        .chain(auth_checks.iter())
-        .chain(ca_checks.iter())
-        .chain(agent_checks.iter())
-        .chain(std::iter::once(&audit_check))
-        .chain(std::iter::once(&env_check))
-        .chain(std::iter::once(&installed_profiles))
-        .chain(std::iter::once(&repo_profile))
-        .collect();
-
-    let failures = all_checks.iter().filter(|c| c.is_fail()).count();
-    let warnings = all_checks.iter().filter(|c| c.is_warn()).count();
+    let failures = all.iter().filter(|c| c.is_fail()).count();
+    let warnings = all.iter().filter(|c| c.is_warn()).count();
 
     println!();
     if failures == 0 && warnings == 0 {
@@ -272,158 +265,131 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
     Ok(failures == 0)
 }
 
-fn check_kvm() -> Check {
-    match crate::kvm::diagnose_kvm() {
-        crate::kvm::KvmStatus::Available => Check::ok("/dev/kvm accessible"),
-        crate::kvm::KvmStatus::Unavailable { condition, remediation } => {
+// ── MicroSandbox runtime checks (ADR-008) ────────────────────────────────────
+
+fn check_host_virtualization() -> Check {
+    match crate::kvm::diagnose_host_virtualization() {
+        crate::kvm::HostVirtStatus::Available { detail } => {
+            Check::ok_with("Hardware virtualization", detail)
+        }
+        crate::kvm::HostVirtStatus::Unavailable { condition, remediation } => {
             Check::fail(condition, remediation)
         }
     }
 }
 
-fn check_vm_artifact(vm_dir: &Path, name: &str, description: &str) -> Check {
-    let label = format!("VM artifact: {description} ({name})");
-    if vm_dir.join(name).exists() {
-        Check::ok(label)
+fn check_msb_binary() -> Check {
+    let label = "msb binary";
+    match crate::msb::find_msb_binary() {
+        Some(path) => Check::ok_with(label, path.display().to_string()),
+        None => Check::fail(
+            label,
+            format!(
+                "msb not found at {} or on PATH.\n\
+                 Run 'abox init' to download the MicroSandbox runtime assets\n\
+                 into {} (set MSB_HOME to relocate them).",
+                crate::msb::msb_binary().display(),
+                crate::msb::msb_home().display(),
+            ),
+        ),
+    }
+}
+
+fn check_libkrunfw() -> Check {
+    let label = "libkrunfw guest firmware";
+    let lib_dir = crate::msb::msb_home().join("lib");
+    let files = crate::msb::libkrunfw_files();
+    if files.is_empty() {
+        Check::fail(
+            label,
+            format!(
+                "No libkrunfw.* found in {}.\n\
+                 Run 'abox init' to download the MicroSandbox runtime assets.",
+                lib_dir.display()
+            ),
+        )
+    } else {
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        Check::ok_with(label, format!("{} ({})", lib_dir.display(), names.join(", ")))
+    }
+}
+
+fn check_guest_binaries(state_dir: &Path) -> Check {
+    let label = "Host-staged guest binaries (abox-shim, abox-bridge)";
+    let dir = crate::msb::guest_binaries_dir(state_dir);
+    if crate::msb::guest_binaries_present(state_dir) {
+        Check::ok_with(label, dir.display().to_string())
+    } else {
+        Check::warn(
+            label,
+            format!(
+                "Not found in {}.\n\
+                 Official guest images bake fallback copies of abox-shim/abox-bridge,\n\
+                 so sandboxes still work — host-staged copies keep the shim protocol\n\
+                 in lockstep with this abox binary. Stage them with 'just build-guest-bins'.",
+                dir.display()
+            ),
+        )
+    }
+}
+
+fn check_image_manifest(manifest: &ImageManifest) -> Check {
+    let label = "Guest image manifest (profile → OCI image)";
+    let report = crate::msb::manifest_report(manifest);
+    let listing = report.lines.join("\n");
+    if !report.missing.is_empty() {
+        Check::fail(
+            label,
+            format!(
+                "{listing}\n\
+                 No image mapping for: {}. Add an [images.overrides] entry in\n\
+                 ~/.abox/config.toml or upgrade abox.",
+                report.missing.join(", ")
+            ),
+        )
+    } else if !report.unpinned.is_empty() {
+        Check::warn(
+            label,
+            format!(
+                "{listing}\n\
+                 Unpinned (tag-addressed) profiles: {}. Digest pins are filled in\n\
+                 by the image publish workflow; tag references are not content-addressed.",
+                report.unpinned.join(", ")
+            ),
+        )
+    } else {
+        Check::ok_with(label, listing)
+    }
+}
+
+/// Environment-section summary under the MicroSandbox backend: profiles are
+/// backed by OCI images pulled on first use, not locally installed rootfs
+/// files.
+fn check_profile_image_resolution(manifest: &ImageManifest) -> Check {
+    let label = "Guest profiles";
+    let report = crate::msb::manifest_report(manifest);
+    if report.missing.is_empty() {
+        Check::ok_with(
+            label,
+            "all profiles resolve to OCI images (pulled on first use):\n".to_string()
+                + &report.lines.join("\n"),
+        )
     } else {
         Check::fail(
             label,
             format!(
-                "{name} not found in {}.\n\
-                 Run 'abox init' or 'just bootstrap-vm' to download VM artifacts.",
-                vm_dir.display()
+                "profiles without an image mapping: {}\n{}",
+                report.missing.join(", "),
+                report.lines.join("\n")
             ),
         )
     }
 }
 
-fn check_virtiofsd_uid_map(vm_dir: &Path) -> Check {
-    let label = "virtiofsd supports --uid-map";
-    let bin = vm_dir.join("virtiofsd");
-    if !bin.exists() {
-        return Check::warn(label, "virtiofsd not yet installed — run 'abox init' first.");
-    }
-    let out = std::process::Command::new(&bin).arg("--help").output();
-    let help_text = match out {
-        Ok(o) => {
-            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)
-        }
-        Err(e) => return Check::fail(label, format!("Failed to run virtiofsd --help: {e}")),
-    };
-    if help_text.contains("--uid-map") {
-        Check::ok(label)
-    } else {
-        Check::fail(
-            label,
-            format!(
-                "The shipped virtiofsd at {} does not advertise --uid-map.\n\
-                 abox uses --uid-map to remap workspace file ownership into the\n\
-                 guest agent user (see ADR-004). Requires virtiofsd >= 1.10.\n\
-                 Re-run 'just bootstrap-vm' to refresh the binary.",
-                bin.display()
-            ),
-        )
-    }
-}
-fn check_virtiofsd_caps(vm_dir: &Path) -> Check {
-    let label = "virtiofsd has cap_sys_admin+ep";
-    let bin = vm_dir.join("virtiofsd");
-    if !bin.exists() {
-        return Check::warn(label, "virtiofsd not yet installed — run 'abox init' first.");
-    }
-    match crate::virtiofsd::diagnose_virtiofsd_caps(&bin) {
-        crate::virtiofsd::VirtiofsdCapsStatus::Ready => {
-            Check::ok_with(label, bin.display().to_string())
-        }
-        crate::virtiofsd::VirtiofsdCapsStatus::Missing { condition, remediation } => {
-            Check::fail(label, format!("{condition}\n{remediation}"))
-        }
-    }
-}
-fn check_local_bin_on_path(vm_dir: &Path) -> Check {
-    let local_bin: PathBuf =
-        dirs::home_dir().map_or_else(|| PathBuf::from("~/.local/bin"), |h| h.join(".local/bin"));
-    // Check whether cloud-hypervisor is reachable on PATH
-    let ch_on_path = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .any(|p| Path::new(p).join("cloud-hypervisor").exists());
-    let ch_in_vm_dir = vm_dir.join("cloud-hypervisor").exists();
-    if ch_on_path {
-        Check::ok("cloud-hypervisor reachable on PATH")
-    } else if ch_in_vm_dir {
-        Check::warn(
-            "cloud-hypervisor reachable on PATH",
-            format!(
-                "cloud-hypervisor exists in {} but is not on PATH.\n\
-                 Add {} to your shell profile:\n\
-                 \n\
-                 \x20 export PATH=\"{}:$PATH\"",
-                vm_dir.display(),
-                local_bin.display(),
-                local_bin.display(),
-            ),
-        )
-    } else {
-        Check::warn(
-            "cloud-hypervisor reachable on PATH",
-            "VM artifacts not yet installed — run 'abox init' first.",
-        )
-    }
-}
-
-fn installed_profiles(config: &AboxConfig) -> Vec<EnvironmentProfile> {
-    let mut profiles = Vec::new();
-    for profile in [
-        EnvironmentProfile::Base,
-        EnvironmentProfile::Node,
-        EnvironmentProfile::Python,
-        EnvironmentProfile::PythonGlibc,
-        EnvironmentProfile::Rust,
-    ] {
-        if image_path_for_profile(config, profile).exists() {
-            profiles.push(profile);
-        }
-    }
-    profiles
-}
-
-fn check_installed_guest_profiles(config: &AboxConfig) -> Check {
-    let installed = installed_profiles(config);
-    let label = "Installed guest profiles";
-    if installed.is_empty() {
-        return Check::fail(
-            label,
-            "No guest profile images are installed.\nRun 'abox init' to bootstrap the base image."
-                .to_string(),
-        );
-    }
-
-    let installed_names = installed.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-    let missing_names = [
-        EnvironmentProfile::Base,
-        EnvironmentProfile::Node,
-        EnvironmentProfile::Python,
-        EnvironmentProfile::PythonGlibc,
-        EnvironmentProfile::Rust,
-    ]
-    .into_iter()
-    .filter(|profile| !installed.contains(profile))
-    .map(|profile| profile.to_string())
-    .collect::<Vec<_>>();
-
-    let detail = if missing_names.is_empty() {
-        format!("installed: {installed_names}")
-    } else {
-        format!(
-            "installed: {installed_names}\noptional profiles not yet installed: {}",
-            missing_names.join(", ")
-        )
-    };
-    Check::ok_with(label, detail)
-}
-
-fn check_repo_requested_profile(config: &AboxConfig, repo_root: &Path) -> Check {
+fn check_repo_requested_profile_msb(repo_root: &Path, manifest: &ImageManifest) -> Check {
     let label = "Current repo environment profile";
     let config_path = ProjectConfig::default_path(repo_root);
     let loaded = match ProjectConfig::load(repo_root) {
@@ -456,130 +422,16 @@ fn check_repo_requested_profile(config: &AboxConfig, repo_root: &Path) -> Check 
         }
     };
 
-    let image_path = image_path_for_profile(config, resolved.environment_profile);
-    if image_path.exists() {
-        Check::ok_with(
+    let profile = resolved.environment_profile;
+    match manifest.image_for_profile(profile) {
+        Ok(image) => Check::ok_with(
             label,
-            format!("{} ({})", resolved.environment_profile, image_path.display()),
-        )
-    } else {
-        Check::fail(
+            format!("{profile} → {} (pulled on first use)", image.pull_reference()),
+        ),
+        Err(err) => Check::fail(
             label,
-            format!(
-                "Repo requests '{}' but the image is missing at {}.\n\
-                 Install it with `abox init --profile {}`.",
-                resolved.environment_profile,
-                image_path.display(),
-                resolved.environment_profile
-            ),
-        )
-    }
-}
-fn check_rootfs_freshness(vm_dir: &Path) -> Check {
-    let label = "Rootfs freshness";
-    let inputs = vm_dir.join("rootfs.raw.inputs");
-    if !inputs.exists() {
-        return Check::warn(
-            label,
-            "rootfs.raw.inputs sidecar not found — cannot verify freshness.\n\
-             If you're running from source, re-run 'just rebuild-rootfs' to populate it.",
-        );
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return Check::warn(label, "Could not locate running binary; skipping check.");
-    };
-    let mut dir = exe.parent();
-    let (mut init_sh, mut shim_bin, mut build_rootfs_sh, mut rootfs_builder_dockerfile): (
-        Option<PathBuf>,
-        Option<PathBuf>,
-        Option<PathBuf>,
-        Option<PathBuf>,
-    ) = (None, None, None, None);
-    for _ in 0..6 {
-        let Some(d) = dir else { break };
-        let c1 = d.join("guest/init.sh");
-        let c2 = d.join("target/x86_64-unknown-linux-musl/release/abox-shim");
-        let c3 = d.join("scripts/build_rootfs.sh");
-        let c4 = d.join("scripts/rootfs-builder.Dockerfile");
-        if c1.exists() && init_sh.is_none() {
-            init_sh = Some(c1);
-        }
-        if c2.exists() && shim_bin.is_none() {
-            shim_bin = Some(c2);
-        }
-        if c3.exists() && build_rootfs_sh.is_none() {
-            build_rootfs_sh = Some(c3);
-        }
-        if c4.exists() && rootfs_builder_dockerfile.is_none() {
-            rootfs_builder_dockerfile = Some(c4);
-        }
-        if init_sh.is_some()
-            && shim_bin.is_some()
-            && build_rootfs_sh.is_some()
-            && rootfs_builder_dockerfile.is_some()
-        {
-            break;
-        }
-        dir = d.parent();
-    }
-    let (Some(init_sh), Some(shim_bin), Some(build_rootfs_sh), Some(rootfs_builder_dockerfile)) =
-        (init_sh, shim_bin, build_rootfs_sh, rootfs_builder_dockerfile)
-    else {
-        return Check::warn(
-            label,
-            "No source tree next to the binary — skipping freshness check.\n\
-             (This is expected for released binaries.)",
-        );
-    };
-    let init_hash = sha256_file(&init_sh);
-    let shim_hash = sha256_file(&shim_bin);
-    let build_rootfs_hash = sha256_file(&build_rootfs_sh);
-    let rootfs_builder_dockerfile_hash = sha256_file(&rootfs_builder_dockerfile);
-    let recorded = std::fs::read_to_string(&inputs).unwrap_or_default();
-    let recorded_init =
-        recorded.lines().find_map(|l| l.strip_prefix("init_sh=")).unwrap_or("<missing>");
-    let recorded_shim =
-        recorded.lines().find_map(|l| l.strip_prefix("shim=")).unwrap_or("<missing>");
-    let recorded_build_rootfs =
-        recorded.lines().find_map(|l| l.strip_prefix("build_rootfs_sh=")).unwrap_or("<missing>");
-    let recorded_rootfs_builder_dockerfile = recorded
-        .lines()
-        .find_map(|l| l.strip_prefix("rootfs_builder_dockerfile="))
-        .unwrap_or("<missing>");
-    if init_hash == recorded_init
-        && shim_hash == recorded_shim
-        && build_rootfs_hash == recorded_build_rootfs
-        && rootfs_builder_dockerfile_hash == recorded_rootfs_builder_dockerfile
-    {
-        Check::ok(label)
-    } else {
-        Check::fail(
-            label,
-            format!(
-                "rootfs.raw is stale — guest/init.sh, the shim, or the rootfs builder\n\
-                 has changed since the\n\
-                 rootfs was built. Run:\n\
-                 \n\
-                 \x20 just rebuild-rootfs\n\
-                 \n\
-                 Mismatches:\n\
-                 \x20 init_sh:  recorded={recorded_init}  live={init_hash}\n\
-                 \x20 shim:     recorded={recorded_shim}  live={shim_hash}\n\
-                 \x20 build:    recorded={recorded_build_rootfs}  live={build_rootfs_hash}\n\
-                 \x20 docker:   recorded={recorded_rootfs_builder_dockerfile}  live={rootfs_builder_dockerfile_hash}"
-            ),
-        )
-    }
-}
-fn sha256_file(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let mut h = Sha256::new();
-            h.update(&bytes);
-            format!("{:x}", h.finalize())
-        }
-        Err(_) => "<read-error>".to_string(),
+            format!("Repo requests '{profile}' but no guest image resolves for it.\n{err:#}"),
+        ),
     }
 }
 
@@ -904,7 +756,7 @@ fn check_socket_path_length(config: &AboxConfig) -> Check {
             format!(
                 "runtime_dir '{}' is too long ({} bytes base).\n\
                  Linux caps Unix socket paths at 108 bytes, and abox appends per-sandbox\n\
-                 suffixes like 'vfs-status-<task-id>.sock' and 'vsock-<task-id>.sock_5000'.\n\
+                 suffixes like 'msb-<task-id>.sock_5000'.\n\
                  No task ID would fit with this runtime_dir.\n\
                  Set a shorter runtime_dir in ~/.abox/config.toml, e.g.:\n\
                  \n\

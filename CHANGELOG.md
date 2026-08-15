@@ -1,5 +1,57 @@
 # Changelog
 
+### MicroSandbox runtime migration (ADR-008)
+
+abox's sandbox substrate migrates from a bespoke Cloud Hypervisor stack to
+MicroSandbox (libkrun). abox now concentrates on autonomous-agent
+governance — worktrees, repo trust, command/request authorization,
+host-held credentials, attribution, tamper-evident audit — and delegates
+generic isolation (microVM, OCI images, mounts, resource limits, native
+network isolation) to the runtime.
+
+- **MicroSandbox is the runtime** (pinned 0.6.9), replacing the bespoke
+  Cloud Hypervisor stack (see the Removed section below).
+- **macOS Apple Silicon host support** via Hypervisor.framework.
+- Guest profiles keep their names but are OCI images
+  (`ghcr.io/x-mckay/abox-guest-*`, digest-pinned manifest) instead of raw
+  rootfs artifacts; no kernel/virtiofsd/rootfs bootstrap.
+- Runtime-neutral `SandboxRuntimePort` domain boundary; guest exit codes
+  propagate directly from the agent exec (no status-share protocol).
+- Network modes compile to runtime plans: `safe` = host-mediated only;
+  `scoped` = native allowlist (DNS-pinned, SNI-verified, TCP 443 + DNS);
+  `open` = public-internet-only (host/loopback/private/link-local/cloud
+  metadata always denied). `HTTPS_PROXY` still routes cooperating clients
+  through the audited abox egress proxy in every mode.
+- Command broker rides per-sandbox vsock routes (persistent multiplexed
+  uplink via the new `abox-bridge` guest binary; no socat); command
+  policy, attribution, and audit semantics unchanged.
+- Credential model unchanged (stubs in guest, host-side injection,
+  method/path request rules); new per-rule `native_substitution` opt-in
+  delegates simple env-var rules to runtime-native substitution with
+  host-side source references. `abox project explain` reports the
+  compiled network plan and per-rule enforcement.
+- `abox init`/`doctor` verify the runtime end to end: SDK-driven runtime
+  asset install, guest-image manifest checks, host virtualization checks
+  on both platforms.
+
+### Removed (single-runtime end state)
+
+- **The legacy Cloud Hypervisor backend is deleted.** MicroSandbox is now
+  the sole runtime: the `[runtime]` backend selector and
+  `ABOX_RUNTIME_BACKEND` are gone, and rollback means reverting to a
+  previous abox release, not switching backends.
+- Memory snapshots/templates and their commands (`abox snapshot`,
+  `abox template`) and `abox attach` are deleted; `abox env warm` is the
+  fast-start story.
+- The raw VM pipeline is deleted: kernel/rootfs/virtiofsd artifacts,
+  `bootstrap_vm.sh`, `build_rootfs.sh`, the guest init script and socat
+  bridges, vm-assets release bundles, the VM latency benchmarks, and the
+  legacy `e2e_test.sh` suite (`just e2e-runtime` is the live suite).
+- **Breaking config/API renames:** `[vm_defaults]` → `[sandbox_defaults]`
+  (resources only); `abox-core` modules `proxy_bridge` → `command_broker`
+  (type `CommandBroker`) and `egress` → `request_broker`; `SandboxStatus`
+  JSON fields `vm_state`/`vm_pid` → `state`/`pid`.
+
 ## v0.6.0 — 2026-06-27
 
 ### Features

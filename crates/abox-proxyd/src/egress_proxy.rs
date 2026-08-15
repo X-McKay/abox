@@ -96,7 +96,7 @@ impl EgressProxyServer {
                     let bypass_tls = bypass_tls.clone();
                     let sandbox_id = sandbox_id.clone();
                     async move {
-                        abox_core::egress::handle_request(
+                        abox_core::request_broker::handle_request(
                             req,
                             &policy,
                             root_ca,
@@ -126,7 +126,7 @@ impl EgressProxyServer {
 #[cfg(test)]
 mod tests {
     use abox_core::ca::RootCa;
-    use abox_core::egress::{build_server_config, is_tls_bypassed};
+    use abox_core::request_broker::{build_server_config, is_tls_bypassed};
 
     #[test]
     fn test_is_tls_bypassed_exact() {

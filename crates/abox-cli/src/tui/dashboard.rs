@@ -113,7 +113,7 @@ fn render_sandboxes(frame: &mut Frame, area: Rect, state: &DashboardState) {
         .sandboxes
         .iter()
         .map(|s| {
-            let state_style = match s.vm_state.as_str() {
+            let state_style = match s.state.as_str() {
                 "running" => Style::default().fg(Color::Green),
                 "paused" => Style::default().fg(Color::Yellow),
                 "stopped" => Style::default().fg(Color::Red),
@@ -122,8 +122,8 @@ fn render_sandboxes(frame: &mut Frame, area: Rect, state: &DashboardState) {
             Row::new(vec![
                 Cell::from(s.id.clone()),
                 Cell::from(s.branch.clone()),
-                Cell::from(s.vm_state.clone()).style(state_style),
-                Cell::from(s.vm_pid.to_string()),
+                Cell::from(s.state.clone()).style(state_style),
+                Cell::from(s.pid.to_string()),
                 Cell::from(s.commits_ahead.to_string()),
             ])
         })

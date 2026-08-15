@@ -21,21 +21,6 @@ yanked = "warn"
 # removing it (typically: upstream ships a fix). Do not add to this list
 # without a written rationale.
 ignore = [
-    # rustls-webpki 0.103.10 — URI-name constraints accepted incorrectly.
-    # Practical impact for abox: LOW. The rustls-webpki in our chain is used
-    # by the MITM proxy as a TLS terminator with a self-signed CA that signs
-    # its own leaves. We do not rely on name-constraint-based verification
-    # of externally-presented cert chains (the typical vuln target). Remove
-    # this ignore once rustls-webpki ships a patched 0.103.x or we migrate
-    # to a patched 0.104.x. See https://rustsec.org/advisories/RUSTSEC-2026-0098
-    "RUSTSEC-2026-0098",
-
-    # rustls-webpki 0.103.10 — wildcard-name constraints accepted incorrectly.
-    # Same chain and same impact assessment as RUSTSEC-2026-0098. Remove when
-    # a patched upstream version is released.
-    # See https://rustsec.org/advisories/RUSTSEC-2026-0099
-    "RUSTSEC-2026-0099",
-
     # rustls-pemfile 2.2.0 — unmaintained (not vulnerable). Used only in
     # abox-proxyd for parsing CA + leaf PEM material. The replacement path
     # is rustls-pki-types' PEM module. Migration is tracked as a follow-up
@@ -69,6 +54,11 @@ allow = [
   "Zlib",
   "MPL-2.0",
   "CDLA-Permissive-2.0",
+  # Public-domain-equivalent licenses pulled in by the MicroSandbox runtime's
+  # userspace network stack (smoltcp/managed: 0BSD; notify: CC0-1.0). Both
+  # are maximally permissive with no attribution requirement.
+  "0BSD",
+  "CC0-1.0",
 ]
 # Require SPDX expressions to be at least 80% confident before accepting.
 confidence-threshold = 0.8

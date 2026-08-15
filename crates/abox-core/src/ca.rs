@@ -1,9 +1,9 @@
-//! Root CA generation and leaf-cert signing for TLS-terminating MITM proxy.
+//! Root CA generation and leaf-cert signing for the TLS-terminating request
+//! broker.
 //!
-//! The root CA is persisted to `~/.abox/ca/` and injected into each guest VM
-//! at boot via the `aboxmeta` virtiofs share (see `guest/init.sh`). This
-//! decouples the rootfs image from any specific CA, enabling pre-built rootfs
-//! distribution. Leaf certs are cached in memory (keyed by SNI hostname) so
+//! The root CA is persisted to `~/.abox/ca/` and staged into each guest's
+//! trust store at launch by the runtime adapter, so guest images never bake
+//! a specific CA. Leaf certs are cached in memory (keyed by SNI hostname) so
 //! repeated connections to the same host reuse the same certificate.
 
 use anyhow::{Context, Result};

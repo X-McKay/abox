@@ -1,41 +1,42 @@
 # abox configuration
 #
-# Run 'abox init' to generate this file automatically with all paths
-# pre-filled based on your bootstrap output.
+# Run 'abox init' to generate this file automatically.
 #
 # To configure manually: copy this file to ~/.abox/config.toml and
 # uncomment / edit the values you want to change.
 
-# Base directory for abox state (worktrees, snapshots, logs).
+# Base directory for abox state (worktrees, logs, trust records).
 # state_dir = "~/.abox"
 
 # Directory for runtime files (sockets, PIDs).
 #
-# IMPORTANT — keep this path short. Linux caps Unix domain socket paths at
-# 108 bytes, and abox appends per-sandbox suffixes like
-# "vfs-status-<task-id>.sock". The default (~/.abox/r) is chosen to stay
+# IMPORTANT — keep this path short. Unix domain socket paths are capped at
+# 104 bytes (macOS; 108 on Linux), and abox appends per-sandbox suffixes
+# like "msb-<task-id>.sock_5000". The default (~/.abox/r) is chosen to stay
 # well within the limit. If you customise this, verify the worst-case
 # length with 'abox doctor'.
 #
 # Defaults to ~/.abox/r (no need to set this unless you want a different location).
 # runtime_dir = "~/.abox/r"
 
-[vm_defaults]
+# ─── Guest OCI Images ──────────────────────────────────────────────────────
+#
+# Environment profiles (base, node, python, python-glibc, rust) resolve to
+# pinned OCI images through the manifest embedded in each abox release —
+# users never manage image URLs directly. Images are pulled on first use.
+#
+# Development escape hatch: override the image for a profile. Host-owned
+# config only; a local absolute path is used verbatim as a rootfs.
+#
+# [images.overrides]
+# node = "localhost:5000/dev-guest:latest"
+
+[sandbox_defaults]
 # Memory allocation per sandbox in MiB.
 memory_mib = 2048
 
 # Number of vCPUs per sandbox.
 vcpus = 2
-
-# Path to the guest root filesystem image.
-# After running 'abox init' or 'just bootstrap-vm', this will be at:
-#   ~/.abox/vm/rootfs.raw
-# image_path = "~/.abox/vm/rootfs.raw"
-
-# Path to the kernel binary (vmlinux, not bzImage).
-# After running 'abox init' or 'just bootstrap-vm', this will be at:
-#   ~/.abox/vm/vmlinux
-# kernel_path = "~/.abox/vm/vmlinux"
 
 [proxy]
 # Port for the HTTP egress proxy.
@@ -52,7 +53,7 @@ egress_port = 18443
 #
 # Enabling a managed provider causes abox to stage a worthless stub file into
 # the guest and inject the real host-side credential at request time. Real
-# secrets never enter the VM.
+# secrets never enter the sandbox.
 #
 # Uncomment the providers you want abox to manage. The default host path can be
 # overridden if your credential file lives somewhere else.
@@ -68,7 +69,7 @@ egress_port = 18443
 # ─── Advanced Custom Stubs ─────────────────────────────────────────────────
 #
 # This is an explicitly advanced escape hatch for unsupported tools. It is
-# stub-only: abox never copies the real host credential into the VM.
+# stub-only: abox never copies the real host credential into the sandbox.
 #
 # If you use it, you must also add the matching host-side policy / egress rule
 # yourself. See docs/credential-scoping.md for directions.

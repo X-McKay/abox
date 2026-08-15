@@ -2,17 +2,18 @@
 //!
 //! Inspired by Moat's service dependencies feature, this module allows
 //! users to declare ephemeral services (PostgreSQL, Redis, Ollama) in
-//! `.abox/project.toml` that are started alongside the sandbox VM.
+//! `.abox/project.toml` that are started alongside the sandbox.
 //!
 //! # Architecture
 //!
-//! Services run as Docker containers on the host, connected to the sandbox
-//! VM via port forwarding. The VM's init script sets up socat bridges to
-//! forward specific ports from the guest to the host Docker containers.
+//! Services run as Docker containers on the host, reachable from the guest
+//! through per-sandbox vsock control channels: `abox-bridge` listens on the
+//! guest loopback port and forwards each connection over the sandbox's
+//! vsock route to a host-side splice onto the container's published port.
 //!
 //! # Lifecycle
 //!
-//! 1. Services are started before the VM boots.
+//! 1. Services are started before the sandbox boots.
 //! 2. Connection URLs are injected as environment variables into the guest.
 //! 3. Services are stopped and removed when the sandbox exits.
 //!
@@ -94,10 +95,10 @@ pub struct RunningService {
 /// The host runs the service as a Docker container published on
 /// `127.0.0.1:host_port`. Inside the microVM, `127.0.0.1` is the guest's own
 /// loopback, so the container is unreachable directly. To connect them, the
-/// orchestrator binds a host listener at `vsock-<id>.sock_<vsock_port>` (Cloud
-/// Hypervisor routes the guest's vsock port `vsock_port` there) that forwards
-/// to `127.0.0.1:host_port`, and the guest's init script runs
-/// `socat TCP-LISTEN:<guest_port> VSOCK-CONNECT:2:<vsock_port>`. The connection
+/// orchestrator binds a host listener on the sandbox's control socket for
+/// `vsock_port` (the runtime routes the guest's vsock port there) that
+/// forwards to `127.0.0.1:host_port`, and `abox-bridge` in the guest
+/// forwards `127.0.0.1:<guest_port>` onto that vsock port. The connection
 /// URL handed to the agent therefore points at `127.0.0.1:<guest_port>`.
 #[derive(Debug, Clone)]
 pub struct ServiceBridge {
@@ -172,7 +173,7 @@ pub fn plan_service_bridge(running: &RunningService, index: usize) -> ServiceBri
     }
 }
 
-/// Run a host-side bridge: accept connections on a Unix socket (the Cloud
+/// Run a host-side bridge: accept connections on a Unix socket (the
 /// Hypervisor vsock backend path) and splice each to `127.0.0.1:host_port`.
 ///
 /// Loops until the listener errors or the task is aborted (on sandbox
@@ -180,8 +181,7 @@ pub fn plan_service_bridge(running: &RunningService, index: usize) -> ServiceBri
 pub async fn serve_service_bridge(socket_path: PathBuf, host_port: u16) -> Result<()> {
     use tokio::net::{TcpStream, UnixListener};
 
-    // Cloud Hypervisor creates the `_<port>` socket lazily; remove any stale
-    // one from a previous run before binding.
+    // Remove any stale socket from a previous run before binding.
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("Binding service bridge socket {}", socket_path.display()))?;
@@ -221,7 +221,8 @@ pub struct HostPortPlan {
 }
 
 impl HostPortPlan {
-    /// Project to the guest-visible bridge line written into `/abox-meta/services`.
+    /// Project to the guest-visible bridge metadata (`abox-bridge` listen
+    /// pairs).
     pub fn guest(&self) -> GuestServiceBridge {
         GuestServiceBridge {
             name: format!("hostport-{}", self.host_port),
@@ -256,7 +257,7 @@ pub async fn serve_host_port_bridge(
     guest_port: u16,
     host_port: u16,
     sandbox_id: String,
-    audit: std::sync::Arc<dyn crate::proxy_bridge::AuditSink>,
+    audit: std::sync::Arc<dyn crate::command_broker::AuditSink>,
 ) -> Result<()> {
     use tokio::net::{TcpStream, UnixListener};
 
@@ -763,8 +764,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("vsock-test.sock_5200");
         let audit_path = dir.path().join("audit.jsonl");
-        let audit: std::sync::Arc<dyn crate::proxy_bridge::AuditSink> =
-            std::sync::Arc::new(crate::proxy_bridge::FileAuditSink::open(&audit_path).unwrap());
+        let audit: std::sync::Arc<dyn crate::command_broker::AuditSink> =
+            std::sync::Arc::new(crate::command_broker::FileAuditSink::open(&audit_path).unwrap());
 
         let sock2 = sock.clone();
         let bridge = tokio::spawn(async move {

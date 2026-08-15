@@ -12,11 +12,25 @@ publish = false
 name = "abox-shim"
 path = "src/main.rs"
 
+# Tiny guest-side TCP↔vsock forwarder. Bridges the guest's loopback HTTPS
+# proxy port (and service ports) to per-sandbox host vsock routes under the
+# MicroSandbox runtime. Same minimal-dependency rules as the shim.
+[[bin]]
+name = "abox-bridge"
+path = "src/bridge.rs"
+
 # Minimal dependencies for a static musl binary.
 # No tokio, no async — synchronous only for smallest possible binary.
 [dependencies]
 abox-protocol = { path = "../abox-protocol" }
 serde_json = "1"
+
+# AF_VSOCK transport (guest → host command broker / egress routes). The
+# `vsock` crate keeps the unsafe libc plumbing out of this crate, which
+# denies unsafe_code via workspace lints. Linux-only: the shim always runs
+# inside a Linux guest; the cfg gate keeps host-side macOS builds green.
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
 
 [dev-dependencies]
 serial_test = "3"

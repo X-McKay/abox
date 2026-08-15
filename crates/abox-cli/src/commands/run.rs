@@ -10,9 +10,9 @@ use abox_core::project::{
     is_approved, project_cache_root, record_approval, standalone_network_scope, EnvironmentProfile,
     NetworkMode, ProjectConfig, ResolvedProjectConfig,
 };
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
 use abox_core::util::validate_env_key;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -34,10 +34,6 @@ pub struct RunArgs {
     /// Base branch to fork from. Default: "main".
     #[arg(long, default_value = "main")]
     pub base: String,
-
-    /// Restore from a snapshot template instead of booting fresh.
-    #[arg(long)]
-    pub template: Option<String>,
 
     /// Memory allocation in MiB. Overrides config default.
     #[arg(long)]
@@ -200,9 +196,9 @@ const MAX_INPUT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// Validate parsed `--input-file` specs (each must exist, be a regular file,
 /// stay within the size budget, and map to a unique guest name) and return the
 /// staged-file descriptors. Pure except for reading host file metadata.
-fn resolve_input_files(specs: &[InputFileSpec]) -> Result<Vec<abox_core::vm::InputFile>> {
+fn resolve_input_files(specs: &[InputFileSpec]) -> Result<Vec<abox_core::runtime::RuntimeInput>> {
     let mut input_total: u64 = 0;
-    let mut input_files: Vec<abox_core::vm::InputFile> = Vec::with_capacity(specs.len());
+    let mut input_files: Vec<abox_core::runtime::RuntimeInput> = Vec::with_capacity(specs.len());
     for spec in specs {
         let meta = std::fs::metadata(&spec.host_path).with_context(|| {
             format!("--input-file: cannot read host file {}", spec.host_path.display())
@@ -235,7 +231,7 @@ fn resolve_input_files(specs: &[InputFileSpec]) -> Result<Vec<abox_core::vm::Inp
                 spec.guest_name
             );
         }
-        input_files.push(abox_core::vm::InputFile {
+        input_files.push(abox_core::runtime::RuntimeInput {
             host_path: spec.host_path.clone(),
             guest_name: spec.guest_name.clone(),
         });
@@ -246,7 +242,7 @@ fn resolve_input_files(specs: &[InputFileSpec]) -> Result<Vec<abox_core::vm::Inp
 /// The env vars that expose staged inputs to the in-guest command:
 /// `ABOX_INPUT_DIR` whenever any input is staged, plus `ABOX_INPUT_FILE`
 /// (the single staged path) only when exactly one input was given.
-fn input_file_env_vars(input_files: &[abox_core::vm::InputFile]) -> Vec<(String, String)> {
+fn input_file_env_vars(input_files: &[abox_core::runtime::RuntimeInput]) -> Vec<(String, String)> {
     let mut vars = Vec::new();
     if input_files.is_empty() {
         return vars;
@@ -262,7 +258,7 @@ fn input_file_env_vars(input_files: &[abox_core::vm::InputFile]) -> Vec<(String,
 }
 
 /// Refuse a host-port bridge whose guest port collides with the in-guest HTTPS
-/// egress proxy listener. Both run as `socat TCP-LISTEN:<port>` inside the
+/// egress proxy listener. Both are `abox-bridge` loopback listeners inside the
 /// guest, so a collision would make one silently fail to bind.
 fn ensure_host_ports_no_egress_collision(
     host_ports: &[abox_core::services::HostPortBridge],
@@ -278,37 +274,15 @@ fn ensure_host_ports_no_egress_collision(
     Ok(())
 }
 
-/// Refuse `[[host_ports]]` with a `--template` restore. A restored VM resumes
-/// an already-booted guest and does not re-run guest init, so newly staged
-/// `/abox-meta/services` host-port lines are never read and the in-guest
-/// listener is never created (mirrors how `[services]` rejects `--template`).
-fn ensure_host_ports_not_templated(
-    host_ports: &[abox_core::services::HostPortBridge],
-    template: Option<&str>,
-) -> Result<()> {
-    if template.is_some() && !host_ports.is_empty() {
-        anyhow::bail!(
-            "[[host_ports]] is not supported with --template restores.\n\
-             A restored VM does not re-run guest init, so the in-guest port \
-             listener is never created. Remove --template for this run, or remove \
-             [[host_ports]] from .abox/project.toml."
-        );
-    }
-    Ok(())
-}
-
 /// Start the project's declared service sidecars and return their host→guest
 /// bridges, injecting each connection URL into `env_vars`.
 ///
-/// Returns an empty vec when no services are declared. Services are not
-/// supported alongside `--template` restores (the bridges/env are not captured
-/// in a snapshot); that combination is rejected. On any failure after a
-/// container has started, all of this sandbox's containers are torn down so we
-/// don't leak them.
+/// Returns an empty vec when no services are declared. On any failure after
+/// a container has started, all of this sandbox's containers are torn down
+/// so we don't leak them.
 fn start_project_services(
     services: &std::collections::HashMap<String, abox_core::services::ServiceConfig>,
     task_id: &str,
-    template: Option<&str>,
     env_vars: &mut Vec<(String, String)>,
 ) -> Result<Vec<abox_core::services::ServiceBridge>> {
     use abox_core::services::{
@@ -318,12 +292,6 @@ fn start_project_services(
 
     if services.is_empty() {
         return Ok(Vec::new());
-    }
-    if template.is_some() {
-        anyhow::bail!(
-            "Service sidecars are not supported with --template restores.\n\
-             Remove --template for this run, or remove [services] from .abox/project.toml."
-        );
     }
     if !docker_available() {
         anyhow::bail!(
@@ -437,10 +405,10 @@ fn ensure_host_ports_allowed(
     Ok(())
 }
 
-pub async fn execute<W: WorkspacePort, V: VmPort>(
+pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: RunArgs,
     repo_root: &Path,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
 ) -> Result<()> {
@@ -481,13 +449,6 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
             &orchestrator.config().state_dir,
             requested_network,
         )?;
-        if args.template.is_some() && resolved.has_durable_caches() {
-            anyhow::bail!(
-                "Template restore is not yet supported with repo-managed durable caches.\n\n\
-                 Remove `--template` for this run, or remove [environment].caches from \
-                 .abox/project.toml for this repo."
-            );
-        }
     }
 
     let network_scope = match (resolved_project.as_ref(), requested_network) {
@@ -507,6 +468,18 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     } else {
         policy
     };
+
+    // Compile the repo's network intent into the runtime-neutral plan the
+    // sandbox runtime enforces (safe → no guest networking; scoped/open →
+    // native public-only plans that always exclude host/private/metadata).
+    let network_plan = match network_scope.as_ref() {
+        Some(scope) => abox_core::policy::compile_runtime_network_plan(scope)?,
+        None => abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+    };
+    // Credential rules that opted into native runtime substitution. Fails
+    // closed when a native-marked rule cannot be represented under this
+    // network plan.
+    let native_secrets = policy.native_secret_specs(&network_plan)?;
 
     let cache_mount_dir = resolved_project.as_ref().and_then(|resolved| {
         if resolved.has_durable_caches() {
@@ -542,20 +515,13 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
     // Start any declared service sidecars (postgres/redis/ollama/…), inject
     // their connection URLs as env vars, and build host→guest bridges. The
     // orchestrator tears the containers down when the sandbox exits.
-    let service_bridges = start_project_services(
-        &project_services,
-        &args.task,
-        args.template.as_deref(),
-        &mut env_vars,
-    )?;
-    ensure_host_ports_not_templated(&project_host_ports, args.template.as_deref())?;
+    let service_bridges = start_project_services(&project_services, &args.task, &mut env_vars)?;
     let host_port_bridges =
         abox_core::services::plan_host_port_bridges(&project_host_ports, service_bridges.len());
 
     let params = CreateSandboxParams {
         task_id: args.task.clone(),
         base_branch: args.base,
-        template: args.template,
         memory_mib: args.memory,
         vcpus: args.cpus,
         user: args.user,
@@ -576,12 +542,14 @@ pub async fn execute<W: WorkspacePort, V: VmPort>(
         service_bridges,
         host_port_bridges,
         input_files,
+        network_plan,
+        native_secrets,
     };
 
     println!("Sandbox '{}' starting...", args.task);
     // The orchestrator tears the sidecars down when the sandbox exits cleanly,
     // but if `run_sandbox` fails before reaching that teardown (e.g. a
-    // virtiofsd/Cloud Hypervisor startup error or a missing VM artifact) the
+    // runtime startup error or a missing guest image) the
     // already-started containers would leak. Tear them down on the error path.
     // `stop_sandbox_services` is idempotent (stops by sandbox label), so this is
     // safe even if some teardown already happened.
@@ -728,9 +696,9 @@ fn ensure_project_trusted(
 ///
 /// Note: task ID validation is performed before reaching this function, so
 /// the task string is already known-safe when used to construct file paths.
-fn spawn_detached<W: WorkspacePort, V: VmPort>(
+fn spawn_detached<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &RunArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     let runtime = orchestrator.runtime_dir();
     std::fs::create_dir_all(&runtime)?;
@@ -778,9 +746,9 @@ fn strip_detach_flag(argv: &[String]) -> Vec<String> {
 mod tests {
     use super::{
         adapt_command_for_prompt, ensure_host_ports_allowed, ensure_host_ports_no_egress_collision,
-        ensure_host_ports_not_templated, ensure_managed_agent_ready, parse_env_var,
-        parse_input_file_arg, resolve_input_files, resolve_prompt_input, selected_managed_agent,
-        strip_detach_flag, InputFileSpec, RunArgs, MAX_INPUT_FILE_BYTES,
+        ensure_managed_agent_ready, parse_env_var, parse_input_file_arg, resolve_input_files,
+        resolve_prompt_input, selected_managed_agent, strip_detach_flag, InputFileSpec, RunArgs,
+        MAX_INPUT_FILE_BYTES,
     };
     use abox_core::config::AboxConfig;
     use abox_core::project::{EnvironmentProfile, NetworkMode, ResolvedProjectConfig};
@@ -948,7 +916,6 @@ mod tests {
         let args = RunArgs {
             task: "x".into(),
             base: "main".into(),
-            template: None,
             memory: None,
             cpus: None,
             user: None,
@@ -1019,8 +986,8 @@ mod tests {
 
     #[test]
     fn input_file_env_vars_single_vs_multi() {
-        use abox_core::vm::InputFile;
-        let f = |n: &str| InputFile { host_path: PathBuf::from("/h"), guest_name: n.into() };
+        use abox_core::runtime::RuntimeInput;
+        let f = |n: &str| RuntimeInput { host_path: PathBuf::from("/h"), guest_name: n.into() };
 
         // No inputs → no env vars.
         assert!(super::input_file_env_vars(&[]).is_empty());
@@ -1036,15 +1003,6 @@ mod tests {
         assert_eq!(many.len(), 1);
         assert_eq!(many[0].0, "ABOX_INPUT_DIR");
         assert!(!many.iter().any(|(k, _)| k == "ABOX_INPUT_FILE"));
-    }
-
-    #[test]
-    fn host_ports_rejected_with_template() {
-        use abox_core::services::HostPortBridge;
-        let hp = vec![HostPortBridge { guest: 4000, host: 4000 }];
-        assert!(ensure_host_ports_not_templated(&hp, Some("snap")).is_err());
-        assert!(ensure_host_ports_not_templated(&hp, None).is_ok());
-        assert!(ensure_host_ports_not_templated(&[], Some("snap")).is_ok());
     }
 
     #[test]

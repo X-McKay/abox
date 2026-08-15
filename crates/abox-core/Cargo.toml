@@ -36,11 +36,26 @@ tokio-rustls = "0.26"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
 rustix = { version = "1", features = ["fs"] }
+# MicroSandbox runtime (ADR-008). Pinned exactly during the migration;
+# updated only through dedicated dependency PRs qualified by the runtime
+# contract + security suites. `prebuilt` installs the msb runtime +
+# libkrunfw guest firmware into ~/.microsandbox (idempotent; also driven at
+# runtime by `abox init`); `keyring` is deliberately off (no dbus — abox
+# pulls public images anonymously).
+microsandbox = { version = "=0.6.9", default-features = false, features = ["net", "prebuilt"] }
+# Direct access to the network policy types (Destination, DomainName, …) the
+# facade does not re-export. Same exact pin as `microsandbox`.
+microsandbox-network = "=0.6.9"
+
+[features]
+# Exposes `runtime::testing::MockRuntime` for downstream test suites.
+test-support = []
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+abox-core = { path = ".", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }

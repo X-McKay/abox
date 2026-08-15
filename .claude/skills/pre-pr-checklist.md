@@ -1,6 +1,6 @@
 ---
 name: pre-pr-checklist
-description: Use before opening a PR, committing a finished change, or merging. Walks the canonical pre-PR checklist (docs/contributing/pre-pr-checklist.md), runs the required commands, and surfaces the VM-attestation requirement when the diff touches guest/proxy code.
+description: Use before opening a PR, committing a finished change, or merging. Walks the canonical pre-PR checklist (docs/contributing/pre-pr-checklist.md), runs the required commands, and surfaces the runtime-attestation requirement when the diff touches runtime/guest/proxy code.
 ---
 
 # Pre-PR Checklist
@@ -27,12 +27,11 @@ If the answer is `main` (or empty), stop and invoke the `start-feature` skill. N
 
 ```bash
 just tier-ci
-./scripts/local/e2e_test.sh
 ```
 
-`just tier-ci` = `fmt-check + lint + test + cargo deny check`. The e2e script runs phases 1–5 on any host (no VM needed). If any of these fail, stop and fix. Do not report success until they are green.
+`just tier-ci` = `fmt-check + lint + test + cargo deny check`. If it fails, stop and fix. Do not report success until it is green.
 
-### 3. Evaluate path-triggered VM attestation
+### 3. Evaluate path-triggered runtime attestation
 
 Get the list of changed paths:
 
@@ -40,11 +39,9 @@ Get the list of changed paths:
 git diff --name-only main...HEAD
 ```
 
-If any changed path matches one of these globs, VM attestation is required:
+If any changed path matches one of these globs, runtime attestation is required:
 
-- `guest/**`
-- `scripts/build_rootfs.sh`
-- `scripts/bootstrap_vm.sh`
+- `images/**`
 - `crates/abox-core/**`
 - `crates/abox-proxyd/**`
 - `crates/abox-protocol/**`
@@ -53,13 +50,12 @@ If any changed path matches one of these globs, VM attestation is required:
 
 If required:
 
-- If `guest/init.sh` or `scripts/build_rootfs.sh` changed, run `just rebuild-rootfs` first.
-- Run `just e2e-vm` and wait for completion. This needs a bootstrapped VM and `/dev/kvm`.
-- Record the timestamp. When you report the result to the user, include: "VM attestation required. Run `just e2e-vm` passed at <ISO-8601>. After opening the PR, add the `vm-attested` label and post a PR comment with this timestamp."
+- Run `just e2e-runtime` and wait for completion. This needs virtualization (KVM or Hypervisor.framework) and the msb runtime assets under `$MSB_HOME`; it skips cleanly without them, but a skip does not count as attestation.
+- Record the timestamp. When you report the result to the user, include: "Runtime attestation required. `just e2e-runtime` passed at <ISO-8601>. After opening the PR, add the `runtime-attested` label and post a PR comment with this timestamp."
 
 ### 3b. Note on release vs PR gates
 
-The above gates are for PRs. For releases, the full pre-release validation (`just pre-release`) must pass — this includes benchmarks and agent smoke tests. See the `release-preparation` skill.
+The above gates are for PRs. For releases, the full pre-release validation (`just pre-release`) must pass — this includes the live runtime e2e and the agent smoke tests. See the `release-preparation` skill.
 
 ### 4. Evaluate documentation updates
 
@@ -80,7 +76,7 @@ Read the last N commit subject lines (`git log main..HEAD --format='%s'`). For e
 Summarize for the user:
 
 - All Always gates: pass / fail (with failing output).
-- VM attestation: not required / required + timestamp / required but skipped (why).
+- Runtime attestation: not required / required + timestamp / required but skipped (why).
 - Doc updates made in this PR.
 - Any commits with weak subject lines.
 

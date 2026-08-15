@@ -49,7 +49,28 @@ Post in the project's primary channel (Discussions, Slack, or announcement issue
 >
 > Fix tracked in #<issue>. A patched release is targeted for <date>.
 
+## Rolling back a runtime regression
+
+There is exactly one runtime (MicroSandbox, pinned exactly in
+`crates/abox-core/Cargo.toml`), so there is no backend to switch to. If a
+release regresses runtime behavior, rollback means **reverting to a previous
+abox release**:
+
+- **Binary installs:** re-run the installer pinned to the last good tag
+  (`ABOX_VERSION=v<previous> ./scripts/install.sh`, as above). The installer
+  also stages that release's matching guest binaries under
+  `~/.abox/guest/<arch>/`.
+- **Source builds:** `git checkout v<previous> && cargo build --release`.
+- Because the MicroSandbox runtime pin travels with the abox version, the
+  older abox also expects the older runtime assets; re-run `abox init` after
+  downgrading so the SDK installs the assets matching that release's pin, and
+  `abox doctor` to verify.
+
+If the regression is in a MicroSandbox version bump specifically, the fix is
+the same shape: revert the dedicated pin-bump PR and cut a patch release —
+see [`runtime-upgrades.md`](runtime-upgrades.md).
+
 ## What is not here
 
 - No automated "yank registry" that `abox --version` checks. Users find out through GitHub or the announcement.
-- No CI-driven post-release smoke test. Releases are cut locally via `scripts/release.sh`, which runs the full quality gate and e2e before tagging. That is the last-line defense against shipping broken artifacts.
+- No CI-driven post-release smoke test. Releases are cut locally via `scripts/release.sh`, which verifies the `just pre-release` attestation stamps (runtime e2e + agent smoke) before tagging. That is the last-line defense against shipping broken artifacts.

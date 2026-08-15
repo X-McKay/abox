@@ -1,7 +1,7 @@
 //! `abox divergence` — Show which files each sandbox has changed.
 
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::SandboxOrchestrator;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
 use clap::Args;
@@ -26,9 +26,9 @@ pub struct DivergenceItem {
     pub status: String,
 }
 
-pub fn execute<W: WorkspacePort, V: VmPort>(
+pub fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &DivergenceArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     let entries = orchestrator.divergence(&args.base)?;
 

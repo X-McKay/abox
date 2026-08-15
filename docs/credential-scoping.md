@@ -152,6 +152,51 @@ Use this path only when:
 - a stub is enough for local startup checks
 - you understand the host-side policy you are enabling
 
+## Who enforces a rule: CredentialExecutionStrategy
+
+Every egress rule is classified with a `CredentialExecutionStrategy`, and
+`abox project explain` reports the classification alongside the compiled
+network plan:
+
+- **abox request broker** (default) — the rule is enforced by abox's
+  TLS-terminating egress proxy: header injection with templates,
+  `credential_file`/`json_path` sources, and per-request method/path
+  `request_rules`.
+- **MicroSandbox native** — the rule is delegated to the runtime's native
+  secret substitution.
+
+A rule opts into native substitution explicitly:
+
+```toml
+[[egress]]
+domain = "api.example.com"
+inject_header = "x-api-key"
+env_var = "EXAMPLE_API_KEY"
+native_substitution = true
+```
+
+Native substitution is deliberately limited to rule shapes the runtime can
+represent *exactly*; anything else fails at policy load or launch —
+enforcement is never silently downgraded. The structural requirements:
+
+- the secret source is a host `env_var` (no `credential_file`/`json_path` —
+  provider-specific file parsing stays in the abox request broker);
+- no `request_rules` (request-aware method/path policy stays in the broker);
+- the raw `{value}` header template;
+- a native network plan (`scoped` or `open` mode). In `safe` mode the guest
+  has no direct network path, so a native rule cannot apply and the launch
+  fails closed with instructions to remove `native_substitution` or change
+  the mode.
+
+Security properties of the native path: the real value stays on the host and
+is passed to the runtime as a *source reference* (the host environment
+variable name), never by value, so it cannot persist in runtime state; the
+guest sees only a placeholder; and delivery is TLS-identity-verified to the
+single configured destination host.
+
+When in doubt, leave `native_substitution` off — the abox request broker is
+the default and supports every rule shape.
+
 ## General Principles
 
 1. Keep the credential on the host.

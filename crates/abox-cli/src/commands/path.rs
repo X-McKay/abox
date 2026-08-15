@@ -3,8 +3,8 @@
 //! The worktree is the bind-mounted `/workspace`, so this is the supported way
 //! to collect what an agent wrote without hardcoding `~/.abox/worktrees/<task>`.
 
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::SandboxOrchestrator;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
 use clap::Args;
@@ -15,9 +15,9 @@ pub struct PathArgs {
     pub task: String,
 }
 
-pub fn execute<W: WorkspacePort, V: VmPort>(
+pub fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &PathArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     match orchestrator.worktree_info(&args.task)? {
         Some(info) => {

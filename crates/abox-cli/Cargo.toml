@@ -14,6 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 abox-core = { path = "../abox-core" }
+# Same exact pin as abox-core (ADR-008): used by `abox init`/`abox doctor`
+# to install and verify the MicroSandbox runtime assets in $MSB_HOME.
+microsandbox = { version = "=0.6.9", default-features = false, features = ["net", "prebuilt"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,4 +36,5 @@ crossterm = "0.28"
 workspace = true
 
 [dev-dependencies]
+abox-core = { path = "../abox-core", features = ["test-support"] }
 tempfile = "3"

@@ -1,8 +1,14 @@
 # abox, explained — every component, top to bottom
 
-This is the long-form companion to [`docs/tutorial.md`](tutorial.md). The tutorial shows you *how* to use abox in 10 minutes; this document explains *why* every piece exists. Target reader: a junior engineer who is comfortable with git and the command line but has never built a microVM, used virtiofs, or written a credential proxy. We will not pretend you are five years old, but we will not assume you've heard of any of this either.
+This is the long-form companion to [`docs/tutorial.md`](tutorial.md). The tutorial shows you *how* to use abox in 10 minutes; this document explains *why* every piece exists. Target reader: a junior engineer who is comfortable with git and the command line but has never booted a microVM or written a credential proxy. We will not pretend you are five years old, but we will not assume you've heard of any of this either.
 
 If a section feels too basic, skip it. If a section feels too dense, file an issue and we'll improve it.
+
+abox's isolation runtime is **MicroSandbox** (libkrun: KVM on Linux,
+Hypervisor.framework on macOS Apple Silicon) — see [`runtime.md`](runtime.md)
+for the runtime's host requirements and troubleshooting, and
+[ADR-008](decisions/008-microsandbox-runtime-and-product-boundary.md) for the
+runtime/product boundary.
 
 ---
 
@@ -26,9 +32,9 @@ The whole thing fits in one diagram:
 │        │ supervises                                        │
 │        ▼                                                   │
 │   ┌─────────────────────────────────────────┐              │
-│   │  Cloud Hypervisor microVM               │              │
+│   │  MicroSandbox microVM (libkrun)         │              │
 │   │   ┌──────────────────────────────┐      │              │
-│   │   │ Alpine guest (busybox+socat) │      │              │
+│   │   │ OCI guest image (abox user)  │      │              │
 │   │   │   ┌──────────┐               │      │              │
 │   │   │   │  agent   │  (claude,     │      │              │
 │   │   │   │  process │   etc.)       │      │              │
@@ -38,13 +44,13 @@ The whole thing fits in one diagram:
 │   │   │      ▼                       │      │              │
 │   │   │   /run/abox-proxy.sock       │      │              │
 │   │   └──────┬───────────────────────┘      │              │
-│   │          │ socat → vsock CID 2:5000     │              │
+│   │          │ abox-bridge → vsock 5000     │              │
 │   └──────────┼──────────────────────────────┘              │
 │              │                                             │
-│              ▼ unix socket                                 │
+│              ▼ per-sandbox unix socket                     │
 │   ┌──────────────────┐    ┌────────────────────────┐       │
-│   │ proxy bridge     │───▶│ policy engine          │       │
-│   │ (per-VM, on host)│    │ allow / deny / inject  │       │
+│   │ command broker   │───▶│ policy engine          │       │
+│   │ (per-sandbox)    │    │ allow / deny / inject  │       │
 │   └────────┬─────────┘    └────────────────────────┘       │
 │            │ exec on host                                  │
 │            ▼                                               │
@@ -52,21 +58,18 @@ The whole thing fits in one diagram:
 │   │ real `git push` running with real creds      │         │
 │   └──────────────────────────────────────────────┘         │
 │                                                            │
-│        ┌─────── three virtiofs shares ──────┐              │
-│        │  workspace (RW) — git worktree     │              │
-│        │  aboxmeta   (RO) — boot metadata   │              │
-│        │  aboxstatus (RW) — exit code       │              │
-│        └────────────────────────────────────┘              │
+│        the task's git worktree bind-mounts read-write      │
+│        at /workspace inside the guest                      │
 └────────────────────────────────────────────────────────────┘
 ```
 
 The agent runs **inside** a microVM. The two narrow channels between the agent and the outside world are:
 
-1. **The shim/bridge path** for command-line tools (`git`, `gh`, and other intercepted CLIs). The shim is a static-musl binary masquerading as `git` etc. inside the guest. It serializes the command, sends it over a Unix socket → `socat` → `vsock` → host bridge, the bridge consults the policy engine, runs the command on the host with real credentials, and sends back the output.
+1. **The shim/broker path** for command-line tools (`git`, `gh`, and other intercepted CLIs). The shim is a static-musl binary masquerading as `git` etc. inside the guest. It serializes the command and sends it over a guest Unix socket; the persistent `abox-bridge` process forwards it over vsock to the host's per-sandbox command broker, which consults the policy engine, runs the command on the host with real credentials, and sends back the output.
 
-2. **The egress proxy path** for HTTPS API calls (Anthropic, OpenAI, GitHub, etc.). Today this is a passthrough; future work will turn it into a TLS-terminating MITM that injects API-key headers from host environment variables. See [`docs/plans/2026-04-08-credential-injection.md`](plans/2026-04-08-credential-injection.md).
+2. **The egress proxy path** for HTTPS API calls (Anthropic, OpenAI, GitHub, etc.). A TLS-terminating MITM proxy that injects host-held credentials into allowed requests — see section 8.
 
-Everything else — the boot kernel, the rootfs, the virtiofs shares, the bootstrap script — exists to make those two channels work cleanly without the user needing to think about it.
+Everything else — the runtime, the guest images, the file staging — exists to make those two channels work cleanly without the user needing to think about it.
 
 ---
 
@@ -93,31 +96,27 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 ## 3. microVMs and why not containers
 
-**What a microVM is:** A real virtual machine — own kernel, own memory, own scheduler — that boots in 100-200 milliseconds and uses ~30 MB of host RAM at idle. The "micro" is about boot time and footprint, not about being a fake VM. Cloud Hypervisor and Firecracker are the two well-known options.
+**What a microVM is:** A real virtual machine — own kernel, own memory, own scheduler — that boots in well under a second and has a small idle footprint. The "micro" is about boot time and footprint, not about being a fake VM. libkrun (which MicroSandbox builds on) and Firecracker are well-known implementations.
 
 **Why a VM at all:** Because containers share the host kernel. If the agent process inside a Docker container exploits a kernel bug, it can escape to the host. The Linux kernel is huge (~30 million lines of C) and historically has had a steady stream of privilege-escalation bugs. A VM puts a hardware boundary (the CPU's virtualization extensions) between the guest and the host kernel; an agent has to break out of the guest kernel **and** out of the VMM itself before it touches your host. That's a much larger attack surface to defeat.
 
-**Why Cloud Hypervisor specifically over Firecracker:** virtiofs. Firecracker doesn't support virtiofs as of 2026; it offers block devices and 9p instead. We need to mount a git worktree into the guest with full read-write semantics so the agent can edit files normally. virtiofs gives us that with near-native performance; 9p is slow, and block devices would require copying the whole worktree into a disk image. See [ADR-001](decisions/001-architecture.md) for the full rationale.
+**Why MicroSandbox specifically:** abox delegates the generic isolation substrate — VMM, guest kernel, OCI image handling, mounts, resource limits — to a purpose-built runtime instead of maintaining its own hypervisor integration. MicroSandbox (built on libkrun) gives abox everything the sandbox boundary needs: hardware virtualization on both Linux (KVM) and macOS Apple Silicon (Hypervisor.framework), a read-write bind mount of the git worktree, per-sandbox vsock routes for the brokered channels, and OCI images as the guest-environment format. It is pinned to an exact version and upgraded only through qualified PRs because it sits inside the trusted computing base ([`runtime-upgrades.md`](runtime-upgrades.md)). See [ADR-001](decisions/001-architecture.md) for the original architecture rationale and [ADR-008](decisions/008-microsandbox-runtime-and-product-boundary.md) for the runtime decision.
 
 **What would break without microVMs:** We'd be back to either trusting the agent enough to give it host access (no), or building container-level isolation that has known weaker boundaries. The threat model is "this agent might run untrusted code or be compromised by prompt injection" — we want a real boundary.
 
 ---
 
-## 4. virtiofs: how the worktree gets into the guest
+## 4. The workspace mount: how the worktree gets into the guest
 
-**What it is:** virtiofs is a filesystem-sharing protocol designed specifically for VMs. The host runs a `virtiofsd` daemon that exposes a directory; the guest mounts it as `mount -t virtiofs <tag> <mountpoint>`. Operations go over a `vhost-user` shared-memory ring (zero-copy on both sides), so reads and writes have near-native performance.
+**How it works:** The task's git worktree bind-mounts **read-write at `/workspace`** inside the guest. The runtime provides the shared-filesystem mechanics; abox declares the mount in the runtime spec and never copies the worktree.
 
-**How abox uses it:** Each sandbox gets **three** virtiofs shares:
+**The ownership overlay:** Host worktree files are owned by your host user, but the agent runs as the guest `abox` user (uid 1000). Guest ownership is granted through the mount's metadata overlay — a root `chown` inside the guest before the agent starts makes `/workspace` appear owned by uid 1000, while the host inodes keep their real owner. Files the agent creates land on the host owned by the host user, so `abox merge` afterward is just `git merge` with no file copying.
 
-1. `workspace` (read-write) — the git worktree at `/workspace` in the guest. This is what the agent edits.
-2. `aboxmeta` (read-write in the FS sense, but mostly read-only in practice) — a small per-sandbox host directory containing `boot.json` (sandbox id, env vars) and `runner.sh` (the literal `exec` line for the agent command). Mounted at `/abox-meta`. Avoids cmdline-length and quoting hell.
-3. `aboxstatus` (read-write, single-purpose) — host directory the guest writes its **exit code** into before poweroff. Mounted at `/abox-status`. See [ADR-002](decisions/002-aboxstatus-share.md) for the design.
+**Staged inputs:** Prompt files, the repo's prepare script, credential stubs, and `--input-file` payloads are staged as **pre-boot rootfs patches** under `/abox-meta` with read-only modes — they are part of the guest filesystem before the agent ever runs, so the guest cannot swap them out. `mount_excludes` from the repo config become tmpfs volumes shadowing workspace subdirectories (e.g. to keep a giant `node_modules` out of the shared mount).
 
-**Why not 9p?** 9p is slow (no shared memory, every op is a network round-trip). virtiofs is roughly 10x faster on small file operations and is what Cloud Hypervisor recommends.
+**Why not copy the worktree in?** Copying into a disk image at boot and back out on shutdown is slow for big repos and makes the merge story messy (which copy wins?). The bind mount lets the agent's writes land directly in the host worktree while everything else in the guest stays ephemeral.
 
-**Why not a block device?** A block device would require copying the worktree into a disk image at boot and copying it back on shutdown. virtiofs lets the agent's writes land directly in the host worktree, so `abox merge` afterward is just `git merge` with no file copying.
-
-**What would break without it:** Either we'd be copying the worktree on every boot/exit (slow for big repos), or we'd be exposing a network filesystem with much weaker performance.
+**What would break without it:** Either we'd be copying the worktree on every boot/exit, or the agent's work would be trapped inside the guest when the sandbox stops.
 
 ---
 
@@ -125,7 +124,7 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 **What vsock is:** A socket address family (AF_VSOCK) for VM-to-host communication. Each VM has a "context ID" (CID); the host is always CID 2. A guest process can `connect(AF_VSOCK, addr={cid:2, port:5000})` and talk to the host directly — no IP networking, no NIC, no routing.
 
-**How abox uses it:** Cloud Hypervisor exposes a per-VM vsock device with `--vsock cid=3,socket=<host-side-path>`. Cloud Hypervisor creates a unix socket on the host at `<path>_5000` for guest connections to vsock port 5000. Inside the guest, `socat` bridges `/run/abox-proxy.sock` ↔ `vsock:2:5000`. The shim connects to the unix socket; socat forwards over vsock; the host's per-VM bridge accepts the connection on the host-side socket.
+**How abox uses it:** The runtime maps each well-known guest vsock port to a **per-sandbox host Unix socket** under `runtime_dir` (named `msb-<id>.sock_<port>`, e.g. `msb-fix-auth.sock_5000` for the command broker). Inside the guest, the persistent `abox-bridge` process listens on `/run/abox-proxy.sock` and forwards over one long-lived vsock uplink to port 5000; the host's per-sandbox command broker accepts the connection on the host-side socket. The same pattern carries HTTPS egress (guest loopback `127.0.0.1:18443` → vsock 5001) and declared service bridges (guest ports 51xx).
 
 **Why this is safer than a TCP socket:** No IP stack, no NICs, no routing tables. The guest cannot accidentally talk to anything except CID 2. There is no network the guest can scan, no SSRF vector, no way for the guest to send a misdirected packet to the user's office network. The attack surface is exactly one syscall.
 
@@ -138,7 +137,7 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 > egress proxy + a `scoped` egress rule whenever the service is reachable over
 > the network; the bridge exists for loopback-only host services.
 
-**Why this is the *attribution* boundary:** Every connection that arrives on the per-VM host-side path *provably* came from one specific VM, because Cloud Hypervisor binds the socket and only that VM has access to it. The bridge tags every request with `sandbox_id=Fixed(<task>)` and the audit log records that as ground truth — the guest cannot spoof its own id.
+**Why this is the *attribution* boundary:** Every connection that arrives on the per-sandbox host-side socket *provably* came from one specific sandbox, because the runtime binds the socket and only that sandbox's vsock route reaches it. The broker tags every request with `sandbox_id=Fixed(<task>)` and the audit log records that as ground truth — the guest cannot spoof its own id.
 
 **What would break without it:** We'd need either an IP network to the guest (with all the firewall + routing complexity that entails) or a serial-console-based protocol (which is slow and conflicts with stdout). vsock is the modern, narrow channel.
 
@@ -146,23 +145,25 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 ## 6. The shim: `abox-shim`
 
-**What it is:** A small (~1 MB), static, musl-compiled Rust binary, no async runtime, no third-party deps beyond `serde` and `abox-protocol`. Lives at `/usr/local/bin/abox-shim` inside the guest.
+**What it is:** A small (~1 MB), static, musl-compiled Rust binary, no async runtime, no heavy dependencies. Lives at `/usr/local/bin/abox-shim` inside the guest. The official guest images bake it in, and the adapter patches the host-staged copy (from `~/.abox/guest/<arch>/`) into every guest at start so the shim protocol stays in lockstep with the host binary.
 
-**Why it's a symlink:** During rootfs build, `build_rootfs.sh` creates shim symlinks such as `/usr/local/bin/git → abox-shim` and `/usr/local/bin/gh → abox-shim`. When the agent runs `git push`, the kernel resolves `git` to `abox-shim`, exec's it, and `abox-shim` reads `argv[0]` to figure out which command was invoked.
+**Why it's a symlink:** The guest images ship `/usr/local/bin/git → abox-shim`, `gh → abox-shim`, and `aws → abox-shim` — real `git` is never installed in the guest. When the agent runs `git push`, the kernel resolves `git` to `abox-shim`, exec's it, and `abox-shim` reads `argv[0]` to figure out which command was invoked.
+
+**How it knows where to send requests:** The transport declaration at `/etc/abox/transport` is host-staged into the guest rootfs before boot and immutable to the guest. The default is the guest Unix socket `/run/abox-proxy.sock`, served by the persistent `abox-bridge` process, which multiplexes every exchange over one long-lived vsock uplink to the host command broker. A guest that edits its own transport gains nothing — an unrouted vsock port reaches nothing.
 
 **What happens when the agent types `git push origin main`:**
 
 1. The kernel exec's `/usr/local/bin/git`, which is a symlink to `abox-shim`.
 2. `abox-shim` reads `argv[0]` (`git`) and `argv[1..]` (`push origin main`).
 3. Resolves the current working directory:
-   - Prefer `ABOX_CWD` (set by `runner.sh` from the host's known truth).
-   - Fall back to the target of `/proc/self/cwd` (more reliable than `getcwd(2)` inside virtiofs on some kernels).
+   - Prefer `ABOX_CWD` (host-known truth, set in the agent's environment).
+   - Fall back to the target of `/proc/self/cwd` (more reliable than `getcwd(2)` inside shared mounts on some kernels).
    - Fall back to `getcwd(2)`.
    - Fall back to `/workspace`.
-4. Reads `ABOX_SANDBOX_ID` from the env (set by guest init from `boot.json`).
+4. Reads `ABOX_SANDBOX_ID` from the env (informational only — the host attributes by socket route, not by this value).
 5. Builds a `ProxyRequest { command: "git", args: ["push","origin","main"], cwd, sandbox_id }` and serializes it as a JSON line.
-6. Connects to `/run/abox-proxy.sock` (the unix socket bridged to vsock).
-7. Sends the line, half-closes the write end, reads back a `ProxyResponse { exit_code, stdout, stderr }` JSON line.
+6. Connects to the declared transport (`/run/abox-proxy.sock` by default).
+7. Sends the line, reads back a `ProxyResponse { exit_code, stdout, stderr }` JSON line. Retry semantics are phase-aware: only connect/send failures retry — a lost response never re-executes a privileged command.
 8. Prints stdout/stderr, exits with `exit_code`.
 
 **Why it has no async runtime:** Smaller binary (one less crate boundary), faster startup, fewer surprises in the guest where the runtime is minimal. Synchronous code is fine because the shim only ever handles one request per process invocation.
@@ -171,7 +172,7 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 ---
 
-## 7. The policy daemon and the per-VM bridge
+## 7. The policy engine and the per-sandbox command broker
 
 **What the policy engine is:** A TOML-driven allow/deny matcher for CLI commands and HTTPS destinations. Lives in `crates/abox-core/src/policy.rs`. For a command like `git push origin main`:
 
@@ -181,20 +182,20 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 4. Check allow patterns. At least one must match (e.g., `^push\s+origin\s+\S+$`).
 5. Return `Decision::Allow` or `Decision::Deny(reason)`.
 
-**What the per-VM bridge is:** An embedded copy of the abox-proxyd CLI proxy server that runs *inside* the orchestrator process, not as a separate daemon. One bridge per VM. It binds the host-side path Cloud Hypervisor exposes for vsock port 5000 (`<runtime>/vsock-<id>.sock_5000`), accepts connections from the guest's socat bridge, parses incoming `ProxyRequest` lines, evaluates them against the policy engine, executes allowed commands on the host with real credentials, and writes the `ProxyResponse` back.
+**What the command broker is:** `CommandBroker` (`crates/abox-core/src/command_broker.rs`) — the CLI proxy server, run *inside* the orchestrator process, one per sandbox. It binds the per-sandbox host socket the runtime routes for vsock port 5000 (`<runtime>/msb-<id>.sock_5000`), accepts the guest's `abox-bridge` uplink, parses incoming `ProxyRequest` lines, evaluates them against the policy engine, executes allowed commands on the host with real credentials, and writes the `ProxyResponse` back.
 
 **The walkthrough for `git push origin main`:** Picking up where the shim section left off:
 
-1. `git push origin main` is serialized into `{command:"git",args:["push","origin","main"],cwd:"/workspace",sandbox_id:"my-task"}` and sent over vsock to the bridge.
-2. The bridge looks at `cwd_map`: if the request CWD starts with `/workspace`, rewrite it to the host worktree path (so `git` runs on the right files, not on a non-existent guest path).
-3. Determine the sandbox_id from `SandboxAttribution::Fixed("my-task")` — the bridge **ignores** the request's own `sandbox_id` field because the per-VM socket already proves provenance.
+1. `git push origin main` is serialized into `{command:"git",args:["push","origin","main"],cwd:"/workspace",sandbox_id:"my-task"}` and sent over vsock to the broker.
+2. The broker looks at `cwd_map`: if the request CWD starts with `/workspace`, rewrite it to the host worktree path (so `git` runs on the right files, not on a non-existent guest path).
+3. Determine the sandbox_id from `SandboxAttribution::Fixed("my-task")` — the broker **ignores** the request's own `sandbox_id` field because the per-sandbox socket already proves provenance.
 4. Call `policy.evaluate_cli("git", ["push","origin","main"])`. Returns `Allow`.
 5. Build a `tokio::process::Command::new("git")` with the rewritten CWD, the host's PATH, and either pass through or remove `SSH_AUTH_SOCK` based on `policy.forward_ssh_agent("git")`.
 6. Run the command, capture stdout + stderr + exit code.
 7. Write to the audit log: `{"sandbox_id":"my-task","command":"git","args":["push","origin","main"],"decision":"allowed","exit_code":0,"timestamp":...}`.
 8. Send `ProxyResponse { exit_code, stdout, stderr }` back to the shim.
 
-**Why the bridge runs in the orchestrator and not in `abox-proxyd`:** Two reasons. First, the orchestrator owns the VM lifecycle, so it can bind the per-VM socket *before* CH boots — eliminating any race window. Second, attribution: the per-VM socket guarantees provenance, so the orchestrator's bridge uses `SandboxAttribution::Fixed` and the audit log is unambiguous. The standalone `abox-proxyd` still works for users who want a system daemon, but it uses `SandboxAttribution::FromRequest` and falls back to `"unknown"` for legacy clients.
+**Why the broker runs in the orchestrator and not in `abox-proxyd`:** Two reasons. First, the orchestrator owns the sandbox lifecycle, so it can bind the per-sandbox socket *before* the agent launches — eliminating any race window (agent launch is deliberately deferred until the broker and egress listeners are bound). Second, attribution: the per-sandbox socket guarantees provenance, so the orchestrator's broker uses `SandboxAttribution::Fixed` and the audit log is unambiguous. The standalone `abox-proxyd` still works for users who want a system daemon, but it uses `SandboxAttribution::FromRequest`.
 
 **What would break without the policy engine:** The agent would have direct host shell access. Any prompt-injection attack could end with `rm -rf ~`. The policy engine is the chokepoint that says "the agent can run `git push origin <branch>` but not `git push --force` and not `gh repo delete`".
 
@@ -202,7 +203,7 @@ Worktrees are the right shape: zero-copy isolation at the directory level, full 
 
 ## 8. The HTTPS egress proxy (TLS-terminating MITM)
 
-**What it does:** The egress proxy (`abox-proxyd::egress_proxy`) intercepts outbound HTTPS traffic from the guest and injects API credentials into requests, so secrets never enter the VM. See [ADR-003](decisions/003-https-credential-injection.md) for the full design rationale.
+**What it does:** The egress proxy (the request broker — `abox_core::request_broker`, served per-sandbox by the orchestrator and standalone by `abox-proxyd`) intercepts outbound HTTPS traffic from the guest and injects API credentials into requests, so secrets never enter the VM. See [ADR-003](decisions/003-https-credential-injection.md) for the full design rationale.
 
 **How repo-local network intent fits in now:** `abox` can also resolve a
 repo-local `.abox/project.toml` into one of three user-facing network modes:
@@ -231,10 +232,10 @@ the same policy / transport machinery described below:
 
 **How it works:**
 
-1. The guest sets `HTTPS_PROXY=http://127.0.0.1:18443` (injected automatically by the orchestrator). `127.0.0.1:18443` is a `socat` bridge inside the guest that forwards to the host over vsock port 5001. When the agent's HTTPS client sends a CONNECT request, it arrives at the host-side proxy.
+1. The guest sets `HTTPS_PROXY=http://127.0.0.1:18443` (injected automatically by the orchestrator). `127.0.0.1:18443` is an `abox-bridge` listener inside the guest that forwards to the host over vsock port 5001. When the agent's HTTPS client sends a CONNECT request, it arrives at the host-side proxy.
 2. The proxy evaluates the target domain against egress policy rules. If denied, it returns 403.
 3. If the domain is in the `bypass_tls` list (for cert-pinned clients), the proxy does a plain TCP passthrough — no TLS termination.
-4. Otherwise, the proxy generates a per-host leaf certificate signed by the abox root CA (`~/.abox/ca/root.crt`), sends `200 Connection Established`, and accepts the client's TLS using that leaf cert. The guest trusts it because the root CA was baked into the rootfs at build time.
+4. Otherwise, the proxy generates a per-host leaf certificate signed by the abox root CA (`~/.abox/ca/root.crt`), sends `200 Connection Established`, and accepts the client's TLS using that leaf cert. The guest trusts it because the root CA is staged into the guest trust store at launch.
 5. The proxy reads the plaintext HTTP request, injects the credential header (e.g., `x-api-key: <value>` for Anthropic, `Authorization: Bearer <value>` for OpenAI), then opens a new TLS connection to the real upstream using system root certificates.
 6. The modified request is forwarded upstream and the response is relayed back to the client.
 
@@ -277,7 +278,7 @@ enabled = true
 enabled = true
 ```
 
-abox writes the provider's stub into the guest filesystem at boot with
+abox stages the provider's stub into the guest filesystem before boot with
 placeholder values. The real token is injected by the proxy at the network
 layer; the stub value never reaches the upstream API.
 
@@ -288,7 +289,7 @@ Codex, keep their real auth files on the host, and let abox stage the stubs
 automatically. GitHub stays host-side through managed `git` / `gh` execution.
 The proxy injects the real credentials; the agent never sees them.
 
-**CA management:** The root CA is generated on first use and lives at `~/.abox/ca/`. Use `abox ca show` to inspect it, `abox ca rotate` to regenerate (triggers a rootfs rebuild), and `abox ca path` to find it.
+**CA management:** The root CA is generated on first use and lives at `~/.abox/ca/`. Use `abox ca show` to inspect it, `abox ca rotate` to regenerate (takes effect on the next sandbox start, since the CA is staged at launch), and `abox ca path` to find it.
 
 ---
 
@@ -296,70 +297,53 @@ The proxy injects the real credentials; the agent never sees them.
 
 **What it is:** The state machine that owns the lifecycle of a sandbox. Lives in `crates/abox-core/src/sandbox.rs`. The two main methods are:
 
-- **`create_sandbox(params)`** — creates a git worktree on `agent/<task>`, builds a `VmConfig`, calls `vm_manager.start(config)`. If VM start fails, rolls back the worktree.
-- **`run_sandbox(params, policy)`** — calls `create_sandbox`, then spawns a per-VM proxy bridge bound to vsock-5000, spawns a console streamer that tails the CH console log to stdout, polls `vm_manager.info()` until the VM exits (or `--timeout` fires), drains the console pump, reads the guest exit code from `aboxstatus/exit-code`, and returns it. If `--timeout` was specified and the VM exceeds it, the orchestrator attempts graceful shutdown, waits a 10-second grace period, force-kills if needed, and returns exit code 124. If `--ephemeral` was set, the worktree and branch are cleaned up regardless of exit code. If the guest never wrote an exit code (catastrophic VM failure before init.sh ran), it logs a warning to both tracing and stderr, rolls the worktree back, and returns 1.
+- **`create_sandbox(params)`** — creates a git worktree on `agent/<task>`, resolves task intent into a runtime-neutral `SandboxRuntimeSpec` (workspace mount, guest profile image, resources, staged inputs, control channels, network plan), and starts the sandbox through the runtime adapter. If start fails, rolls back the worktree.
+- **`run_sandbox(params, policy, root_ca)`** — calls `create_sandbox`, binds the per-sandbox `CommandBroker` and egress proxy to the runtime's control sockets (agent output streams through the runtime to this process), waits for the agent to exit, and tears everything down, returning the agent's exit code directly. If `--timeout` was specified and the sandbox exceeds it, the orchestrator attempts graceful shutdown, waits a grace period, force-kills if needed, and returns exit code 124. If `--ephemeral` was set, the worktree and branch are cleaned up regardless of exit code.
 
 **State machine diagram (rough):**
 
 ```
-                     create_sandbox          run_sandbox loop
+                     create_sandbox          run_sandbox
    pending  ──────▶  worktree+vm  ──────▶   running  ──────▶  exited
-                          │                                       │
-                          │ (start fails)                         │
-                          ▼                                       │
-                       rolled-back ◀──── (no exit code) ──────────┘
+                          │
+                          │ (start fails)
+                          ▼
+                       rolled-back
 ```
 
-**Why it polls instead of waiting:** The `VmPort` trait doesn't expose a "wait for exit" primitive. Adding one would couple every adapter to a particular waiting mechanism. Polling `info()` every 250 ms is a small overhead and works for every adapter (real CH or in-memory mock). The poll interval is now centralized in `VmRuntimeTuning` so tests can tighten it.
+**What would break without the orchestrator:** Each CLI command would have to assemble the runtime spec, the broker, the egress proxy, the service bridges, and the cleanup itself. The orchestrator is the single place that knows the full lifecycle.
 
-**What would break without the orchestrator:** Each CLI command would have to assemble `virtiofsd + cloud-hypervisor + the bridge + the console streamer + the cleanup` itself. The orchestrator is the single place that knows the full lifecycle.
-
-**What it owns now beyond raw VM startup:** the orchestrator also resolves
+**What it owns beyond raw sandbox startup:** the orchestrator also resolves
 repo-owned behavior before launch:
 
 - loads `.abox/project.toml` if present
 - applies trust-on-first-use for repo-widened behavior
-- stages immutable prompt / prepare inputs into boot metadata
+- stages immutable prompt / prepare inputs as pre-boot rootfs patches
 - mounts durable cache roots when configured
 - selects the official guest profile image (`base`, `node`, `python`,
-  `rust`) for the repo
+  `python-glibc`, `rust`) for the repo
 - refreshes guest-native warm state before launch when the repo is configured
   with caches plus a prepare flow
 
 ---
 
-## 10. The bootstrap script: `bootstrap_vm.sh`
+## 10. Guest environments: OCI images and `abox init`
 
-**What it is:** A bash script that downloads pinned + checksummed copies of `cloud-hypervisor`, `ch-remote`, `virtiofsd`, the Linux kernel (`vmlinux`), and the Alpine miniroot, then builds the static-musl shim and assembles ext4 guest images. The default `base` image contains busybox + socat + bash + Node.js + the shim + Claude Code + Codex CLIs + a guest init script. Official profile images (`node`, `python`, `rust`) are built alongside it under `~/.abox/vm/profiles/`. The guest rootfs also includes an unprivileged `abox` user (uid=1000) and `su-exec` for privilege dropping — the agent command runs as this user, not root (see ADR-004). Rootfs assembly now runs inside a cached Dockerized Alpine builder so file ownership and modes in the image match a real root-owned guest filesystem. CLI versions are pinned in `build_rootfs.sh` for reproducible builds. Supports both x86_64 and aarch64 hosts (auto-detected via `uname -m`). Also supports `--from-bundle <path>` to restore from a pre-built tarball (published alongside GitHub Releases) instead of downloading individual components.
+There is no VM bootstrap step. `abox init` installs the MicroSandbox runtime
+assets (the `msb` binary + libkrunfw guest firmware) under `$MSB_HOME` via
+the SDK, and guest environments are **OCI images** pulled on first use.
 
-**Why it's bash and not Rust:** Bootstrapping is a one-time operation per machine. Bash is universal, easy to read, and avoids the chicken-and-egg problem of "you need cargo to build the bootstrap, but the bootstrap installs cargo's musl target". The `vendor/` cache and SHA256 checksums make it idempotent and recoverable from network blips. The 200 lines are ~50% comments and pinned-version constants — the actual logic is small.
-
-**What gets checksummed:**
-
-| Artifact | SHA256 pinned in script |
-|---|---|
-| cloud-hypervisor v44.0 | yes |
-| ch-remote v44.0 | yes |
-| virtiofsd v1.10.0 (extracted from Ubuntu .deb) | yes (twice — deb and binary) |
-| vmlinux (CH-built kernel) | yes |
-| alpine-minirootfs-3.19.9.tar.gz | yes |
-If any of these get re-published or corrupted in transit, the bootstrap fails fast with a clear "expected vs actual" message and asks you to delete the cached file under `vendor/`.
-
-**Why it uses Docker for source builds:** The guest rootfs must preserve root-owned files and canonical Alpine permissions (`/bin`, `/etc`, `/usr`, `/tmp`, etc.). A purely rootless `fakeroot` path was not authoritative because statically linked tools like `apk.static` bypassed `fakeroot`'s ownership shims. The current build runs the staging work inside a real-root Alpine container, mounts the source repo read-only, writes only `rootfs.raw` and its inputs stamp back to `~/.abox/vm/`, and then `chown`s those outputs back to the host user.
-- Downloads still land in `~/.abox/vm/`.
-- The deb extraction uses `dpkg-deb -x` (no install).
-- The shim builds with cargo.
-- The rootfs is still assembled in a `mktemp -d` staging dir and packed into an ext4 image with `mkfs.ext4 -d` (which writes a populated filesystem from a directory tree, no loop mount needed).
-- Symlinks still land in `~/.local/bin`.
-
-**Why it doesn't need host sudo:** Every host-side step stays in user space:
-- Downloads land in `~/.abox/vm/`.
-- The deb extraction uses `dpkg-deb -x` (no install).
-- The shim builds with cargo.
-- The privileged rootfs staging happens inside Docker, not on the host.
-- Symlinks land in `~/.local/bin`.
-
-**What would break without it:** Users would have to install Cloud Hypervisor manually (it's not packaged in most distros), find a kernel that boots without an initramfs, build virtiofsd from source, and assemble a rootfs by hand. That's a 2-hour task at best and a "give up" task at worst.
+Each profile (`base`, `node`, `python`, `python-glibc`, `rust`) is a Docker
+build context under [`images/`](../images/), published as
+`ghcr.io/x-mckay/abox-guest-*` for both amd64 and arm64. Every image ships
+the common guest contract: the agent CLIs (Claude Code, Codex) pinned to the
+same versions across profiles, an unprivileged `abox` user (uid 1000) the
+agent runs as, a `/workspace` mount point, the guest-side abox binaries, and
+`git`/`gh`/`aws` as shim symlinks — real `git` is never installed in the
+guest. Profiles resolve to digest-pinned references through the manifest
+embedded in the abox binary (`images/manifest.toml`); repos select a
+*profile*, never an image URL. See [`images/README.md`](../images/README.md)
+for the image contract and [`runtime.md`](runtime.md) for host requirements.
 
 ---
 
@@ -367,7 +351,7 @@ If any of these get re-published or corrupted in transit, the bootstrap fails fa
 
 All standard profiles (`base`, `node`, `python`, `rust`) are built on **Alpine Linux**, which uses **musl libc**. Alpine is small and fast, but musl has one practical consequence for Python workflows: `pip` and `uv` detect the guest as a `musllinux` platform and will only install `musllinux` wheels. Most scientific Python packages (numpy, pandas, scipy, and the wider PyData stack) only publish `manylinux` wheels — wheels built against glibc — and do not publish `musllinux` variants. This means `pip install numpy` inside the `python` profile either pulls a source distribution (slow, requires a C compiler in the guest) or fails entirely. Installing `gcompat` on musl does **not** fix this: `gcompat` provides a glibc-compatible runtime shim, but `pip`'s platform tag is determined at package-resolution time from the OS ABI, not from what runtime libraries are installed. The platform tag stays `musllinux` and `manylinux`-only packages remain unavailable.
 
-The **`python-glibc`** profile solves this by replacing the Alpine base with **Debian bookworm-slim** (pinned by digest in `scripts/glibc/python-glibc.Dockerfile`). On a glibc host the platform tag becomes `manylinux`, so prebuilt wheels resolve normally. The Dockerfile is built on the host via `bootstrap_vm.sh`'s `produce_glibc_base` function (a `docker build` + `docker export` that produces a tarball consumed by the same `build_rootfs.sh` pipeline used for all other profiles). The resulting rootfs is installed under `~/.abox/vm/profiles/python-glibc/rootfs.raw` alongside the musl profile images. Because Debian provides `gosu` (a drop-in for `su-exec`), the guest boot path in `runner.sh` / `init.sh` is identical to musl profiles — no special casing for the libc flavor at runtime.
+The **`python-glibc`** profile solves this by replacing the Alpine base with **Debian bookworm-slim** (pinned by digest in `images/python-glibc/Dockerfile`). In a glibc guest the platform tag becomes `manylinux`, so prebuilt wheels resolve normally. The profile follows the same guest contract as every other image — same pinned agent CLIs, same `abox` user, same shim symlinks — so there is no special casing for the libc flavor at runtime.
 
 Select the `python-glibc` profile via your repo config:
 
@@ -377,27 +361,26 @@ Select the `python-glibc` profile via your repo config:
 profile = "python-glibc"
 ```
 
-Or install it up-front with `./scripts/bootstrap_vm.sh --yes --profile python-glibc`. It is an opt-in profile because the Debian base image is larger than the Alpine one; repos that do not need `manylinux` wheels should stay on the default `python` profile.
+It is an opt-in profile because the Debian base image is larger than the Alpine one; repos that do not need `manylinux` wheels should stay on the default `python` profile.
 
 ---
 
-## 11. The end-to-end test: `scripts/local/e2e_test.sh`
+## 11. The end-to-end test: `scripts/local/msb_e2e_test.sh`
 
-**What it is:** A seven-phase bash script (`./scripts/local/e2e_test.sh` or `just e2e`) that exercises every major component without needing a CI runner with KVM enabled.
+**What it is:** The live runtime suite (`just e2e-runtime`). It boots **real MicroSandbox microVMs** and exercises the full substrate end to end — 49 assertions across six phases. It skips cleanly (exit 0) when hardware virtualization or the msb runtime assets under `$MSB_HOME` are missing, so it is safe to invoke anywhere; a skip is not an attestation.
 
-**The seven phases:**
+**The phases:**
 
-1. **build** — `cargo build --workspace`. Catches compile errors before anything else.
-2. **unit + integration tests** — `cargo test --workspace`. Catches test regressions.
-3. **scratch git repo + abox config** — Sets up a self-contained test environment under `.scratch/e2e-run-<pid>`.
-4. **abox CLI workspace ops** — Tests `abox list`, the rollback path when VM start fails, simulated worktrees, `divergence`, `merge`, `stop --clean`.
-5. **abox-proxyd CLI policy enforcement** — Starts the standalone proxy daemon, sends allowed and denied requests to it, verifies the audit log attribution and the legacy-shim fallback.
-6. **full VM end-to-end** *(gated)* — Boots a real microVM, runs `git status` inside it, verifies audit log attribution, tests `--detach` lifecycle, and asserts exit code propagation. Skipped if `~/.abox/vm/` artifacts aren't present (so phases 1-5 work in CI).
-7. **agent lifecycle** *(gated)* — Full agent commit/diverge/deny/merge cycle: boots a sandbox that creates a file and commits, verifies divergence reporting, tests policy denial of `git push --force`, merges the work into main, and cleans up. Also runs the HTTPS credential injection e2e (gated on `ANTHROPIC_API_KEY`).
+0. **build + scratch layout** — builds the workspace and the static musl guest binaries, and sets up a self-contained scratch state dir (deliberately short, because Unix socket paths are capped at 104 bytes).
+1. **substrate** — boot, exit-code propagation, workspace write-through, isolation between sandboxes, ephemeral cleanup, timeouts.
+2. **command broker** — proxied `git` through the shim, policy deny, audit attribution.
+3. **HTTPS egress proxy** — policy-enforced CONNECT: managed domains allowed, unmanaged denied, denials stable under repeated attempts. (The SSRF/network-plan invariants on the compiled policy are unit release gates in `just tier-ci`.)
+4. **hygiene** — control-socket cleanup, `abox list`, `stop --clean`.
+5. **filesystem adversarial** — escape attempts against the workspace boundary.
 
-**How to add an eighth phase:** Append a `section "phase 8 — ..."` block at the end of `scripts/local/e2e_test.sh`. Use `step` / `how` / `expect` / `pass` / `fail` for each assertion. The summary footer counts every `pass`/`fail` invocation, so new phases are picked up automatically.
+**How to add an assertion:** Append a `section "..."` block with `step` / `how` / `expect` / `pass` / `fail` calls. The summary footer counts every `pass`/`fail` invocation, so new phases are picked up automatically.
 
-**Why the e2e is in bash and not Rust:** Because phases 4-6 test the *binary* (`./target/debug/abox`) and its actual filesystem and process side effects, not its library API. Bash + the abox CLI is the most accurate simulation of how a user invokes it. The Rust unit tests in `cargo test --workspace` cover the library-level cases (mocks, bypass parsers, exit code helpers); the e2e covers the integration cases.
+**Why the e2e is in bash and not Rust:** Because it tests the *binary* (`abox`) and its actual filesystem and process side effects, not its library API. Bash + the abox CLI is the most accurate simulation of how a user invokes it. The Rust unit tests in `cargo test --workspace` cover the library-level cases (the shared `MockRuntime`, policy compilation, exit code helpers); the e2e covers the integration cases against real microVMs.
 
 ---
 
@@ -422,50 +405,35 @@ abox run --task fix-auth --prompt-file prompts/fix-auth.md -- codex
 If the repo widens behavior beyond the builtin defaults, `abox` checks the
 trust-on-first-use approval fingerprint before continuing.
 
-**Stage 3: Orchestrator setup.** `Cli::parse` already loaded the host config and built a `SandboxOrchestrator<Git2Workspace, CloudHypervisorAdapter>`. The host policy engine was loaded from `~/.abox/policies/default.toml`, then narrowed or widened by the resolved repo network mode.
+**Stage 3: Orchestrator setup.** `Cli::parse` already loaded the host config and built a `SandboxOrchestrator<Git2Workspace, MicrosandboxRuntime>`. The host policy engine was loaded from `~/.abox/policies/default.toml`, then narrowed or widened by the resolved repo network mode (compiled into a `RuntimeNetworkPlan` by `compile_runtime_network_plan`).
 
 **Stage 4: Warm-state refresh (optional).** If the repo config defines durable
 caches plus a prepare flow, `abox run` checks the recorded warm-state
-fingerprint. If it is missing or stale, `abox` launches an ephemeral warm VM
-first, runs the staged prepare script inside the real guest, persists cache
-state, and only then continues to the actual agent run.
+fingerprint. If it is missing or stale, `abox` launches an ephemeral warm
+sandbox first, runs the staged prepare script inside the real guest, persists
+cache state, and only then continues to the actual agent run.
 
-**Stage 5: Worktree creation.** `orchestrator.run_sandbox(params, policy)` calls `create_sandbox`, which calls `workspace.create_worktree("fix-auth", "main")`. `Git2Workspace` runs `git worktree add ~/.abox/state/worktrees/fix-auth -b agent/fix-auth main`.
+**Stage 5: Worktree creation.** `orchestrator.run_sandbox(params, policy, root_ca)` calls `create_sandbox`, which calls `workspace.create_worktree("fix-auth", "main")`. `Git2Workspace` runs `git worktree add ~/.abox/state/worktrees/fix-auth -b agent/fix-auth main`.
 
-**Stage 6: VM config.** A `VmConfig` is built with the worktree path, the selected kernel and rootfs profile, memory, vcpus, env vars, staged prompt metadata, and `agent_command = ["codex"]` adapted for prompt-file delivery if needed.
+**Stage 6: The runtime spec.** Task intent is resolved into a `SandboxRuntimeSpec`: the worktree as a read-write `/workspace` mount, the profile's pinned OCI image, memory/vcpus, env vars, staged inputs (prompt, prepare script, credential stubs, the CA certificate, the transport declaration), the control channels (broker, egress, service bridges), the compiled network plan, and `agent_command = ["codex"]` adapted for prompt-file delivery if needed.
 
-**Stage 7: VM start.** `vm_manager.start(vm_config)` invokes `CloudHypervisorAdapter::start`:
-1. Allocates short-suffixed socket paths under `<runtime>/`: `vfs-fix-auth.sock` (workspace), `vfs-meta-fix-auth.sock` (meta), `vfs-status-fix-auth.sock` (status), `ch-api-fix-auth.sock` (CH API), `vsock-fix-auth.sock` (vsock).
-2. Stages `<runtime>/meta-fix-auth/boot.json` + `runner.sh` containing the agent command and env.
-3. Pre-creates `<runtime>/status-fix-auth/exit-code` (empty).
-4. Spawns three `virtiofsd` processes — one per share — plus a cache share when durable caches are configured, and waits for each socket to appear.
-5. Spawns `cloud-hypervisor` with `--memory shared=on`, three `--fs` entries, `--vsock cid=3,...`, `--console file=...`, the kernel, and the rootfs.
-6. Waits for the CH API socket to appear, returns a `VmInfo`.
+**Stage 7: Sandbox start.** The MicroSandbox adapter translates the spec mechanically:
+1. Resolves the profile to its pinned image (pulled into the runtime's cache on first use).
+2. Applies the pre-boot rootfs patches (staged files under `/abox-meta`, `/etc/abox/transport`, host-staged `abox-shim`/`abox-bridge` binaries).
+3. Declares the vsock routes: guest port 5000 → `<runtime>/msb-fix-auth.sock_5000`, guest port 5001 → `<runtime>/msb-fix-auth.sock_5001`, plus one per declared service bridge.
+4. Starts the microVM. The agent is **not** launched yet — launch is deferred so the orchestrator can bind the host-side listeners first.
 
-**Stage 8: Bridge + console streamer.** Back in `run_sandbox`, the orchestrator:
-1. Spawns a `ProxyBridge` on `<runtime>/vsock-fix-auth.sock_5000` with `SandboxAttribution::Fixed("fix-auth")` and a CWD map `/workspace → <real worktree>`.
-2. Spawns a console tailer on `<runtime>/console-fix-auth.log` with a shutdown `Notify`.
+**Stage 8: Brokers come up.** Back in `run_sandbox`, the orchestrator:
+1. Binds the `CommandBroker` on `<runtime>/msb-fix-auth.sock_5000` with `SandboxAttribution::Fixed("fix-auth")` and a CWD map `/workspace → <real worktree>`, wired to the same audit JSONL file `abox-proxyd` uses.
+2. Binds the per-sandbox egress proxy on `<runtime>/msb-fix-auth.sock_5001`.
 
-**Stage 9: Guest boot.** The Linux kernel boots in ~150 ms, mounts `/workspace`, `/abox-meta`, and `/abox-status` from virtiofs, runs `/sbin/init` (which is the embedded `guest/init.sh`):
-1. Mount `/proc`, `/sys`, `/dev`.
-2. Print "abox guest init: online".
-3. `socat UNIX-LISTEN:/run/abox-proxy.sock,fork VSOCK-CONNECT:2:5000 &` — starts the unix↔vsock bridge.
-4. `if sh /abox-meta/runner.sh; then RC=0; else RC=$?; fi`
-5. Inside `runner.sh` (runs as root initially):
-   - Pre-flight: `getent passwd abox` — exits 69 if the rootfs is missing the unprivileged user.
-   - Stages credential stubs from `/abox-meta/credentials/` into `/home/abox/.claude/` (or `.codex/`), chowns them to `abox:abox`.
-   - Fixes `/home/abox` ownership via `chown -R abox:abox /home/abox`.
-   - Drops privileges: `exec su-exec abox:abox env HOME=/home/abox USER=abox codex …`
-6. The agent runs as `uid=1000(abox)`, not root. The workspace virtiofs share is launched with `--uid-map=:1000:<host_uid>:1:` so host-owned worktree files appear as uid 1000 in the guest and agent-created files land on the host owned by the host user. See ADR-004.
-7. Eventually the agent exits with some code N.
-8. `echo $N > /abox-status/exit-code; sync`
-9. `kill $SOCAT_PID; poweroff -f`
+**Stage 9: Agent launch.** With the listeners bound, the runtime's guest agent exec's the agent command as the unprivileged `abox` user (uid 1000) with `HOME=/home/abox`, `HTTPS_PROXY` pointed at guest loopback 18443, and `NODE_EXTRA_CA_CERTS` pointed at the staged root CA. A root `chown` of `/workspace` (the ownership overlay) has already run. The persistent `abox-bridge` process serves `/run/abox-proxy.sock` and the loopback egress port, multiplexing both over vsock.
 
-**Stage 10: Each guest intercepted CLI invocation** (while the agent is running) goes through the shim → vsock → bridge → policy → exec → audit → response cycle described in section 7. Console output goes through the kernel's serial driver → `--console file=...` → console tailer → orchestrator's stdout.
+**Stage 10: Each guest intercepted CLI invocation** (while the agent is running) goes through the shim → `abox-bridge` → vsock → command broker → policy → exec → audit → response cycle described in section 7. Agent stdout/stderr streams through the runtime to the orchestrator's terminal.
 
-**Stage 11: VM exit.** Cloud Hypervisor's `--cmdline` had `quiet`, but the kernel still prints the poweroff message. `ch_child.try_wait()` in the orchestrator's poll loop sees the process is gone, calls `cleanup_vm_files(id, vm, remove_status_dir=false)` — this cleans the sockets but **leaves the status dir** so `run_sandbox` can read the exit code. The polling loop's `info()` returns Err, the loop breaks.
+**Stage 11: Agent exit.** The agent exits with some code N. Because it runs as a direct exec through the runtime's guest agent, N propagates directly — no status file, no exit-code protocol. Agent exit stops the sandbox.
 
-**Stage 12: Cleanup + return.** The bridge is aborted. The console shutdown is signalled; the tailer drains to EOF and exits within 500 ms. `read_exit_code(<runtime>/status-fix-auth/exit-code)` reads "0" (or whatever). The status dir is removed. `run_sandbox` returns `Ok(0)`.
+**Stage 12: Cleanup + return.** The broker and egress tasks are shut down, service sidecars are torn down, and the per-sandbox control sockets are removed. `run_sandbox` returns `Ok(N)`. (With `--timeout`, an overdue sandbox is gracefully stopped, then force-killed, and the run returns 124; with `--ephemeral`, the worktree and branch are cleaned up regardless of exit code.)
 
 **Stage 13: CLI exit.** `commands::run::execute` checks the exit code:
 - `0` → prints "Sandbox 'fix-auth' exited cleanly." → `Ok(())` → process exits 0.
@@ -482,6 +450,6 @@ That's the whole lifecycle. Every step has a single owner and a clear failure mo
 - **[`docs/tutorial.md`](tutorial.md)** — actually do all of this on your machine in 10 minutes.
 - **[`docs/decisions/`](decisions/)** — the architecture decision records for the choices that shaped abox.
 - **[`docs/plans/`](plans/)** — historical and planned implementation work.
-- **[`scripts/local/e2e_test.sh`](../scripts/local/e2e_test.sh)** — the canonical "is this thing working?" gate (46 assertions across 7 phases).
+- **[`scripts/local/msb_e2e_test.sh`](../scripts/local/msb_e2e_test.sh)** — the canonical "is this thing working?" gate (`just e2e-runtime`, 49 assertions against real microVMs).
 - **[`docs/future-work.md`](future-work.md)** — what's next after the priorities roadmap landed.
 - **[`docs/decisions/003-https-credential-injection.md`](decisions/003-https-credential-injection.md)** — ADR for the TLS-terminating MITM proxy architecture.

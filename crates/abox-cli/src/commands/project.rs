@@ -107,7 +107,50 @@ fn explain(repo_root: &Path, config_override: Option<&Path>) -> Result<()> {
     let (host_config, policy) = load_host_context(config_override);
     let policy_domains =
         policy.as_ref().map_or_else(Vec::new, PolicyEngine::managed_egress_domains);
-    print_summary(&resolved, &policy_domains, &host_config.state_dir)
+    print_summary(&resolved, &policy_domains, &host_config.state_dir)?;
+
+    // Compiled runtime network plan for this repo's effective network mode.
+    let scope = resolved.effective_network_scope(None)?;
+    match abox_core::policy::compile_runtime_network_plan(&scope)? {
+        abox_core::runtime::RuntimeNetworkPlan::HostMediated => {
+            println!();
+            println!("Runtime network plan: host-mediated (no guest networking;");
+            println!("  all egress rides the audited abox proxy channels)");
+        }
+        abox_core::runtime::RuntimeNetworkPlan::Native(native) => {
+            println!();
+            if native.allow_public {
+                println!("Runtime network plan: native, public internet only");
+                println!("  (host, loopback, private ranges, link-local, and cloud");
+                println!("  metadata remain denied; TCP 443 + gateway DNS only)");
+            } else {
+                println!(
+                    "Runtime network plan: native, {} allowed host(s)",
+                    native.allowed_hosts.len()
+                );
+                for host in &native.allowed_hosts {
+                    println!("  allow https://{host}");
+                }
+                println!("  (private/metadata/host ranges denied; TCP 443 + DNS only)");
+            }
+            println!("  Proxy-aware clients still use the audited abox egress proxy.");
+        }
+    }
+
+    // Who enforces each credential rule (ADR-008 Phase 7).
+    if let Some(policy) = policy.as_ref() {
+        let report = policy.credential_enforcement_report();
+        if !report.is_empty() {
+            println!();
+            println!("Credential rules:");
+            for entry in report {
+                for line in entry.lines() {
+                    println!("  {line}");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load_resolved_project(repo_root: &Path) -> Result<ResolvedProjectConfig> {

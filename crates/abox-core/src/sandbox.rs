@@ -1,16 +1,29 @@
 //! Sandbox orchestrator.
 //!
-//! Coordinates the workspace manager, VM manager, and proxy daemon to provide
-//! a unified interface for sandbox lifecycle management. This is the main
-//! application-layer service that the CLI and TUI call into.
+//! Coordinates the workspace manager, sandbox runtime, and proxy daemon to
+//! provide a unified interface for sandbox lifecycle management. This is the
+//! main application-layer service that the CLI and TUI call into.
+//!
+//! The orchestrator resolves task *intent* (worktree, environment profile,
+//! staged inputs, control channels) into a runtime-neutral
+//! [`SandboxRuntimeSpec`] and delegates isolation mechanics to the configured
+//! [`SandboxRuntimePort`] adapter.
 
-use crate::config::{AboxConfig, CredentialFileEntry, VmRuntimeTuning};
-use crate::project::{image_path_for_profile, kernel_path_for_profile, EnvironmentProfile};
-use crate::vm::{CredentialToStage, VmConfig, VmInfo, VmPort, VmState};
+use crate::config::{AboxConfig, CredentialFileEntry};
+use crate::project::EnvironmentProfile;
+use crate::runtime::{
+    ControlChannel, CredentialToStage, RuntimeEnvironment, RuntimeLifecycle, RuntimeMount,
+    RuntimeNetworkPlan, RuntimeResources, RuntimeState, SandboxRuntimePort, SandboxRuntimeSpec,
+    WorkspaceMount, COMMAND_BROKER_PORT, HTTPS_EGRESS_PORT,
+};
 use crate::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// How long a timed-out sandbox gets to stop gracefully before it is
+/// force-killed.
+const TIMEOUT_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Parameters for creating a new sandbox.
 #[derive(Debug, Clone)]
@@ -19,25 +32,23 @@ pub struct CreateSandboxParams {
     pub task_id: String,
     /// Base branch to fork from (default: "main").
     pub base_branch: String,
-    /// Optional template to restore from instead of booting fresh.
-    pub template: Option<String>,
     /// Memory override in MiB.
     pub memory_mib: Option<u32>,
     /// vCPU override.
     pub vcpus: Option<u8>,
-    /// Unix user to run the agent as inside the VM.
+    /// Unix user to run the agent as inside the sandbox.
     pub user: Option<String>,
-    /// Environment variables to set inside the VM.
+    /// Environment variables to set inside the sandbox.
     pub env_vars: Vec<(String, String)>,
-    /// Command to execute inside the VM (the agent).
+    /// Command to execute inside the sandbox (the agent).
     pub command: Vec<String>,
-    /// Optional resolved prompt content staged into guest boot metadata.
+    /// Optional resolved prompt content staged into the guest.
     pub resolved_prompt: Option<String>,
     /// Optional repo-scoped host cache root mounted at `/abox-cache`.
     pub cache_mount_dir: Option<PathBuf>,
     /// Optional immutable prepare script content staged as `/abox-meta/prepare.sh`.
     pub staged_prepare_script: Option<String>,
-    /// Guest environment profile that selects the rootfs image.
+    /// Guest environment profile.
     pub environment_profile: EnvironmentProfile,
     /// Kill the sandbox after this many seconds (exit code 124).
     pub timeout_secs: Option<u64>,
@@ -48,29 +59,48 @@ pub struct CreateSandboxParams {
     /// callers that don't need MITM proxy support.
     pub ca_cert_pem: Option<String>,
     /// Workspace subdirectories to overlay with empty tmpfs inside the guest.
-    /// Sourced from `ResolvedProjectConfig.mount_excludes` and passed through
-    /// to `VmConfig` and ultimately `BootMeta`.
+    /// Sourced from `ResolvedProjectConfig.mount_excludes`.
     pub mount_excludes: Vec<String>,
     /// Ephemeral service sidecars already started on the host. `run_sandbox`
-    /// spawns a host→guest vsock bridge for each and stages guest metadata so
+    /// spawns a host→guest bridge for each and stages guest metadata so
     /// the agent can reach them; teardown stops the containers. Empty for the
     /// common case (no services), in which nothing changes.
     pub service_bridges: Vec<crate::services::ServiceBridge>,
     /// Repo-declared, gated host-port bridges (guest loopback → host loopback).
     pub host_port_bridges: Vec<crate::services::HostPortPlan>,
     /// Arbitrary host files to stage read-only under `/abox-meta/inputs/`.
-    pub input_files: Vec<crate::vm::InputFile>,
+    pub input_files: Vec<crate::runtime::RuntimeInput>,
+    /// Compiled runtime network plan (from the repo's network mode; see
+    /// [`crate::policy::compile_runtime_network_plan`]).
+    pub network_plan: RuntimeNetworkPlan,
+    /// Credential rules delegated to native runtime secret substitution.
+    pub native_secrets: Vec<crate::runtime::spec::NativeSecretSpec>,
 }
 
-/// Full sandbox status combining workspace and VM info.
+/// Full sandbox status combining workspace and runtime info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxStatus {
     pub id: String,
     pub branch: String,
     pub worktree_path: String,
-    pub vm_state: String,
-    pub vm_pid: u32,
+    pub state: String,
+    pub pid: u32,
     pub commits_ahead: usize,
+}
+
+/// The guest user's home directory (`abox`, uid 1000, in official images).
+pub const GUEST_AGENT_HOME: &str = "/home/abox";
+
+/// Expand a guest-side path: `~/x` becomes `/home/abox/x`; absolute paths
+/// pass through; anything else is rejected.
+pub fn expand_guest_path(raw: &str) -> Result<String> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(format!("{GUEST_AGENT_HOME}/{rest}"));
+    }
+    if raw.starts_with('/') {
+        return Ok(raw.to_string());
+    }
+    anyhow::bail!("guest path must be absolute or start with ~/: {raw:?}")
 }
 
 /// Convert a TOML value to a JSON value (for stub credential generation).
@@ -102,7 +132,7 @@ pub fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<CredentialToStage> {
     let mut result = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        let guest_expanded = match crate::boot_meta::expand_guest_path(&entry.guest) {
+        let guest_expanded = match expand_guest_path(&entry.guest) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -151,24 +181,24 @@ pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<Credential
 }
 
 /// The sandbox orchestrator. This is the main entry point for all operations.
-pub struct SandboxOrchestrator<W: WorkspacePort, V: VmPort> {
+pub struct SandboxOrchestrator<W: WorkspacePort, R: SandboxRuntimePort> {
     config: AboxConfig,
     workspace: W,
-    vm_manager: V,
+    runtime: R,
 }
 
-impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
-    pub fn new(config: AboxConfig, workspace: W, vm_manager: V) -> Self {
-        Self { config, workspace, vm_manager }
+impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
+    pub fn new(config: AboxConfig, workspace: W, runtime: R) -> Self {
+        Self { config, workspace, runtime }
     }
 
     pub fn config(&self) -> &AboxConfig {
         &self.config
     }
 
-    /// Runtime directory (where sockets, console logs, and detached
-    /// supervisor PID files live). Exposed so CLI commands like
-    /// `abox run --detach` can write per-sandbox state next to the rest.
+    /// Runtime directory (where control sockets and detached supervisor
+    /// PID files live). Exposed so CLI commands like `abox run --detach`
+    /// can write per-sandbox state next to the rest.
     pub fn runtime_dir(&self) -> std::path::PathBuf {
         self.config.runtime_dir()
     }
@@ -177,8 +207,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     ///
     /// This performs the full lifecycle:
     /// 1. Create a git worktree on a new branch
-    /// 2. Start virtiofsd + Cloud Hypervisor VM
-    /// 3. The VM boots, mounts the worktree at /workspace, and runs the agent
+    /// 2. Resolve task intent into a runtime-neutral spec
+    /// 3. Start the sandbox through the runtime adapter; the guest mounts
+    ///    the worktree at /workspace and runs the agent
     pub async fn create_sandbox(&self, params: CreateSandboxParams) -> Result<SandboxStatus> {
         crate::util::validate_task_id_for_runtime_dir(&params.task_id, &self.config.runtime_dir())
             .map_err(anyhow::Error::msg)?;
@@ -201,19 +232,9 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             "Worktree created"
         );
 
-        // Step 2: Determine start mode (fresh boot or restore from template).
-        let start_mode = match &params.template {
-            Some(name) => {
-                let template_path = self.config.templates_dir().join(name);
-                anyhow::ensure!(template_path.exists(), "template '{name}' not found");
-                crate::vm::StartMode::Restore { template_path }
-            }
-            None => crate::vm::StartMode::Fresh,
-        };
-
-        // Inject HTTPS_PROXY env vars so the guest routes HTTPS through the
-        // per-sandbox egress proxy. The guest's init.sh bridges vsock port
-        // 5001 to a local TCP listener at 127.0.0.1:18443 via socat.
+        // Step 2: Inject HTTPS_PROXY env vars so the guest routes HTTPS through the
+        // per-sandbox egress proxy. The guest bridges its loopback listener
+        // at 127.0.0.1:18443 to the HTTPS egress control channel.
         let mut env_vars = params.env_vars;
         let proxy_url = "http://127.0.0.1:18443".to_string();
         env_vars.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
@@ -226,81 +247,77 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         env_vars
             .push(("NODE_EXTRA_CA_CERTS".to_string(), "/etc/ssl/certs/abox-ca.pem".to_string()));
 
-        // Step 3: Build VM config.
-        // Resolve image and kernel paths: prefer explicit config values, then
-        // fall back to the standard bootstrap location (~/.abox/vm/). Fail fast
-        // with an actionable message rather than attempting to start with a
-        // non-existent path and producing a cryptic OS error.
-        let image_path = image_path_for_profile(&self.config, params.environment_profile);
-        let kernel_path = kernel_path_for_profile(&self.config);
-        if !image_path.exists() {
-            // Roll back the worktree we just created before returning the error.
-            let _ = self.workspace.remove_worktree(&params.task_id, true);
-            if params.environment_profile == EnvironmentProfile::Base {
-                anyhow::bail!(
-                    "VM rootfs image not found at {}\n\n\
-                     Run 'abox init' or 'just bootstrap-vm' to download and assemble\n\
-                     the VM stack, then try again.",
-                    image_path.display()
-                );
-            }
-            anyhow::bail!(
-                "VM rootfs image for profile '{}' not found at {}\n\n\
-                 Install or build the '{}' guest profile under ~/.abox/vm/profiles/{}/, then try again.",
-                params.environment_profile,
-                image_path.display(),
-                params.environment_profile,
-                params.environment_profile,
-            );
-        }
-        if !kernel_path.exists() {
-            let _ = self.workspace.remove_worktree(&params.task_id, true);
-            anyhow::bail!(
-                "VM kernel not found at {}\n\n\
-                 Run 'abox init' or 'just bootstrap-vm' to download and assemble\n\
-                 the VM stack, then try again.",
-                kernel_path.display()
-            );
-        }
-
         // Resolve credential files from config so they can be staged into the guest.
         let credential_files = stage_credential_files(&self.config.auth.credential_files());
 
-        let vm_config = VmConfig {
+        // Guest service metadata + control channels for each bridge.
+        let services: Vec<crate::services::GuestServiceBridge> = params
+            .service_bridges
+            .iter()
+            .map(crate::services::ServiceBridge::guest)
+            .chain(params.host_port_bridges.iter().map(crate::services::HostPortPlan::guest))
+            .collect();
+
+        let mut control_channels = vec![
+            ControlChannel { name: "command-broker".to_string(), guest_port: COMMAND_BROKER_PORT },
+            ControlChannel { name: "https-egress".to_string(), guest_port: HTTPS_EGRESS_PORT },
+        ];
+        for svc in &services {
+            control_channels.push(ControlChannel {
+                name: format!("service-{}", svc.name),
+                guest_port: svc.vsock_port,
+            });
+        }
+
+        let caches = params
+            .cache_mount_dir
+            .as_ref()
+            .map(|dir| RuntimeMount {
+                host_path: dir.clone(),
+                guest_path: "/abox-cache".to_string(),
+                read_only: false,
+            })
+            .into_iter()
+            .collect();
+
+        // Step 3: Build the runtime-neutral spec.
+        let spec = SandboxRuntimeSpec {
             id: params.task_id.clone(),
-            worktree_path: worktree_path.clone(),
-            image_path,
-            kernel_path,
-            memory_mib: params.memory_mib.unwrap_or(self.config.vm_defaults.memory_mib),
-            vcpus: params.vcpus.unwrap_or(self.config.vm_defaults.vcpus),
+            workspace: WorkspaceMount::ReadWrite(worktree_path.clone()),
+            environment: RuntimeEnvironment::Profile(params.environment_profile),
+            resources: RuntimeResources {
+                memory_mib: params.memory_mib.unwrap_or(self.config.sandbox_defaults.memory_mib),
+                vcpus: params.vcpus.unwrap_or(self.config.sandbox_defaults.vcpus),
+            },
             user: params.user,
-            env_vars,
-            agent_command: params.command.clone(),
+            env: env_vars,
+            command: params.command.clone(),
             resolved_prompt: params.resolved_prompt,
-            cache_mount_dir: params.cache_mount_dir,
             staged_prepare_script: params.staged_prepare_script,
-            start_mode,
             credential_files,
             ca_cert_pem: params.ca_cert_pem.clone(),
+            inputs: params.input_files.clone(),
+            caches,
             mount_excludes: params.mount_excludes.clone(),
-            services: params
-                .service_bridges
-                .iter()
-                .map(crate::services::ServiceBridge::guest)
-                .chain(params.host_port_bridges.iter().map(crate::services::HostPortPlan::guest))
-                .collect(),
-            input_files: params.input_files.clone(),
+            services,
+            control_channels,
+            network: params.network_plan.clone(),
+            native_secrets: params.native_secrets.clone(),
+            lifecycle: RuntimeLifecycle {
+                timeout_secs: params.timeout_secs,
+                ephemeral: params.ephemeral,
+            },
         };
 
-        // Step 4: Start the VM (or restore from snapshot). If this fails, roll back the worktree we just
-        // created so the user is not left with orphaned state.
-        let vm_info = match self.vm_manager.start(vm_config).await {
-            Ok(info) => info,
+        // Step 4: Start the sandbox. If this fails, roll back the worktree we
+        // just created so the user is not left with orphaned state.
+        let instance = match self.runtime.start(spec).await {
+            Ok(instance) => instance,
             Err(start_err) => {
                 tracing::warn!(
                     task_id = %params.task_id,
                     error = %start_err,
-                    "VM start failed; rolling back worktree"
+                    "Sandbox start failed; rolling back worktree"
                 );
                 if let Err(cleanup_err) = self.workspace.remove_worktree(&params.task_id, true) {
                     tracing::error!(
@@ -310,7 +327,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                     );
                 }
                 return Err(
-                    start_err.context(format!("Failed to start VM for '{}'", params.task_id))
+                    start_err.context(format!("Failed to start sandbox for '{}'", params.task_id))
                 );
             }
         };
@@ -319,26 +336,26 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             id: params.task_id.clone(),
             branch: format!("agent/{}", params.task_id),
             worktree_path: worktree_path.display().to_string(),
-            vm_state: vm_info.state.to_string(),
-            vm_pid: vm_info.pid,
+            state: instance.state.to_string(),
+            pid: instance.pid.unwrap_or(0),
             commits_ahead: 0,
         })
     }
 
     /// Stop a sandbox and optionally clean up.
     ///
-    /// If the VM is already stopped (or never started — e.g. previous `run`
-    /// failed at VM boot), this still proceeds with worktree cleanup when
+    /// If the sandbox is already stopped (or never started — e.g. previous
+    /// `run` failed at boot), this still proceeds with worktree cleanup when
     /// `clean` is true. This guarantees there is always a CLI path to recover
     /// from orphaned state.
     pub async fn stop_sandbox(&self, task_id: &str, clean: bool) -> Result<()> {
-        match self.vm_manager.stop(task_id).await {
+        match self.runtime.stop(task_id).await {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!(
                     task_id,
                     error = %e,
-                    "VM stop returned error (likely already stopped); continuing"
+                    "Sandbox stop returned error (likely already stopped); continuing"
                 );
             }
         }
@@ -355,23 +372,23 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
     /// List all active sandboxes.
     pub async fn list_sandboxes(&self) -> Result<Vec<SandboxStatus>> {
         let worktrees = self.workspace.list_worktrees()?;
-        let vms = self.vm_manager.list().await?;
+        let instances = self.runtime.list().await?;
 
         let mut statuses = Vec::new();
 
         for wt in &worktrees {
-            let vm_info = vms.iter().find(|v| v.id == wt.sandbox_id);
-            let (vm_state, vm_pid) = match vm_info {
-                Some(v) => (v.state.to_string(), v.pid),
-                None => (VmState::Stopped.to_string(), 0),
+            let instance = instances.iter().find(|v| v.id == wt.sandbox_id);
+            let (state, pid) = match instance {
+                Some(v) => (v.state.to_string(), v.pid.unwrap_or(0)),
+                None => (RuntimeState::Stopped.to_string(), 0),
             };
 
             statuses.push(SandboxStatus {
                 id: wt.sandbox_id.clone(),
                 branch: wt.branch.clone(),
                 worktree_path: wt.path.display().to_string(),
-                vm_state,
-                vm_pid,
+                state,
+                pid,
                 commits_ahead: wt.commits_ahead,
             });
         }
@@ -395,32 +412,14 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         Ok(worktrees.into_iter().find(|w| w.sandbox_id == task_id))
     }
 
-    /// Pause a sandbox VM (for snapshotting).
-    pub async fn pause_sandbox(&self, task_id: &str) -> Result<()> {
-        self.vm_manager.pause(task_id).await
-    }
-
-    /// Resume a paused sandbox VM.
-    pub async fn resume_sandbox(&self, task_id: &str) -> Result<()> {
-        self.vm_manager.resume(task_id).await
-    }
-
-    /// Get VM info for a specific sandbox.
-    pub async fn vm_info(&self, task_id: &str) -> Result<VmInfo> {
-        self.vm_manager.info(task_id).await
-    }
-
     /// Foreground variant of `create_sandbox`.
     ///
-    /// Creates the worktree, boots the VM, starts a per-VM proxy bridge
-    /// bound to `<runtime>/vsock-<id>.sock_5000` (the path Cloud Hypervisor
-    /// exposes for guest vsock-port-5000 traffic), streams the guest
-    /// console to the orchestrator's stdio, polls the VM until it exits,
-    /// and tears everything down.
+    /// Creates the worktree, starts the sandbox, binds the per-sandbox
+    /// command broker and HTTPS egress proxy to the runtime's control
+    /// sockets (agent output streams through the runtime to this process),
+    /// waits for the sandbox to exit, and tears everything down.
     ///
-    /// Returns the agent's exit code. The current MVP returns 0 on clean
-    /// VM exit; structured exit-code propagation from the guest is a
-    /// follow-up.
+    /// Returns the agent's exit code.
     pub async fn run_sandbox(
         &self,
         params: CreateSandboxParams,
@@ -440,14 +439,14 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         let task_id = status.id.clone();
         let worktree_path = std::path::PathBuf::from(&status.worktree_path);
 
-        // Spawn the per-VM proxy bridge bound to vsock-<id>.sock_5000.
-        let bridge_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5000"));
+        // Spawn the per-sandbox proxy bridge on the command-broker channel.
+        let bridge_socket = self.runtime.control_socket(&task_id, COMMAND_BROKER_PORT);
         // Use a file-based audit sink so guest requests appear in the same
         // audit JSONL file used by abox-proxyd. Fall back to TracingAuditSink
         // if the log file can't be opened.
         let audit_path = self.config.logs_dir().join("audit.jsonl");
-        let audit_sink: std::sync::Arc<dyn crate::proxy_bridge::AuditSink> =
-            match crate::proxy_bridge::FileAuditSink::open(&audit_path) {
+        let audit_sink: std::sync::Arc<dyn crate::command_broker::AuditSink> =
+            match crate::command_broker::FileAuditSink::open(&audit_path) {
                 Ok(sink) => std::sync::Arc::new(sink),
                 Err(e) => {
                     tracing::warn!(
@@ -455,16 +454,16 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                         path = %audit_path.display(),
                         "Could not open audit log; falling back to tracing-only"
                     );
-                    std::sync::Arc::new(crate::proxy_bridge::TracingAuditSink)
+                    std::sync::Arc::new(crate::command_broker::TracingAuditSink)
                 }
             };
         // Map guest /workspace → host worktree so that the shim's CWD
-        // (which is /workspace inside the VM) resolves to the real path.
-        let bridge = crate::proxy_bridge::ProxyBridge::new(
+        // (which is /workspace inside the sandbox) resolves to the real path.
+        let bridge = crate::command_broker::CommandBroker::new(
             bridge_socket,
             std::sync::Arc::clone(&policy),
             std::sync::Arc::clone(&audit_sink),
-            crate::proxy_bridge::SandboxAttribution::Fixed(task_id.clone()),
+            crate::command_broker::SandboxAttribution::Fixed(task_id.clone()),
         )
         .with_cwd_map("/workspace", worktree_path);
         let bridge_handle = tokio::spawn(async move {
@@ -473,11 +472,8 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             }
         });
 
-        // Spawn the per-sandbox egress proxy bound to the vsock-bridged Unix
-        // socket. Cloud Hypervisor routes guest vsock port 5001 traffic to
-        // `vsock-<id>.sock_5001` — the same pattern used for the CLI proxy
-        // bridge on port 5000.
-        let egress_socket = self.config.runtime_dir().join(format!("vsock-{task_id}.sock_5001"));
+        // Spawn the per-sandbox egress proxy on the HTTPS egress channel.
+        let egress_socket = self.runtime.control_socket(&task_id, HTTPS_EGRESS_PORT);
         let egress_policy = std::sync::Arc::clone(&policy);
         let egress_ca = std::sync::Arc::clone(&root_ca);
         // Wrap bypass_tls in an Arc so each per-connection / per-request task
@@ -503,7 +499,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             tracing::info!(
                 socket = %egress_socket.display(),
                 task_id = %egress_task_id,
-                "Per-sandbox egress proxy listening (vsock port 5001)"
+                "Per-sandbox egress proxy listening"
             );
 
             loop {
@@ -535,7 +531,7 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                         let sandbox_id = sandbox_id.clone();
                         let audit = std::sync::Arc::clone(&audit);
                         async move {
-                            crate::egress::handle_request(
+                            crate::request_broker::handle_request(
                                 req,
                                 &policy,
                                 root_ca,
@@ -565,15 +561,12 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         });
 
         // Spawn a host→guest bridge for each service sidecar. Each binds the
-        // Cloud Hypervisor vsock backend socket for the service's vsock port
-        // and forwards to the container's published host port. No services →
-        // no bridges, so the common path is unaffected.
+        // runtime's control socket for the service's channel and forwards to
+        // the container's published host port. No services → no bridges, so
+        // the common path is unaffected.
         let mut service_bridge_handles = Vec::new();
         for bridge in &service_bridges {
-            let socket = self
-                .config
-                .runtime_dir()
-                .join(format!("vsock-{task_id}.sock_{}", bridge.vsock_port));
+            let socket = self.runtime.control_socket(&task_id, bridge.vsock_port);
             let host_port = bridge.host_port;
             let name = bridge.name.clone();
             service_bridge_handles.push(tokio::spawn(async move {
@@ -584,12 +577,11 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
         }
 
         // Spawn a host→guest bridge for each declared host-port. Reuses the
-        // service-bridge vsock plumbing but logs every connection, since this
+        // service-bridge plumbing but logs every connection, since this
         // is a deliberate, audited exception to the egress boundary.
         let mut host_port_handles = Vec::new();
         for plan in &host_port_bridges {
-            let socket =
-                self.config.runtime_dir().join(format!("vsock-{task_id}.sock_{}", plan.vsock_port));
+            let socket = self.runtime.control_socket(&task_id, plan.vsock_port);
             let guest_port = plan.guest_port;
             let host_port = plan.host_port;
             let sandbox_id = task_id.clone();
@@ -605,63 +597,38 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
             }));
         }
 
-        // Spawn the console streamer with a shutdown notify so it can drain
-        // the last bytes of guest output gracefully when the VM exits,
-        // instead of being abort()'d mid-read and dropping the trailing
-        // poweroff banner on slow systems.
-        let console_log = self.config.runtime_dir().join(format!("console-{task_id}.log"));
-        let console_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
-        let console_shutdown_for_task = console_shutdown.clone();
-        let console_handle = tokio::spawn(async move {
-            if let Err(e) = Box::pin(crate::console::tail_to_stdout_until(
-                &console_log,
-                console_shutdown_for_task,
-            ))
-            .await
-            {
-                tracing::debug!(error = %e, "console stream ended");
-            }
-        });
+        // Wait for sandbox exit; the runtime reports the guest exit code and
+        // streams agent output to this process's stdio.
+        let wait_future = self.runtime.wait(&task_id);
 
-        // Wait for VM exit. The adapter's wait_for_exit() polls the
-        // child process handle directly (5 ms try_wait on the real
-        // adapter, 10 ms info()-based fallback for mocks), replacing
-        // the previous 250 ms info() poll loop.
-        let tuning = VmRuntimeTuning::DEFAULT;
-
-        let wait_future = self.vm_manager.wait_for_exit(&task_id);
-
-        let timed_out = if let Some(secs) = timeout_secs {
+        let (timed_out, runtime_exit) = if let Some(secs) = timeout_secs {
             match tokio::time::timeout(std::time::Duration::from_secs(secs), wait_future).await {
-                Ok(_) => false,
+                Ok(exit) => (false, exit.ok()),
                 Err(_elapsed) => {
                     tracing::warn!(task_id = %task_id, secs, "sandbox timed out");
                     // Graceful shutdown first.
-                    if let Err(e) = self.vm_manager.stop(&task_id).await {
+                    if let Err(e) = self.runtime.stop(&task_id).await {
                         tracing::warn!(
                             task_id = %task_id,
                             error = %e,
                             "Graceful shutdown after timeout failed"
                         );
                     }
-                    // Wait up to 10s for the VM to actually exit.
-                    let grace = self.vm_manager.wait_for_exit(&task_id);
-                    if tokio::time::timeout(tuning.vm_timeout_grace_period, grace).await.is_err() {
+                    // Wait up to the grace period for the sandbox to exit.
+                    let grace = self.runtime.wait(&task_id);
+                    if tokio::time::timeout(TIMEOUT_KILL_GRACE, grace).await.is_err() {
                         tracing::warn!(
                             task_id = %task_id,
-                            "VM did not exit within grace period; force-killing"
+                            "Sandbox did not exit within grace period; force-killing"
                         );
-                        // Force kill — best effort. The existing stop() on
-                        // Cloud Hypervisor calls `shutdown-vmm` which is
-                        // already forceful; a second call is our best bet.
-                        let _ = self.vm_manager.stop(&task_id).await;
+                        let _ = self.runtime.kill(&task_id).await;
                     }
-                    true
+                    (true, None)
                 }
             }
         } else {
-            let _ = wait_future.await;
-            false
+            let exit = wait_future.await;
+            (false, exit.ok())
         };
 
         bridge_handle.abort();
@@ -680,52 +647,34 @@ impl<W: WorkspacePort, V: VmPort> SandboxOrchestrator<W, V> {
                 tracing::warn!(task_id = %task_id, error = %e, "Failed to stop service sidecars");
             }
         }
-        // Signal the console tailer to drain and exit. Wait briefly for it
-        // to finish before we move on; if it stays stuck (shouldn't happen
-        // in practice), the JoinHandle is dropped and the task is cancelled.
-        console_shutdown.notify_one();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), console_handle).await;
-
-        // Determine exit code: 124 on timeout, otherwise read from guest.
+        // Determine exit code: 124 on timeout, otherwise as reported by the
+        // runtime's exit channel.
         let exit_code = if timed_out {
             124
+        } else if let Some(code) = runtime_exit.and_then(|e| e.exit_code) {
+            code
         } else {
-            // Read the exit code the guest wrote into /abox-status/exit-code.
-            let exit_code_opt = self
-                .vm_manager
-                .status_dir(&task_id)
-                .and_then(|d| crate::adapters::cloud_hypervisor::read_exit_code(&d));
-
-            // Tear down the status dir now that we've read (or failed to read) it.
-            if let Some(sd) = self.vm_manager.status_dir(&task_id) {
-                let _ = std::fs::remove_dir_all(&sd);
-            }
-
-            if let Some(code) = exit_code_opt {
-                code
-            } else {
-                // The guest never wrote an exit code — the VM died before
-                // init.sh got that far (kernel panic, missing rootfs,
-                // virtiofs failure, etc.). Roll back the worktree like a
-                // failed VM start would, since this run produced nothing.
-                eprintln!(
-                    "abox: sandbox '{task_id}' did not report an exit code; \
-                     rolling back worktree (the VM may have crashed before \
-                     guest init ran -- check the console log)"
-                );
-                tracing::warn!(
+            // The guest never reported an exit code — the sandbox died
+            // before guest init got that far (boot failure, crash, …).
+            // Roll back the worktree like a failed start would, since this
+            // run produced nothing.
+            eprintln!(
+                "abox: sandbox '{task_id}' did not report an exit code; \
+                 rolling back worktree (the sandbox may have died before \
+                 the agent could run)"
+            );
+            tracing::warn!(
+                task_id = %task_id,
+                "Guest did not report an exit code; rolling back worktree"
+            );
+            if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
+                tracing::error!(
                     task_id = %task_id,
-                    "Guest did not write an exit code; rolling back worktree"
+                    error = %e,
+                    "Worktree rollback after silent sandbox failure also failed"
                 );
-                if let Err(e) = self.workspace.remove_worktree(&task_id, true) {
-                    tracing::error!(
-                        task_id = %task_id,
-                        error = %e,
-                        "Worktree rollback after silent VM failure also failed"
-                    );
-                }
-                1
             }
+            1
         };
 
         // Ephemeral mode: clean up worktree + branch regardless of exit code.
@@ -751,13 +700,13 @@ mod tests {
 
     #[test]
     fn stage_expands_tilde_in_guest_path() {
-        let expanded = crate::boot_meta::expand_guest_path("~/.claude/.credentials.json").unwrap();
+        let expanded = expand_guest_path("~/.claude/.credentials.json").unwrap();
         assert_eq!(expanded, "/home/abox/.claude/.credentials.json");
     }
 
     #[test]
     fn stage_rejects_invalid_guest_path() {
-        let result = crate::boot_meta::expand_guest_path("foo/bar");
+        let result = expand_guest_path("foo/bar");
         assert!(result.is_err());
     }
 

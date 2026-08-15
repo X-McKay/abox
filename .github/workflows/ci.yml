@@ -5,7 +5,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
-    # Include label events so adding/removing `vm-attested` re-runs the
+    # Include label events so adding/removing `runtime-attested` re-runs the
     # attestation check. Without this, the check uses the original event's
     # label list and misses later label operations.
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
@@ -33,6 +33,19 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
 
+      # libkrun's device layer (capng crate) links against libcap-ng on Linux.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcap-ng-dev
+
+      # The microsandbox crate's build script installs the msb runtime bundle
+      # into ~/.microsandbox on first build; cache it so CI doesn't
+      # re-download it every run.
+      - name: Cache MicroSandbox runtime bundle
+        uses: actions/cache@v4
+        with:
+          path: ~/.microsandbox
+          key: msb-runtime-${{ runner.os }}-0.6.9
+
       - name: just check (fmt + clippy + test)
         run: just check
 
@@ -55,8 +68,8 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
-  e2e-phases-1-5:
-    name: e2e (phases 1-5; phase 6 skipped — no /dev/kvm on CI)
+  e2e-runtime:
+    name: runtime e2e (live microVMs via KVM)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -64,23 +77,35 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
-
-      - name: Install Python (for proxy_send helper in e2e_test.sh)
-        uses: actions/setup-python@v6
         with:
-          python-version: '3.x'
+          key: e2e-runtime
 
-      - name: Run e2e script
-        # Phase 6 is gated on ~/.abox/vm/cloud-hypervisor + rootfs.raw
-        # existing, which they don't on a stock GitHub runner. The script
-        # prints "skipped: VM artifacts not found" and continues.
-        run: ./scripts/local/e2e_test.sh
+      # libkrun's device layer (capng crate) links against libcap-ng on Linux.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcap-ng-dev
 
-  vm-attestation:
-    name: VM attestation (label required when VM paths touched)
+      - name: Cache MicroSandbox runtime bundle
+        uses: actions/cache@v4
+        with:
+          path: ~/.microsandbox
+          key: msb-runtime-${{ runner.os }}-0.6.9
+
+      - name: Run the live runtime e2e suite
+        # GitHub-hosted Ubuntu runners expose /dev/kvm; the msb runtime
+        # bundle is installed by the microsandbox crate's build script on
+        # first build. The suite skips cleanly (exit 0 with a "skipped:"
+        # message) if virtualization or runtime assets are unavailable.
+        run: |
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          ./scripts/local/msb_e2e_test.sh
+
+  runtime-attestation:
+    name: Runtime attestation (label required when runtime paths touched)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -89,40 +114,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect VM-touching paths
+      - name: Detect runtime-touching paths
         id: filter
         uses: dorny/paths-filter@v3
         with:
           filters: |
-            vm:
-              - 'guest/**'
-              - 'scripts/build_rootfs.sh'
-              - 'scripts/bootstrap_vm.sh'
+            runtime:
+              - 'images/**'
               - 'crates/abox-core/**'
               - 'crates/abox-proxyd/**'
               - 'crates/abox-protocol/**'
               - 'crates/abox-shim/**'
               - 'templates/config.example.toml'
 
-      - name: Enforce vm-attested label when VM paths touched
-        if: steps.filter.outputs.vm == 'true'
+      - name: Enforce runtime-attested label when runtime paths touched
+        if: steps.filter.outputs.runtime == 'true'
         uses: actions/github-script@v8
         with:
           script: |
             const labels = context.payload.pull_request.labels.map(l => l.name);
-            if (!labels.includes('vm-attested')) {
+            if (!labels.includes('runtime-attested')) {
               core.setFailed(
-                'This PR touches VM/guest/proxy code. Run `just e2e-vm` locally, ' +
-                'then add the `vm-attested` label and comment with the timestamp. ' +
-                'See docs/contributing/pre-pr-checklist.md.'
+                'This PR touches runtime/guest/broker code. Run `just e2e-runtime` ' +
+                'locally, then add the `runtime-attested` label and comment with ' +
+                'the timestamp. See docs/contributing/pre-pr-checklist.md.'
               );
             } else {
-              core.info('vm-attested label present. Trust-but-post-a-timestamp-comment.');
+              core.info('runtime-attested label present. Trust-but-post-a-timestamp-comment.');
             }
 
-      - name: No-op when VM paths untouched
-        if: steps.filter.outputs.vm != 'true'
-        run: echo "No VM-touching paths in this PR; attestation not required."
+      - name: No-op when runtime paths untouched
+        if: steps.filter.outputs.runtime != 'true'
+        run: echo "No runtime-touching paths in this PR; attestation not required."
 
   doc-staleness-reminder:
     name: doc staleness reminder (advisory)
@@ -145,7 +168,7 @@ jobs:
               - 'crates/**'
               - 'scripts/**'
               - 'templates/**'
-              - 'guest/**'
+              - 'images/**'
               - 'justfile'
               - '.github/workflows/**'
             docs:
