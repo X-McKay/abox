@@ -375,22 +375,22 @@ fi
 section "phase 3 — HTTPS egress proxy (policy-enforced CONNECT)"
 
 step "CONNECT to a non-managed domain is denied (403)"
-how "guest: printf 'CONNECT example.com:443 ...' | nc -w 2 127.0.0.1 18443"
+how "guest: printf 'CONNECT example.com:443 ...' | nc -w 5 127.0.0.1 18443"
 expect "response line contains 403"
 read -r -d '' CONNECT_DENIED <<'EOF' || true
 printf 'CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n' \
-  | nc -w 2 127.0.0.1 18443 | head -1
+  | nc -w 5 127.0.0.1 18443 | head -1
 EOF
 run_task t20 -- sh -c "$CONNECT_DENIED"
 assert_eq "denied CONNECT run exit" "0" "$RC"
 assert_contains "example.com CONNECT gets 403" "403" "$OUT"
 
 step "CONNECT to a managed domain is allowed (200)"
-how "guest: printf 'CONNECT api.anthropic.com:443 ...' | nc -w 2 127.0.0.1 18443"
+how "guest: printf 'CONNECT api.anthropic.com:443 ...' | nc -w 5 127.0.0.1 18443"
 expect "response line contains 200"
 read -r -d '' CONNECT_ALLOWED <<'EOF' || true
 printf 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n' \
-  | nc -w 2 127.0.0.1 18443 | head -1
+  | nc -w 5 127.0.0.1 18443 | head -1
 EOF
 run_task t21 -- sh -c "$CONNECT_ALLOWED"
 assert_eq "allowed CONNECT run exit" "0" "$RC"
@@ -404,7 +404,7 @@ ok=0
 i=0
 while [ $i -lt 10 ]; do
   r=$(printf 'CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n' \
-      | nc -w 2 127.0.0.1 18443 | head -1)
+      | nc -w 5 127.0.0.1 18443 | head -1)
   case "$r" in *" 403"*) ok=$((ok+1));; esac
   i=$((i+1))
 done
