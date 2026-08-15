@@ -110,6 +110,45 @@ impl MicrosandboxRuntime {
         format!("abox-{id}")
     }
 
+    /// Invert [`Self::sandbox_name`]: recover the abox task id from a
+    /// MicroSandbox sandbox name, or `None` for non-abox sandboxes.
+    fn task_id_from_sandbox_name(name: &str) -> Option<&str> {
+        name.strip_prefix("abox-")
+    }
+
+    /// Stop (or force-kill) a sandbox this process did not start, via
+    /// MicroSandbox's persisted state (issue #37). Unknown or already
+    /// terminal sandboxes are success — stop is idempotent. A found-but-
+    /// running sandbox that fails to stop is a real error.
+    async fn stop_persisted(id: &str, force: bool) -> Result<()> {
+        let handle = match microsandbox::Sandbox::get(&Self::sandbox_name(id)).await {
+            Ok(handle) => handle,
+            Err(microsandbox::MicrosandboxError::SandboxNotFound(_)) => return Ok(()),
+            Err(e) => return Err(e).with_context(|| format!("Failed to query sandbox '{id}'")),
+        };
+        if Self::map_msb_status(handle.status_snapshot()) == RuntimeState::Stopped {
+            return Ok(());
+        }
+        let result = if force {
+            // A zero graceful window escalates straight to kill.
+            handle.stop_with_timeout(std::time::Duration::ZERO).await
+        } else {
+            handle.stop().await
+        };
+        result.with_context(|| format!("Failed to stop sandbox '{id}' via persisted state"))
+    }
+
+    /// Map MicroSandbox's persisted sandbox status onto the runtime port's
+    /// coarser state model.
+    fn map_msb_status(status: microsandbox::sandbox::SandboxStatus) -> RuntimeState {
+        use microsandbox::sandbox::SandboxStatus as S;
+        match status {
+            S::Running | S::Draining => RuntimeState::Running,
+            S::Created | S::Starting => RuntimeState::Starting,
+            _ => RuntimeState::Stopped,
+        }
+    }
+
     /// Remove the per-sandbox control sockets once the sandbox is reaped so
     /// they don't accumulate in long-lived runtime directories.
     fn remove_control_sockets(&self, id: &str, ports: &[u32]) {
@@ -554,7 +593,10 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
                 self.remove_control_sockets(id, &entry.control_ports);
                 result
             }
-            None => anyhow::bail!("sandbox '{id}' is not managed by this process"),
+            // Not started by this process: fall back to MicroSandbox's
+            // persisted state so `abox stop` works across CLI invocations
+            // (issue #37).
+            None => Self::stop_persisted(id, /*force=*/ false).await,
         }
     }
 
@@ -567,32 +609,76 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
                 self.remove_control_sockets(id, &entry.control_ports);
                 result
             }
-            None => anyhow::bail!("sandbox '{id}' is not managed by this process"),
+            None => Self::stop_persisted(id, /*force=*/ true).await,
         }
     }
 
     async fn info(&self, id: &str) -> Result<RuntimeInstance> {
-        let tasks = self.tasks.lock().unwrap();
-        match tasks.get(id) {
-            Some(entry) => Ok(RuntimeInstance {
+        let entry_pid = self.tasks.lock().unwrap().get(id).map(|entry| entry.pid);
+        if let Some(pid) = entry_pid {
+            return Ok(RuntimeInstance { id: id.to_string(), state: RuntimeState::Running, pid });
+        }
+        // Cross-process fallback: consult persisted state.
+        match microsandbox::Sandbox::get(&Self::sandbox_name(id)).await {
+            Ok(handle) => Ok(RuntimeInstance {
                 id: id.to_string(),
-                state: RuntimeState::Running,
-                pid: entry.pid,
+                state: Self::map_msb_status(handle.status_snapshot()),
+                pid: handle.local().and_then(|l| l.pid).and_then(|p| u32::try_from(p).ok()),
             }),
-            None => anyhow::bail!("sandbox '{id}' is not running"),
+            Err(microsandbox::MicrosandboxError::SandboxNotFound(_)) => {
+                anyhow::bail!("sandbox '{id}' is not running")
+            }
+            Err(e) => Err(e).with_context(|| format!("Failed to query sandbox '{id}'")),
         }
     }
 
     async fn list(&self) -> Result<Vec<RuntimeInstance>> {
-        let tasks = self.tasks.lock().unwrap();
-        Ok(tasks
-            .iter()
-            .map(|(id, entry)| RuntimeInstance {
-                id: id.clone(),
-                state: RuntimeState::Running,
-                pid: entry.pid,
-            })
-            .collect())
+        let mut instances: Vec<RuntimeInstance> = {
+            let tasks = self.tasks.lock().unwrap();
+            tasks
+                .iter()
+                .map(|(id, entry)| RuntimeInstance {
+                    id: id.clone(),
+                    state: RuntimeState::Running,
+                    pid: entry.pid,
+                })
+                .collect()
+        };
+
+        // Merge live abox sandboxes recorded in MicroSandbox's persisted
+        // state by other abox processes (issue #37). In-process entries are
+        // authoritative; persisted-query failures degrade to the in-process
+        // view rather than failing `abox list` outright.
+        match microsandbox::Sandbox::list_with(|l| {
+            l.limit(microsandbox::sandbox::MAX_SANDBOX_LIST_LIMIT)
+        })
+        .await
+        {
+            Ok(page) => {
+                for handle in page.sandboxes {
+                    let Some(task_id) = Self::task_id_from_sandbox_name(handle.name()) else {
+                        continue;
+                    };
+                    if instances.iter().any(|i| i.id == task_id) {
+                        continue;
+                    }
+                    let state = Self::map_msb_status(handle.status_snapshot());
+                    if state == RuntimeState::Stopped {
+                        continue;
+                    }
+                    instances.push(RuntimeInstance {
+                        id: task_id.to_string(),
+                        state,
+                        pid: handle.local().and_then(|l| l.pid).and_then(|p| u32::try_from(p).ok()),
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "persisted sandbox listing unavailable; showing this process's sandboxes only");
+            }
+        }
+
+        Ok(instances)
     }
 
     async fn wait(&self, id: &str) -> Result<RuntimeExit> {
@@ -763,6 +849,28 @@ mod tests {
     #[test]
     fn sandbox_name_is_prefixed() {
         assert_eq!(MicrosandboxRuntime::sandbox_name("fix-auth"), "abox-fix-auth");
+    }
+
+    #[test]
+    fn task_id_roundtrips_sandbox_name() {
+        assert_eq!(
+            MicrosandboxRuntime::task_id_from_sandbox_name("abox-fix-auth"),
+            Some("fix-auth")
+        );
+        assert_eq!(MicrosandboxRuntime::task_id_from_sandbox_name("unrelated-vm"), None);
+        assert_eq!(MicrosandboxRuntime::task_id_from_sandbox_name("abox-"), Some(""));
+    }
+
+    #[test]
+    fn msb_status_maps_to_runtime_state() {
+        use microsandbox::sandbox::SandboxStatus as S;
+        assert_eq!(MicrosandboxRuntime::map_msb_status(S::Running), RuntimeState::Running);
+        // Draining is still alive from the agent's perspective.
+        assert_eq!(MicrosandboxRuntime::map_msb_status(S::Draining), RuntimeState::Running);
+        assert_eq!(MicrosandboxRuntime::map_msb_status(S::Created), RuntimeState::Starting);
+        assert_eq!(MicrosandboxRuntime::map_msb_status(S::Starting), RuntimeState::Starting);
+        assert_eq!(MicrosandboxRuntime::map_msb_status(S::Stopped), RuntimeState::Stopped);
+        assert_eq!(MicrosandboxRuntime::map_msb_status(S::Crashed), RuntimeState::Stopped);
     }
 
     // ─── Native network plan compilation: SSRF invariants ──────────────────

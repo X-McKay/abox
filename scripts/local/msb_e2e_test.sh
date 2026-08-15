@@ -156,7 +156,7 @@ REPO="$STATE/repo"
 CONFIG="$STATE/config.toml"
 AUDIT="$STATE/logs/audit.jsonl"
 
-ALL_TASKS=(t01 t02 t03 t04a t04b t05 t06 t10 t11 t12 t20 t21 t22 t30 t31 t32 t33)
+ALL_TASKS=(t01 t02 t03 t04a t04b t05 t06 t10 t11 t12 t20 t21 t22 t30 t31 t32 t33 t40 t41)
 
 cleanup() {
     # Best-effort teardown of anything the suite left behind.
@@ -375,22 +375,22 @@ fi
 section "phase 3 — HTTPS egress proxy (policy-enforced CONNECT)"
 
 step "CONNECT to a non-managed domain is denied (403)"
-how "guest: printf 'CONNECT example.com:443 ...' | nc -w 2 127.0.0.1 18443"
+how "guest: printf 'CONNECT example.com:443 ...' | nc -w 5 127.0.0.1 18443"
 expect "response line contains 403"
 read -r -d '' CONNECT_DENIED <<'EOF' || true
 printf 'CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n' \
-  | nc -w 2 127.0.0.1 18443 | head -1
+  | nc -w 5 127.0.0.1 18443 | head -1
 EOF
 run_task t20 -- sh -c "$CONNECT_DENIED"
 assert_eq "denied CONNECT run exit" "0" "$RC"
 assert_contains "example.com CONNECT gets 403" "403" "$OUT"
 
 step "CONNECT to a managed domain is allowed (200)"
-how "guest: printf 'CONNECT api.anthropic.com:443 ...' | nc -w 2 127.0.0.1 18443"
+how "guest: printf 'CONNECT api.anthropic.com:443 ...' | nc -w 5 127.0.0.1 18443"
 expect "response line contains 200"
 read -r -d '' CONNECT_ALLOWED <<'EOF' || true
 printf 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n' \
-  | nc -w 2 127.0.0.1 18443 | head -1
+  | nc -w 5 127.0.0.1 18443 | head -1
 EOF
 run_task t21 -- sh -c "$CONNECT_ALLOWED"
 assert_eq "allowed CONNECT run exit" "0" "$RC"
@@ -404,7 +404,7 @@ ok=0
 i=0
 while [ $i -lt 10 ]; do
   r=$(printf 'CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n' \
-      | nc -w 2 127.0.0.1 18443 | head -1)
+      | nc -w 5 127.0.0.1 18443 | head -1)
   case "$r" in *" 403"*) ok=$((ok+1));; esac
   i=$((i+1))
 done
@@ -448,6 +448,59 @@ if [[ "$LIST_AFTER" == *"t03"* ]]; then
 else
     pass "t03 gone from list"
 fi
+
+# ─── Phase 4b: cross-process lifecycle ──────────────────────────────────────
+section "phase 4b — cross-process lifecycle (list/stop from another process)"
+
+step "A foreground sandbox started elsewhere is visible to abox list"
+how "abox run --task t40 -- sleep 300 & then abox list from a fresh process"
+expect "t40 reported as running within 60s"
+"$ABOX_BIN" --repo "$REPO" --config "$CONFIG" run --task t40 -- sleep 300 \
+    >"$STATE/out-t40.stdout" 2>"$STATE/out-t40.stderr" &
+T40_PID=$!
+T40_SEEN=0
+for _ in $(seq 1 60); do
+    if "$ABOX_BIN" --repo "$REPO" --config "$CONFIG" list 2>/dev/null \
+        | grep -i "t40" | grep -qi "running"; then
+        T40_SEEN=1
+        break
+    fi
+    sleep 1
+done
+assert_eq "cross-process list shows t40 running" "1" "$T40_SEEN"
+
+step "abox stop from another process actually stops the sandbox"
+how "abox stop t40 --clean while the launching process still runs"
+expect "stop exits 0; the foreground abox run process exits within 30s"
+"$ABOX_BIN" --repo "$REPO" --config "$CONFIG" stop t40 --clean \
+    >"$STATE/stop-t40.out" 2>&1
+assert_eq "cross-process stop exit" "0" "$?"
+T40_GONE=0
+for _ in $(seq 1 30); do
+    if ! kill -0 "$T40_PID" 2>/dev/null; then
+        T40_GONE=1
+        break
+    fi
+    sleep 1
+done
+assert_eq "foreground run process exited after remote stop" "1" "$T40_GONE"
+assert_file_absent "t40 worktree removed" "$STATE/worktrees/t40"
+
+step "Detached-run supervisor removes its own pid file on natural exit"
+how "abox run --task t41 --detach -- sh -c 'exit 0'; poll run-t41.pid"
+expect "pid file gone within 60s of the run finishing"
+"$ABOX_BIN" --repo "$REPO" --config "$CONFIG" run --task t41 --detach -- sh -c 'exit 0' \
+    >"$STATE/out-t41.stdout" 2>&1
+T41_PIDFILE_GONE=0
+for _ in $(seq 1 60); do
+    if [[ ! -e "$STATE/r/run-t41.pid" ]]; then
+        T41_PIDFILE_GONE=1
+        break
+    fi
+    sleep 1
+done
+assert_eq "detached pid file self-cleaned" "1" "$T41_PIDFILE_GONE"
+"$ABOX_BIN" --repo "$REPO" --config "$CONFIG" stop t41 --clean >/dev/null 2>&1 || true
 
 # ─── Phase 5: filesystem adversarial ────────────────────────────────────────
 section "phase 5 — filesystem adversarial (escape attempts)"

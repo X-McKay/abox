@@ -15,6 +15,8 @@ use std::time::Duration;
 pub struct MockBehavior {
     /// `start()` fails with this message instead of starting.
     pub start_error: Option<String>,
+    /// `stop()` fails with this message instead of stopping.
+    pub stop_error: Option<String>,
     /// `start()` panics — for tests asserting the runtime is never used.
     pub panic_on_start: bool,
     /// Exit code `wait()` reports. `None` simulates a sandbox that died
@@ -96,6 +98,9 @@ impl SandboxRuntimePort for MockRuntime {
     }
 
     async fn stop(&self, id: &str) -> Result<()> {
+        if let Some(msg) = &self.behavior.stop_error {
+            anyhow::bail!("{msg}");
+        }
         self.state.lock().unwrap().stopped.push(id.to_string());
         Ok(())
     }

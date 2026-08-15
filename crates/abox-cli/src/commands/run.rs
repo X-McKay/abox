@@ -553,7 +553,17 @@ pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     // already-started containers would leak. Tear them down on the error path.
     // `stop_sandbox_services` is idempotent (stops by sandbox label), so this is
     // safe even if some teardown already happened.
-    let exit_code = match orchestrator.run_sandbox(params, policy, root_ca).await {
+    let run_result = orchestrator.run_sandbox(params, policy, root_ca).await;
+
+    // If this process is a detached-run supervisor, its pid file must not
+    // outlive it: a stale file would let a later `abox stop` signal a
+    // recycled PID (issue #38). Only the recorded owner removes it.
+    remove_own_pid_file(
+        &orchestrator.runtime_dir().join(format!("run-{}.pid", args.task)),
+        std::process::id(),
+    );
+
+    let exit_code = match run_result {
         Ok(code) => code,
         Err(e) => {
             if !project_services.is_empty() {
@@ -737,18 +747,44 @@ fn spawn_detached<W: WorkspacePort, R: SandboxRuntimePort>(
     Ok(())
 }
 
-/// Remove every occurrence of `--detach` from an argv list.
+/// Remove the detached-run pid file iff it records this process's own PID.
+///
+/// The re-exec'd supervisor is a plain foreground `abox run`; on completion
+/// it must clear `run-<task>.pid` so a later `abox stop` never signals a
+/// recycled PID. A pid file recording a different process is left alone —
+/// it belongs to someone else (e.g. a newer detached run).
+fn remove_own_pid_file(pid_file: &std::path::Path, own_pid: u32) {
+    let Ok(contents) = std::fs::read_to_string(pid_file) else {
+        return;
+    };
+    if contents.trim().parse::<u32>() == Ok(own_pid) {
+        let _ = std::fs::remove_file(pid_file);
+    }
+}
+
+/// Remove `--detach` from the abox-option region of an argv list — i.e.
+/// only before the first `--`. Everything after the delimiter belongs to
+/// the guest command and is preserved verbatim.
 fn strip_detach_flag(argv: &[String]) -> Vec<String> {
-    argv.iter().filter(|a| a.as_str() != "--detach").cloned().collect()
+    let mut in_guest_command = false;
+    argv.iter()
+        .filter(|a| {
+            if a.as_str() == "--" {
+                in_guest_command = true;
+            }
+            in_guest_command || a.as_str() != "--detach"
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         adapt_command_for_prompt, ensure_host_ports_allowed, ensure_host_ports_no_egress_collision,
-        ensure_managed_agent_ready, parse_env_var, parse_input_file_arg, resolve_input_files,
-        resolve_prompt_input, selected_managed_agent, strip_detach_flag, InputFileSpec, RunArgs,
-        MAX_INPUT_FILE_BYTES,
+        ensure_managed_agent_ready, parse_env_var, parse_input_file_arg, remove_own_pid_file,
+        resolve_input_files, resolve_prompt_input, selected_managed_agent, strip_detach_flag,
+        InputFileSpec, RunArgs, MAX_INPUT_FILE_BYTES,
     };
     use abox_core::config::AboxConfig;
     use abox_core::project::{EnvironmentProfile, NetworkMode, ResolvedProjectConfig};
@@ -779,6 +815,45 @@ mod tests {
     fn test_strip_detach_at_start() {
         let raw = vec!["--detach".to_string(), "run".to_string(), "--task".to_string()];
         assert_eq!(strip_detach_flag(&raw), vec!["run", "--task"]);
+    }
+
+    #[test]
+    fn test_remove_own_pid_file_removes_matching_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("run-x.pid");
+        std::fs::write(&pid_file, "1234\n").unwrap();
+        remove_own_pid_file(&pid_file, 1234);
+        assert!(!pid_file.exists(), "own pid file must be removed");
+    }
+
+    #[test]
+    fn test_remove_own_pid_file_keeps_foreign_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("run-x.pid");
+        std::fs::write(&pid_file, "9999\n").unwrap();
+        remove_own_pid_file(&pid_file, 1234);
+        assert!(pid_file.exists(), "foreign pid file must be left alone");
+    }
+
+    #[test]
+    fn test_remove_own_pid_file_missing_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        remove_own_pid_file(&dir.path().join("run-x.pid"), 1234);
+    }
+
+    #[test]
+    fn test_strip_detach_preserves_guest_detach_after_delimiter() {
+        // `--detach` after `--` belongs to the guest command and must survive.
+        let raw = vec![
+            "run".to_string(),
+            "--task".to_string(),
+            "x".to_string(),
+            "--detach".to_string(),
+            "--".to_string(),
+            "tool".to_string(),
+            "--detach".to_string(),
+        ];
+        assert_eq!(strip_detach_flag(&raw), vec!["run", "--task", "x", "--", "tool", "--detach"]);
     }
 
     #[test]
