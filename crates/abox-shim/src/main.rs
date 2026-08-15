@@ -5,8 +5,9 @@
 //!
 //! 1. Reads `argv[0]` to determine which command was requested
 //! 2. Serializes the command + args as a JSON line
-//! 3. Sends the request to the host proxy daemon over a Unix socket
-//!    (bridged from VSock by `socat` in the guest init script)
+//! 3. Sends the request to the host proxy daemon — directly over AF_VSOCK
+//!    (MicroSandbox runtime), or over a Unix socket bridged to vsock by
+//!    `socat` (legacy Cloud Hypervisor guests). See the `transport` module.
 //! 4. Reads the JSON response (exit code, stdout, stderr)
 //! 5. Prints output and exits with the proxied exit code
 //!
@@ -18,15 +19,12 @@
 //! Wire types are defined in the tiny `abox-protocol` crate (serde-only,
 //! no transitive deps) and shared with `abox-proxyd` via `abox-core`.
 
+mod transport;
+
 use abox_protocol::{ProxyRequest, ProxyResponse};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
-
-/// Unix socket path inside the VM. The guest init script bridges VSock CID 2
-/// port 5000 to this path via `socat`.
-const PROXY_SOCKET: &str = "/run/abox-proxy.sock";
 
 /// Environment variable injected into the guest by the host so the shim can
 /// attribute every request to the originating sandbox.
@@ -106,20 +104,22 @@ fn parse_args() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
 }
 
 /// Connect to the proxy daemon, send the request, and read the response.
+///
+/// The transport (direct AF_VSOCK under MicroSandbox, legacy Unix socket
+/// under Cloud Hypervisor) is declared by host-staged immutable config; see
+/// [`transport`].
 fn send_request(request: &ProxyRequest) -> Result<ProxyResponse, Box<dyn std::error::Error>> {
-    let mut stream = UnixStream::connect(PROXY_SOCKET).map_err(|e| {
-        format!("failed to connect to proxy at {PROXY_SOCKET}: {e}. Is the proxy daemon running?")
-    })?;
+    let mut stream = transport::connect(&transport::resolve_transport())?;
 
     // Send request as a single JSON line, then close the write half
     let json = serde_json::to_string(request)?;
     stream.write_all(json.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    stream.shutdown_write()?;
 
-    // Read the JSON response line
-    let mut reader = BufReader::new(&stream);
+    // Read the JSON response line (move the stream: writes are done).
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
