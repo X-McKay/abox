@@ -1,15 +1,25 @@
 //! `abox init` — guided first-run setup wizard.
 //!
-//! Walks through every prerequisite in order, offering to fix each one:
-//!   1. Check KVM access
-//!   2. Bootstrap VM artifacts (runs bootstrap_vm.sh if needed)
-//!   3. Write ~/.abox/config.toml (from the embedded example template)
-//!   4. Install the default policy file
-//!   5. Check PATH and print the export line if needed
-//!   6. Print a "you're ready" summary
+//! Walks through every prerequisite in order, offering to fix each one.
+//! Runtime-aware (ADR-008):
+//!
+//! MicroSandbox (default):
+//!   1. Check hardware virtualization (KVM / Hypervisor.framework)
+//!   2. Install MicroSandbox runtime assets (msb + libkrunfw) into $MSB_HOME
+//!   3. Generate the root CA
+//!   4. Write ~/.abox/config.toml
+//!   5. Install the default policy file
+//!   6. Detect managed-agent credentials
+//!   7. Check host-staged guest binaries + resolve requested profiles
+//!   8. Check PATH
+//!
+//! Cloud Hypervisor (deprecated fallback): the legacy bootstrap flow.
 //!
 //! All steps are idempotent — safe to re-run.
 
+use abox_core::config::{AboxConfig, RuntimeBackend};
+use abox_core::project::EnvironmentProfile;
+use abox_core::runtime::images::ImageManifest;
 use anyhow::{Context, Result};
 use crossterm::style::Stylize;
 use crossterm::tty::IsTty;
@@ -84,12 +94,91 @@ pub enum InitProfileArg {
 
 pub fn execute(args: &InitArgs) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
+
+    // init must work with a missing OR malformed config file, so a failed
+    // load falls back to defaults. The runtime backend is host-owned config
+    // (ADR-008); ABOX_RUNTIME_BACKEND overrides it.
+    let config_path = default_state_dir().join("config.toml");
+    let loaded = AboxConfig::load(&config_path).unwrap_or_else(|_| AboxConfig::default());
+    let backend = loaded.runtime.effective_backend()?;
+
     println!(
         "{}  {}",
         col_bold(&col_cyan("abox init")),
-        col_dim(&format!("v{version} — first-run setup wizard"))
+        col_dim(&format!("v{version} — first-run setup wizard (runtime: {backend})"))
     );
     println!();
+
+    match backend {
+        RuntimeBackend::Microsandbox => execute_microsandbox(args, &loaded)?,
+        RuntimeBackend::CloudHypervisor => execute_cloud_hypervisor(args)?,
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────────────
+    println!();
+    println!("  {}  Setup complete. You're ready to run your first sandbox:", col_green("✓"));
+    println!();
+    println!("  {}  cd /path/to/your/git/repo", col_dim("$"));
+    println!("  {}  abox run --task hello -- echo \"hello from inside the sandbox\"", col_dim("$"));
+    println!();
+    println!(
+        "  {}  Run {} at any time to re-check your environment.",
+        col_dim("tip"),
+        col_bold("abox doctor")
+    );
+
+    Ok(())
+}
+
+/// Setup flow for the default MicroSandbox (libkrun) runtime.
+fn execute_microsandbox(args: &InitArgs, loaded: &AboxConfig) -> Result<()> {
+    // ── Step 1: hardware virtualization ─────────────────────────────────────
+    print_step(1, "Checking hardware virtualization");
+    check_host_virtualization()?;
+
+    // ── Step 2: MicroSandbox runtime assets ──────────────────────────────────
+    print_step(2, "Checking MicroSandbox runtime assets");
+    ensure_msb_assets()?;
+
+    // ── Step 3: Root CA ──────────────────────────────────────────────────────
+    print_step(3, "Checking root CA");
+    ensure_root_ca()?;
+
+    // ── Step 4: Config file ──────────────────────────────────────────────────
+    print_step(4, "Checking config file");
+    let config_path = ensure_config_file_msb()?;
+
+    // ── Step 5: Policy file ──────────────────────────────────────────────────
+    print_step(5, "Checking policy file");
+    ensure_policy_file()?;
+
+    // ── Step 6: Credential detection ─────────────────────────────────────────
+    print_step(6, "Detecting credentials");
+    detect_credentials(&config_path, args.yes)?;
+
+    // ── Step 7: Guest binaries + profiles ────────────────────────────────────
+    print_step(7, "Checking guest binaries and profiles");
+    note_guest_binaries(&loaded.state_dir);
+    verify_profiles_resolve(&args.profiles, loaded)?;
+
+    // ── Step 8: PATH ─────────────────────────────────────────────────────────
+    print_step(8, "Checking PATH");
+    check_path();
+
+    Ok(())
+}
+
+/// Legacy setup flow for the deprecated Cloud Hypervisor fallback backend.
+fn execute_cloud_hypervisor(args: &InitArgs) -> Result<()> {
+    println!(
+        "  {}  {}",
+        col_yellow("!"),
+        col_yellow(
+            "The Cloud Hypervisor backend is deprecated (ADR-008). It remains only as\n\
+             \x20    a migration fallback; remove [runtime] backend / ABOX_RUNTIME_BACKEND\n\
+             \x20    to use the default MicroSandbox runtime."
+        )
+    );
 
     // ── Step 1: KVM ──────────────────────────────────────────────────────────
     print_step(1, "Checking KVM access");
@@ -124,19 +213,6 @@ pub fn execute(args: &InitArgs) -> Result<()> {
     print_step(8, "Checking PATH");
     check_path();
 
-    // ── Summary ──────────────────────────────────────────────────────────────
-    println!();
-    println!("  {}  Setup complete. You're ready to run your first sandbox:", col_green("✓"));
-    println!();
-    println!("  {}  cd /path/to/your/git/repo", col_dim("$"));
-    println!("  {}  abox run --task hello -- echo \"hello from inside the sandbox\"", col_dim("$"));
-    println!();
-    println!(
-        "  {}  Run {} at any time to re-check your environment.",
-        col_dim("tip"),
-        col_bold("abox doctor")
-    );
-
     Ok(())
 }
 
@@ -168,6 +244,144 @@ fn check_kvm() -> Result<()> {
             anyhow::bail!("{condition}\n\n{remediation}")
         }
     }
+}
+
+fn check_host_virtualization() -> Result<()> {
+    match crate::kvm::diagnose_host_virtualization() {
+        crate::kvm::HostVirtStatus::Available { detail } => {
+            print_ok(&detail);
+            Ok(())
+        }
+        crate::kvm::HostVirtStatus::Unavailable { condition, remediation } => {
+            anyhow::bail!("{condition}\n\n{remediation}")
+        }
+    }
+}
+
+/// Ensure msb + libkrunfw are installed under `$MSB_HOME` (default
+/// `~/.microsandbox`), downloading them via the MicroSandbox SDK if needed.
+fn ensure_msb_assets() -> Result<()> {
+    let home = crate::msb::msb_home();
+    if microsandbox::setup::is_installed() {
+        print_ok(&format!("msb + libkrunfw already present in {}", home.display()));
+        return Ok(());
+    }
+
+    print_action(&format!(
+        "Downloading MicroSandbox runtime assets (msb + libkrunfw) into {} ...",
+        home.display()
+    ));
+    crate::msb::block_on(microsandbox::setup::install())?
+        .map_err(|e| anyhow::anyhow!("MicroSandbox runtime asset installation failed: {e}"))?;
+
+    if !microsandbox::setup::is_installed() {
+        anyhow::bail!(
+            "MicroSandbox runtime assets are still missing from {} after installation.\n\
+             Expected bin/msb and lib/libkrunfw.* — check the output above, then re-run\n\
+             'abox init'.",
+            home.display()
+        );
+    }
+    print_ok(&format!("Installed msb + libkrunfw into {}", home.display()));
+    Ok(())
+}
+
+/// Informational note about host-staged guest binaries. Never fails: the
+/// official guest images bake fallback copies of abox-shim/abox-bridge.
+fn note_guest_binaries(state_dir: &Path) {
+    let dir = crate::msb::guest_binaries_dir(state_dir);
+    if crate::msb::guest_binaries_present(state_dir) {
+        print_ok(&format!("Host-staged guest binaries present: {}", dir.display()));
+    } else {
+        println!(
+            "      {}  No host-staged guest binaries in {}.\n\
+             \x20        Official guest images already include abox-shim and abox-bridge, so\n\
+             \x20        nothing else is required. To stage host-built copies (keeps the shim\n\
+             \x20        protocol in lockstep with this abox binary), run 'just build-guest-bins'.",
+            col_dim("i"),
+            dir.display()
+        );
+    }
+}
+
+/// Verify that every requested profile (plus the always-available `base`)
+/// resolves in the image manifest, and print the OCI reference that will be
+/// pulled on first use. Under MicroSandbox nothing is downloaded at init
+/// time.
+fn verify_profiles_resolve(requested: &[InitProfileArg], config: &AboxConfig) -> Result<()> {
+    let manifest = ImageManifest::embedded()?.with_overrides(config.images.overrides.clone());
+
+    let mut profiles: Vec<EnvironmentProfile> = vec![EnvironmentProfile::Base];
+    for arg in requested {
+        let profile: EnvironmentProfile = arg.as_str().parse()?;
+        if !profiles.contains(&profile) {
+            profiles.push(profile);
+        }
+    }
+
+    for profile in profiles {
+        let image = manifest.image_for_profile(profile).with_context(|| {
+            format!("profile '{profile}' has no guest image in this abox build")
+        })?;
+        print_ok(&format!("profile {profile} → {} (pulled on first use)", image.pull_reference()));
+    }
+    Ok(())
+}
+
+/// Write a MicroSandbox-flavored `~/.abox/config.toml` (no kernel/rootfs
+/// paths; documents the transitional `[runtime]` and `[images]` sections).
+fn ensure_config_file_msb() -> Result<PathBuf> {
+    let state_dir = default_state_dir();
+    let config_path = state_dir.join("config.toml");
+
+    if config_path.exists() {
+        print_ok(&format!("Config file already exists: {}", config_path.display()));
+        return Ok(config_path);
+    }
+
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("Failed to create {}", state_dir.display()))?;
+
+    let runtime_dir = state_dir.join("r");
+    let content = format!(
+        "# abox configuration — generated by 'abox init'\n\
+         # Edit to customise; see templates/config.example.toml for all options.\n\
+         \n\
+         # runtime_dir is kept short to stay within Linux's 108-byte Unix socket\n\
+         # path limit (abox appends per-sandbox suffixes to socket names).\n\
+         runtime_dir = \"{runtime_dir}\"\n\
+         \n\
+         [vm_defaults]\n\
+         memory_mib = 2048\n\
+         vcpus = 2\n\
+         \n\
+         [proxy]\n\
+         egress_port = 18443\n\
+         \n\
+         # ── Sandbox runtime (transitional; ADR-008) ─────────────────────────────\n\
+         # MicroSandbox (libkrun) is the default runtime. \"cloud-hypervisor\" remains\n\
+         # available as a deprecated migration fallback until the legacy stack is\n\
+         # deleted. The ABOX_RUNTIME_BACKEND environment variable overrides this at\n\
+         # process start. Host-owned config only — repo config can never select the\n\
+         # runtime.\n\
+         #\n\
+         # [runtime]\n\
+         # backend = \"microsandbox\"\n\
+         \n\
+         # ── Guest OCI images (MicroSandbox runtime) ─────────────────────────────\n\
+         # Environment profiles resolve to pinned OCI images via the manifest\n\
+         # embedded in this abox build. Development escape hatch (host-owned only):\n\
+         #\n\
+         # [images.overrides]\n\
+         # node = \"localhost:5000/dev-guest:latest\"\n",
+        runtime_dir = runtime_dir.display(),
+    );
+
+    std::fs::write(&config_path, content)
+        .with_context(|| format!("Failed to write {}", config_path.display()))?;
+
+    print_action(&format!("Created {}", config_path.display()));
+    Ok(config_path)
 }
 
 fn ensure_vm_artifacts(

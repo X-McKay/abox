@@ -20,6 +20,30 @@
 # Defaults to ~/.abox/r (no need to set this unless you want a different location).
 # runtime_dir = "~/.abox/r"
 
+# ─── Sandbox Runtime (transitional; ADR-008) ──────────────────────────────
+#
+# MicroSandbox (libkrun: KVM on Linux, Hypervisor.framework on macOS) is the
+# default sandbox runtime. "cloud-hypervisor" remains available as an
+# explicit, deprecated migration fallback until the legacy stack is deleted.
+# The ABOX_RUNTIME_BACKEND environment variable overrides this at process
+# start. Host-owned configuration only — repo config can never select the
+# runtime.
+#
+# [runtime]
+# backend = "microsandbox"        # default; or "cloud-hypervisor" (deprecated)
+
+# ─── Guest OCI Images (MicroSandbox runtime) ──────────────────────────────
+#
+# Environment profiles (base, node, python, python-glibc, rust) resolve to
+# pinned OCI images through the manifest embedded in each abox release —
+# users never manage image URLs directly. Images are pulled on first use.
+#
+# Development escape hatch: override the image for a profile. Host-owned
+# config only; a local absolute path is used verbatim as a rootfs.
+#
+# [images.overrides]
+# node = "localhost:5000/dev-guest:latest"
+
 [vm_defaults]
 # Memory allocation per sandbox in MiB.
 memory_mib = 2048

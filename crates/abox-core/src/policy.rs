@@ -681,6 +681,7 @@ impl PolicyEngine {
     /// Human-readable report of who enforces each credential rule
     /// (`abox project explain`).
     pub fn credential_enforcement_report(&self) -> Vec<String> {
+        use std::fmt::Write as _;
         let mut lines = Vec::new();
         for rule in &self.egress_rules {
             let source = if rule.env_var.is_some() {
@@ -699,7 +700,7 @@ impl PolicyEngine {
                 rule.execution_strategy()
             );
             if !rule.request_rules.is_empty() {
-                line.push_str(&format!("\n  request policy: {}", rule.request_rules.join("; ")));
+                let _ = write!(line, "\n  request policy: {}", rule.request_rules.join("; "));
             }
             lines.push(line);
         }

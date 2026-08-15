@@ -346,14 +346,14 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
         // filesystem broker rejects symlinked ancestors (e.g. macOS /tmp).
         let workspace_host =
             spec.workspace.host_path().canonicalize().with_context(|| {
-                format!("worktree path {:?} not found", spec.workspace.host_path())
+                format!("worktree path {} not found", spec.workspace.host_path().display())
             })?;
         builder = builder.volume("/workspace", |m| m.bind(workspace_host.display().to_string()));
         for cache in &spec.caches {
             let host = cache
                 .host_path
                 .canonicalize()
-                .with_context(|| format!("cache path {:?} not found", cache.host_path))?
+                .with_context(|| format!("cache path {} not found", cache.host_path.display()))?
                 .display()
                 .to_string();
             let read_only = cache.read_only;

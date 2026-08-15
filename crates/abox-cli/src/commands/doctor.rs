@@ -5,8 +5,10 @@
 
 use abox_core::config::{
     default_claude_host_credential_file, default_codex_host_credential_file, AboxConfig,
+    RuntimeBackend,
 };
 use abox_core::project::{image_path_for_profile, EnvironmentProfile, ProjectConfig};
+use abox_core::runtime::images::ImageManifest;
 use abox_core::util::{max_task_id_len_for_runtime_dir, TASK_ID_MAX_LEN};
 use anyhow::Result;
 use std::path::Path;
@@ -129,121 +131,141 @@ impl Check {
 
 // ── Main execute ─────────────────────────────────────────────────────────────
 
+/// Print a titled section of checks and collect them for the summary.
+fn print_and_collect(title: &str, checks: Vec<Check>, all: &mut Vec<Check>) {
+    print_section(title);
+    for c in &checks {
+        c.print();
+    }
+    all.extend(checks);
+}
+
 /// Run all doctor checks and print a summary. Returns `Ok(true)` if all
 /// checks pass (or only warnings), `Ok(false)` if any check fails.
 pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
     let version = env!("CARGO_PKG_VERSION");
+    let backend = config.runtime.effective_backend()?;
     println!(
         "{}  {}",
         col_bold(&col_cyan("abox doctor")),
-        col_dim(&format!("v{version} — environment health check"))
+        col_dim(&format!("v{version} — environment health check (runtime: {backend})"))
     );
     println!();
 
     let vm_dir = config.state_dir.join("vm");
+    let manifest = ImageManifest::embedded()?.with_overrides(config.images.overrides.clone());
+    let mut all: Vec<Check> = Vec::new();
 
-    // ── Section 1: Host ──────────────────────────────────────────────────────
-    print_section("Host");
-    let kvm = check_kvm();
-    kvm.print();
-
-    // ── Section 2: VM Stack ──────────────────────────────────────────────────
-    print_section("VM Stack");
-    let vm_checks = [
-        check_vm_artifact(&vm_dir, "cloud-hypervisor", "VMM binary"),
-        check_vm_artifact(&vm_dir, "virtiofsd", "virtiofs daemon"),
-        check_virtiofsd_caps(&vm_dir),
-        check_virtiofsd_uid_map(&vm_dir),
-        check_vm_artifact(&vm_dir, "vmlinux", "guest kernel"),
-        check_vm_artifact(&vm_dir, "rootfs.raw", "guest root filesystem"),
-        check_rootfs_freshness(&vm_dir),
-    ];
-    for c in &vm_checks {
-        c.print();
+    // ── Host + runtime sections (backend-aware) ──────────────────────────────
+    match backend {
+        RuntimeBackend::Microsandbox => {
+            print_and_collect("Host", vec![check_host_virtualization()], &mut all);
+            print_and_collect(
+                "Runtime (MicroSandbox)",
+                vec![
+                    check_msb_binary(),
+                    check_libkrunfw(),
+                    check_guest_binaries(&config.state_dir),
+                    check_image_manifest(&manifest),
+                ],
+                &mut all,
+            );
+        }
+        RuntimeBackend::CloudHypervisor => {
+            print_and_collect("Host", vec![check_kvm()], &mut all);
+            print_and_collect(
+                "VM Stack",
+                vec![
+                    check_backend_deprecation(),
+                    check_vm_artifact(&vm_dir, "cloud-hypervisor", "VMM binary"),
+                    check_vm_artifact(&vm_dir, "virtiofsd", "virtiofs daemon"),
+                    check_virtiofsd_caps(&vm_dir),
+                    check_virtiofsd_uid_map(&vm_dir),
+                    check_vm_artifact(&vm_dir, "vmlinux", "guest kernel"),
+                    check_vm_artifact(&vm_dir, "rootfs.raw", "guest root filesystem"),
+                    check_rootfs_freshness(&vm_dir),
+                ],
+                &mut all,
+            );
+        }
     }
 
-    // ── Section 3: Configuration ─────────────────────────────────────────────
-    print_section("Configuration");
-    let cfg_checks =
-        [check_config_file(config), check_policy_file(config), check_socket_path_length(config)];
-    for c in &cfg_checks {
-        c.print();
-    }
+    // ── Configuration ────────────────────────────────────────────────────────
+    print_and_collect(
+        "Configuration",
+        vec![
+            check_config_file(config),
+            check_policy_file(config),
+            check_socket_path_length(config),
+        ],
+        &mut all,
+    );
 
-    // ── Section 4: Managed Auth ──────────────────────────────────────────────
-    print_section("Managed Auth");
-    let auth_checks = [
-        check_managed_provider(
-            "Claude Code",
-            "auth.providers.claude",
-            config.auth.claude_enabled(),
-            &default_claude_host_credential_file(),
-        ),
-        check_managed_provider(
-            "Codex",
-            "auth.providers.codex",
-            config.auth.codex_enabled(),
-            &default_codex_host_credential_file(),
-        ),
-    ];
-    for c in &auth_checks {
-        c.print();
-    }
+    // ── Managed Auth ─────────────────────────────────────────────────────────
+    print_and_collect(
+        "Managed Auth",
+        vec![
+            check_managed_provider(
+                "Claude Code",
+                "auth.providers.claude",
+                config.auth.claude_enabled(),
+                &default_claude_host_credential_file(),
+            ),
+            check_managed_provider(
+                "Codex",
+                "auth.providers.codex",
+                config.auth.codex_enabled(),
+                &default_codex_host_credential_file(),
+            ),
+        ],
+        &mut all,
+    );
 
-    // ── Section 5: CA Certificate ────────────────────────────────────────────
-    print_section("CA Certificate (HTTPS Credential Injection)");
-    let ca_checks = [check_ca_files(config), check_ca_trust(config)];
-    for c in &ca_checks {
-        c.print();
-    }
+    // ── CA Certificate ───────────────────────────────────────────────────────
+    print_and_collect(
+        "CA Certificate (HTTPS Credential Injection)",
+        vec![check_ca_files(config), check_ca_trust(config)],
+        &mut all,
+    );
 
-    // ── Section 6: Agent-Specific Validation ─────────────────────────────────
-    print_section("Agent Validation");
-    let agent_checks = [
-        check_agent_credential_injection(
-            "Claude Code",
-            config.auth.claude_enabled(),
-            &abox_core::config::default_claude_host_credential_file(),
-        ),
-        check_agent_credential_injection(
-            "Codex",
-            config.auth.codex_enabled(),
-            &abox_core::config::default_codex_host_credential_file(),
-        ),
-    ];
-    for c in &agent_checks {
-        c.print();
-    }
+    // ── Agent-Specific Validation ────────────────────────────────────────────
+    print_and_collect(
+        "Agent Validation",
+        vec![
+            check_agent_credential_injection(
+                "Claude Code",
+                config.auth.claude_enabled(),
+                &abox_core::config::default_claude_host_credential_file(),
+            ),
+            check_agent_credential_injection(
+                "Codex",
+                config.auth.codex_enabled(),
+                &abox_core::config::default_codex_host_credential_file(),
+            ),
+        ],
+        &mut all,
+    );
 
-    // ── Section 7: Audit Log ─────────────────────────────────────────────────
-    print_section("Audit Log");
-    let audit_check = check_audit_log(config);
-    audit_check.print();
+    // ── Audit Log ────────────────────────────────────────────────────────────
+    print_and_collect("Audit Log", vec![check_audit_log(config)], &mut all);
 
-    // ── Section 8: Environment ───────────────────────────────────────────────
-    print_section("Environment");
-    let env_check = check_local_bin_on_path(&vm_dir);
-    env_check.print();
-    let installed_profiles = check_installed_guest_profiles(config);
-    installed_profiles.print();
-    let repo_profile = check_repo_requested_profile(config, repo_root);
-    repo_profile.print();
+    // ── Environment ──────────────────────────────────────────────────────────
+    let env_checks = match backend {
+        RuntimeBackend::Microsandbox => vec![
+            check_profile_image_resolution(&manifest),
+            check_repo_requested_profile_msb(repo_root, &manifest),
+        ],
+        RuntimeBackend::CloudHypervisor => vec![
+            check_local_bin_on_path(&vm_dir),
+            check_installed_guest_profiles(config),
+            check_repo_requested_profile(config, repo_root),
+        ],
+    };
+    print_and_collect("Environment", env_checks, &mut all);
 
     // ── Summary ──────────────────────────────────────────────────────────────
-    let all_checks: Vec<&Check> = std::iter::once(&kvm)
-        .chain(vm_checks.iter())
-        .chain(cfg_checks.iter())
-        .chain(auth_checks.iter())
-        .chain(ca_checks.iter())
-        .chain(agent_checks.iter())
-        .chain(std::iter::once(&audit_check))
-        .chain(std::iter::once(&env_check))
-        .chain(std::iter::once(&installed_profiles))
-        .chain(std::iter::once(&repo_profile))
-        .collect();
-
-    let failures = all_checks.iter().filter(|c| c.is_fail()).count();
-    let warnings = all_checks.iter().filter(|c| c.is_warn()).count();
+    let failures = all.iter().filter(|c| c.is_fail()).count();
+    let warnings = all.iter().filter(|c| c.is_warn()).count();
 
     println!();
     if failures == 0 && warnings == 0 {
@@ -278,6 +300,186 @@ fn check_kvm() -> Check {
         crate::kvm::KvmStatus::Unavailable { condition, remediation } => {
             Check::fail(condition, remediation)
         }
+    }
+}
+
+// ── MicroSandbox runtime checks (ADR-008) ────────────────────────────────────
+
+fn check_host_virtualization() -> Check {
+    match crate::kvm::diagnose_host_virtualization() {
+        crate::kvm::HostVirtStatus::Available { detail } => {
+            Check::ok_with("Hardware virtualization", detail)
+        }
+        crate::kvm::HostVirtStatus::Unavailable { condition, remediation } => {
+            Check::fail(condition, remediation)
+        }
+    }
+}
+
+fn check_backend_deprecation() -> Check {
+    Check::warn(
+        "Cloud Hypervisor backend is deprecated",
+        "The Cloud Hypervisor stack is a transitional migration fallback only\n\
+         (see docs/decisions/008-microsandbox-runtime-and-product-boundary.md).\n\
+         Remove [runtime] backend / ABOX_RUNTIME_BACKEND to use the default\n\
+         MicroSandbox runtime.",
+    )
+}
+
+fn check_msb_binary() -> Check {
+    let label = "msb binary";
+    match crate::msb::find_msb_binary() {
+        Some(path) => Check::ok_with(label, path.display().to_string()),
+        None => Check::fail(
+            label,
+            format!(
+                "msb not found at {} or on PATH.\n\
+                 Run 'abox init' to download the MicroSandbox runtime assets\n\
+                 into {} (set MSB_HOME to relocate them).",
+                crate::msb::msb_binary().display(),
+                crate::msb::msb_home().display(),
+            ),
+        ),
+    }
+}
+
+fn check_libkrunfw() -> Check {
+    let label = "libkrunfw guest firmware";
+    let lib_dir = crate::msb::msb_home().join("lib");
+    let files = crate::msb::libkrunfw_files();
+    if files.is_empty() {
+        Check::fail(
+            label,
+            format!(
+                "No libkrunfw.* found in {}.\n\
+                 Run 'abox init' to download the MicroSandbox runtime assets.",
+                lib_dir.display()
+            ),
+        )
+    } else {
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        Check::ok_with(label, format!("{} ({})", lib_dir.display(), names.join(", ")))
+    }
+}
+
+fn check_guest_binaries(state_dir: &Path) -> Check {
+    let label = "Host-staged guest binaries (abox-shim, abox-bridge)";
+    let dir = crate::msb::guest_binaries_dir(state_dir);
+    if crate::msb::guest_binaries_present(state_dir) {
+        Check::ok_with(label, dir.display().to_string())
+    } else {
+        Check::warn(
+            label,
+            format!(
+                "Not found in {}.\n\
+                 Official guest images bake fallback copies of abox-shim/abox-bridge,\n\
+                 so sandboxes still work — host-staged copies keep the shim protocol\n\
+                 in lockstep with this abox binary. Stage them with 'just build-guest-bins'.",
+                dir.display()
+            ),
+        )
+    }
+}
+
+fn check_image_manifest(manifest: &ImageManifest) -> Check {
+    let label = "Guest image manifest (profile → OCI image)";
+    let report = crate::msb::manifest_report(manifest);
+    let listing = report.lines.join("\n");
+    if !report.missing.is_empty() {
+        Check::fail(
+            label,
+            format!(
+                "{listing}\n\
+                 No image mapping for: {}. Add an [images.overrides] entry in\n\
+                 ~/.abox/config.toml or upgrade abox.",
+                report.missing.join(", ")
+            ),
+        )
+    } else if !report.unpinned.is_empty() {
+        Check::warn(
+            label,
+            format!(
+                "{listing}\n\
+                 Unpinned (tag-addressed) profiles: {}. Digest pins are filled in\n\
+                 by the image publish workflow; tag references are not content-addressed.",
+                report.unpinned.join(", ")
+            ),
+        )
+    } else {
+        Check::ok_with(label, listing)
+    }
+}
+
+/// Environment-section summary under the MicroSandbox backend: profiles are
+/// backed by OCI images pulled on first use, not locally installed rootfs
+/// files.
+fn check_profile_image_resolution(manifest: &ImageManifest) -> Check {
+    let label = "Guest profiles";
+    let report = crate::msb::manifest_report(manifest);
+    if report.missing.is_empty() {
+        Check::ok_with(
+            label,
+            "all profiles resolve to OCI images (pulled on first use):\n".to_string()
+                + &report.lines.join("\n"),
+        )
+    } else {
+        Check::fail(
+            label,
+            format!(
+                "profiles without an image mapping: {}\n{}",
+                report.missing.join(", "),
+                report.lines.join("\n")
+            ),
+        )
+    }
+}
+
+fn check_repo_requested_profile_msb(repo_root: &Path, manifest: &ImageManifest) -> Check {
+    let label = "Current repo environment profile";
+    let config_path = ProjectConfig::default_path(repo_root);
+    let loaded = match ProjectConfig::load(repo_root) {
+        Ok(config) => config,
+        Err(err) => {
+            return Check::warn(
+                label,
+                format!(
+                    "Failed to load {}.\nRun `abox project validate` for details.\n{err:#}",
+                    config_path.display()
+                ),
+            )
+        }
+    };
+
+    let Some(project) = loaded else {
+        return Check::ok_with(label, "no repo config found; base profile will be used");
+    };
+
+    let resolved = match project.resolve(repo_root) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            return Check::warn(
+                label,
+                format!(
+                    "Failed to resolve {}.\nRun `abox project validate` for details.\n{err:#}",
+                    config_path.display()
+                ),
+            )
+        }
+    };
+
+    let profile = resolved.environment_profile;
+    match manifest.image_for_profile(profile) {
+        Ok(image) => Check::ok_with(
+            label,
+            format!("{profile} → {} (pulled on first use)", image.pull_reference()),
+        ),
+        Err(err) => Check::fail(
+            label,
+            format!("Repo requests '{profile}' but no guest image resolves for it.\n{err:#}"),
+        ),
     }
 }
 

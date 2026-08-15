@@ -2,6 +2,7 @@
 
 mod commands;
 mod kvm;
+mod msb;
 mod tui;
 mod virtiofsd;
 

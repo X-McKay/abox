@@ -1,10 +1,98 @@
-//! Shared KVM diagnostics used by both `abox init` and `abox doctor`.
+//! Shared host-virtualization diagnostics used by both `abox init` and
+//! `abox doctor`.
 //!
-//! Detects *why* KVM is unavailable and returns actionable remediation
-//! guidance tailored to the specific environment (bare metal, container,
-//! WSL2, nested VM).
+//! On Linux this detects *why* KVM is unavailable and returns actionable
+//! remediation guidance tailored to the specific environment (bare metal,
+//! container, WSL2, nested VM). On macOS it checks Hypervisor.framework
+//! support (`sysctl kern.hv_support`) on Apple Silicon, which is what the
+//! MicroSandbox (libkrun) runtime uses.
 
 use std::path::Path;
+
+/// Result of a host-virtualization check (KVM on Linux,
+/// Hypervisor.framework on macOS).
+#[derive(Debug)]
+pub enum HostVirtStatus {
+    /// Hardware virtualization is usable.
+    Available { detail: String },
+    /// Virtualization is not usable; includes condition and remediation.
+    Unavailable { condition: String, remediation: String },
+}
+
+/// Diagnose host virtualization for the MicroSandbox (libkrun) runtime:
+/// `/dev/kvm` on Linux, Hypervisor.framework on macOS.
+pub fn diagnose_host_virtualization() -> HostVirtStatus {
+    #[cfg(target_os = "macos")]
+    {
+        diagnose_macos_hypervisor()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        match diagnose_kvm() {
+            KvmStatus::Available => {
+                HostVirtStatus::Available { detail: "/dev/kvm is accessible".into() }
+            }
+            KvmStatus::Unavailable { condition, remediation } => {
+                HostVirtStatus::Unavailable { condition, remediation }
+            }
+        }
+    }
+}
+
+/// macOS: libkrun requires Apple Silicon and Hypervisor.framework
+/// (`kern.hv_support` = 1).
+#[cfg(target_os = "macos")]
+fn diagnose_macos_hypervisor() -> HostVirtStatus {
+    if std::env::consts::ARCH != "aarch64" {
+        return HostVirtStatus::Unavailable {
+            condition: format!(
+                "macOS on {} — the MicroSandbox runtime requires Apple Silicon (arm64)",
+                std::env::consts::ARCH
+            ),
+            remediation: "Run abox on an Apple Silicon Mac or a Linux host with KVM.".into(),
+        };
+    }
+    match std::process::Command::new("sysctl").args(["-n", "kern.hv_support"]).output() {
+        Ok(out) if out.status.success() => {
+            let value = String::from_utf8_lossy(&out.stdout);
+            if parse_hv_support(&value) {
+                HostVirtStatus::Available {
+                    detail: "Hypervisor.framework available (kern.hv_support = 1, arm64)".into(),
+                }
+            } else {
+                HostVirtStatus::Unavailable {
+                    condition: format!(
+                        "Hypervisor.framework unavailable (kern.hv_support = {})",
+                        value.trim()
+                    ),
+                    remediation:
+                        "Virtualization is disabled on this Mac. If this is a VM, enable\n\
+                         nested virtualization on the host hypervisor; on bare metal this\n\
+                         usually indicates an MDM restriction."
+                            .into(),
+                }
+            }
+        }
+        Ok(out) => HostVirtStatus::Unavailable {
+            condition: format!(
+                "sysctl kern.hv_support failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            remediation: "Run 'sysctl kern.hv_support' manually; expected value is 1.".into(),
+        },
+        Err(err) => HostVirtStatus::Unavailable {
+            condition: format!("failed to run sysctl: {err}"),
+            remediation: "Run 'sysctl kern.hv_support' manually; expected value is 1.".into(),
+        },
+    }
+}
+
+/// Parse `sysctl -n kern.hv_support` output: virtualization is available
+/// when the trimmed value is exactly "1".
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_hv_support(output: &str) -> bool {
+    output.trim() == "1"
+}
 
 /// Result of a KVM availability check.
 #[derive(Debug)]
@@ -119,6 +207,28 @@ mod tests {
     #[test]
     fn wsl2_detection_does_not_panic() {
         let _ = is_wsl2();
+    }
+
+    #[test]
+    fn hv_support_parsing() {
+        assert!(parse_hv_support("1"));
+        assert!(parse_hv_support("1\n"));
+        assert!(parse_hv_support("  1  "));
+        assert!(!parse_hv_support("0"));
+        assert!(!parse_hv_support("0\n"));
+        assert!(!parse_hv_support(""));
+        assert!(!parse_hv_support("11"));
+    }
+
+    #[test]
+    fn host_virtualization_diagnostic_is_concrete() {
+        match diagnose_host_virtualization() {
+            HostVirtStatus::Available { detail } => assert!(!detail.is_empty()),
+            HostVirtStatus::Unavailable { condition, remediation } => {
+                assert!(!condition.is_empty());
+                assert!(!remediation.is_empty());
+            }
+        }
     }
 
     #[test]
