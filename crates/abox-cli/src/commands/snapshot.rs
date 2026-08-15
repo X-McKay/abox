@@ -1,5 +1,12 @@
 //! `abox snapshot` — User-facing workspace snapshot management.
 //!
+//! **Deprecated with the legacy runtime (ADR-008):** memory snapshots are a
+//! Cloud Hypervisor capability. The MicroSandbox runtime does not implement
+//! memory checkpoints — `create`/`restore` fail with a clear error there —
+//! and the durable task model is `git + workspace + warmed environment`
+//! (`abox env warm`) instead. This command is removed together with the
+//! legacy backend.
+//!
 //! Exposes Cloud Hypervisor's VM snapshot capabilities through a friendly CLI.
 //! Snapshots capture the full VM state (memory + disk) at a point in time and
 //! can be used to restore a sandbox to a known-good state.

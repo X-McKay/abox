@@ -25,10 +25,14 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             arch: x86_64
-          # aarch64 support to be added after N7 lands
-          # - target: aarch64-unknown-linux-gnu
-          #   os: ubuntu-24.04-arm
-          #   arch: aarch64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            arch: aarch64
+          # macOS (Apple Silicon) host support arrives with the MicroSandbox
+          # runtime (ADR-008): libkrun uses Hypervisor.framework.
+          - target: aarch64-apple-darwin
+            os: macos-14
+            arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -47,6 +51,50 @@ jobs:
           name: abox-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/abox
 
+  # Static musl guest binaries (abox-shim + abox-bridge) staged by
+  # `abox init` under ~/.abox/guest/<arch>/ so shim protocol stays in
+  # lockstep with the released host binary (the OCI guest images bake
+  # fallback copies). One tarball per guest architecture.
+  guest-binaries:
+    name: Guest binaries (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: guest-bins-${{ matrix.target }}
+
+      - name: Build static guest binaries
+        run: |
+          RUSTFLAGS="-C linker=rust-lld -C link-self-contained=yes" \
+            cargo build --release --target ${{ matrix.target }} -p abox-shim
+
+      - name: Create guest binaries tarball
+        run: |
+          mkdir -p guest-bins
+          cp target/${{ matrix.target }}/release/abox-shim \
+             target/${{ matrix.target }}/release/abox-bridge guest-bins/
+          tar czf abox-guest-bins-${{ matrix.arch }}.tar.gz -C guest-bins .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: abox-guest-bins-${{ matrix.arch }}
+          path: abox-guest-bins-${{ matrix.arch }}.tar.gz
+
+  # Legacy Cloud Hypervisor VM assets — transitional (ADR-008); removed
+  # together with the deprecated backend.
   vm-assets:
     name: Bundle VM assets (${{ matrix.arch }})
     strategy:
@@ -81,7 +129,7 @@ jobs:
     name: Publish GitHub Release
     # Skip publishing on dry-run (workflow_dispatch with dry_run=true).
     if: ${{ !inputs.dry_run }}
-    needs: [build, vm-assets]
+    needs: [build, guest-binaries, vm-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -94,12 +142,15 @@ jobs:
         run: |
           mkdir -p release
           # Copy binaries — rename to include target
-          for dir in artifacts/abox-*-unknown-linux-*; do
+          for dir in artifacts/abox-*-unknown-linux-*gnu artifacts/abox-*-apple-darwin; do
+            [ -d "$dir" ] || continue
             target="$(basename "$dir")"
             cp "$dir/abox" "release/$target"
             chmod +x "release/$target"
           done
-          # Copy VM asset tarballs
+          # Copy guest binary tarballs (staged by `abox init`)
+          cp artifacts/abox-guest-bins-*/abox-guest-bins-*.tar.gz release/
+          # Copy legacy VM asset tarballs (transitional; ADR-008)
           cp artifacts/abox-vm-assets-*/abox-vm-assets-*.tar.gz release/
 
       - name: Generate SHA256SUMS

@@ -1,4 +1,9 @@
 //! `abox template` — Manage VM snapshot templates.
+//!
+//! **Deprecated with the legacy runtime (ADR-008):** templates are memory
+//! snapshots, a Cloud Hypervisor capability the MicroSandbox runtime does
+//! not implement (`create` fails with a clear error there). Environment
+//! warming (`abox env warm`) is the replacement for fast starts.
 
 use super::validate_task_arg;
 use abox_core::config::AboxConfig;

@@ -5,7 +5,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
-    # Include label events so adding/removing `vm-attested` re-runs the
+    # Include label events so adding/removing `runtime-attested` re-runs the
     # attestation check. Without this, the check uses the original event's
     # label list and misses later label operations.
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
@@ -32,6 +32,15 @@ jobs:
 
       - name: Install just
         uses: extractions/setup-just@v2
+
+      # The microsandbox crate's build script installs the msb runtime bundle
+      # into ~/.microsandbox on first build; cache it so CI doesn't
+      # re-download it every run.
+      - name: Cache MicroSandbox runtime bundle
+        uses: actions/cache@v4
+        with:
+          path: ~/.microsandbox
+          key: msb-runtime-${{ runner.os }}-0.6.9
 
       - name: just check (fmt + clippy + test)
         run: just check
@@ -79,8 +88,8 @@ jobs:
         # prints "skipped: VM artifacts not found" and continues.
         run: ./scripts/local/e2e_test.sh
 
-  vm-attestation:
-    name: VM attestation (label required when VM paths touched)
+  runtime-attestation:
+    name: Runtime attestation (label required when runtime paths touched)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -89,13 +98,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect VM-touching paths
+      - name: Detect runtime-touching paths
         id: filter
         uses: dorny/paths-filter@v3
         with:
           filters: |
-            vm:
+            runtime:
               - 'guest/**'
+              - 'images/**'
               - 'scripts/build_rootfs.sh'
               - 'scripts/bootstrap_vm.sh'
               - 'crates/abox-core/**'
@@ -104,25 +114,28 @@ jobs:
               - 'crates/abox-shim/**'
               - 'templates/config.example.toml'
 
-      - name: Enforce vm-attested label when VM paths touched
-        if: steps.filter.outputs.vm == 'true'
+      - name: Enforce runtime-attested label when runtime paths touched
+        if: steps.filter.outputs.runtime == 'true'
         uses: actions/github-script@v8
         with:
           script: |
             const labels = context.payload.pull_request.labels.map(l => l.name);
-            if (!labels.includes('vm-attested')) {
+            // `vm-attested` is accepted as a legacy alias during the
+            // ADR-008 migration.
+            if (!labels.includes('runtime-attested') && !labels.includes('vm-attested')) {
               core.setFailed(
-                'This PR touches VM/guest/proxy code. Run `just e2e-vm` locally, ' +
-                'then add the `vm-attested` label and comment with the timestamp. ' +
-                'See docs/contributing/pre-pr-checklist.md.'
+                'This PR touches runtime/guest/broker code. Run `just e2e-runtime` ' +
+                '(and `just e2e-vm` if the legacy backend is affected) locally, ' +
+                'then add the `runtime-attested` label and comment with the ' +
+                'timestamp. See docs/contributing/pre-pr-checklist.md.'
               );
             } else {
-              core.info('vm-attested label present. Trust-but-post-a-timestamp-comment.');
+              core.info('runtime attestation label present. Trust-but-post-a-timestamp-comment.');
             }
 
-      - name: No-op when VM paths untouched
-        if: steps.filter.outputs.vm != 'true'
-        run: echo "No VM-touching paths in this PR; attestation not required."
+      - name: No-op when runtime paths untouched
+        if: steps.filter.outputs.runtime != 'true'
+        run: echo "No runtime-touching paths in this PR; attestation not required."
 
   doc-staleness-reminder:
     name: doc staleness reminder (advisory)
@@ -146,6 +159,7 @@ jobs:
               - 'scripts/**'
               - 'templates/**'
               - 'guest/**'
+              - 'images/**'
               - 'justfile'
               - '.github/workflows/**'
             docs:
