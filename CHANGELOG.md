@@ -1,7 +1,5 @@
 # Changelog
 
-## Unreleased
-
 ### MicroSandbox runtime migration (ADR-008)
 
 abox's sandbox substrate migrates from a bespoke Cloud Hypervisor stack to
