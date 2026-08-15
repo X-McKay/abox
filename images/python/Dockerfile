@@ -3,7 +3,7 @@
 #
 # Consumed by the MicroSandbox runtime (ADR-008). MicroSandbox provides PID 1
 # (agentd) and user switching via its exec API, so this image deliberately
-# ships NO init system, kernel, socat, or su-exec. The transport declaration
+# ships no init system or kernel. The transport declaration
 # (/etc/abox/transport) is written at runtime by the abox adapter — never
 # baked in here.
 #
@@ -15,7 +15,7 @@
 FROM alpine:3.19@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1
 
 # Agent CLI pins — MUST stay in sync with the other profile Dockerfiles in
-# images/ (and, while it still exists, scripts/build_rootfs.sh).
+# images/.
 ARG CLAUDE_VERSION=2.1.177
 ARG CODEX_VERSION=0.139.0
 
@@ -30,14 +30,13 @@ RUN set -eux; \
         "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}" \
         --loglevel=error; \
-    # Normalize npm bin shebangs to `env node` (parity with build_rootfs.sh).
+    # Normalize npm bin shebangs to `env node` so they run on any PATH layout.
     find /usr/local/bin -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +; \
     npm cache clean --force 2>/dev/null || true; \
     rm -rf /root/.npm
 
-# uv/uvx on PATH — installed via pip in a throwaway venv, exactly as
-# build_rootfs.sh does, so the binaries land in /usr/local/bin without
-# leaving the venv behind.
+# uv/uvx on PATH — installed via pip in a throwaway venv so the binaries
+# land in /usr/local/bin without leaving the venv behind.
 RUN set -eux; \
     python3 -m venv /tmp/uv-venv; \
     /tmp/uv-venv/bin/pip install --no-cache-dir uv; \

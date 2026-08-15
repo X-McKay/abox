@@ -236,14 +236,14 @@ if [[ "$FILTER" == "all" || "$FILTER" == "codex" ]]; then
     c1_run 1
     # Match "6" as a standalone word/number (not in timestamps or log lines)
     if grep -P '^\s*6\s*$|^.*codex.*\n6$' "$LOG" >/dev/null 2>&1 || \
-       grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
+       grep -v "INFO\|WARN\|ERROR\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
         pass "C1: single-turn smoke"
     else
         echo "  retrying C1 in 5s..."
         sleep 5
         c1_run 2
         if grep -P '^\s*6\s*$|^.*codex.*\n6$' "$LOG" >/dev/null 2>&1 || \
-           grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
+           grep -v "INFO\|WARN\|ERROR\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
             pass "C1: single-turn smoke (retry)"
         else
             fail "C1: single-turn smoke" "see $LOG"
@@ -258,13 +258,13 @@ if [[ "$FILTER" == "all" || "$FILTER" == "codex" ]]; then
     }
     c2_run 1
     # Filter out log noise, then look for content words from the README
-    if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
+    if grep -v "INFO\|WARN\|ERROR\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
         pass "C2: multi-turn tool use"
     else
         echo "  retrying C2 in 5s..."
         sleep 5
         c2_run 2
-        if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
+        if grep -v "INFO\|WARN\|ERROR\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
             pass "C2: multi-turn tool use (retry)"
         else
             fail "C2: multi-turn tool use" "see $LOG"

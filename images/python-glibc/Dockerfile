@@ -5,7 +5,7 @@
 # wheels or other glibc-linked tooling. Mirrors scripts/glibc/
 # python-glibc.Dockerfile minus the raw-rootfs plumbing: the MicroSandbox
 # runtime provides PID 1 (agentd) and user switching via its exec API, so
-# this image deliberately ships NO init system, kernel, socat, gosu/su-exec,
+# this image deliberately ships no init system, kernel,
 # or busybox poweroff applets. The transport declaration (/etc/abox/transport)
 # is written at runtime by the abox adapter — never baked in here.
 #
@@ -40,7 +40,7 @@ RUN set -eux; \
 # Agent CLIs (Claude Code + Codex) — installed with the Debian/glibc npm so
 # their per-platform native/vendored binaries are glibc-linked, not the musl
 # variants. Pins MUST stay in sync with the other profile Dockerfiles in
-# images/ (and, while it still exists, scripts/build_rootfs.sh).
+# images/.
 ARG CLAUDE_VERSION=2.1.177
 ARG CODEX_VERSION=0.139.0
 RUN set -eux; \
@@ -48,7 +48,7 @@ RUN set -eux; \
         "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}" \
         --loglevel=error; \
-    # Normalize npm bin shebangs to `env node` (parity with build_rootfs.sh).
+    # Normalize npm bin shebangs to `env node` so they run on any PATH layout.
     find /usr/local/bin -type f -exec sed -i '1s|^#!.*node$|#!/usr/bin/env node|' {} +; \
     npm cache clean --force 2>/dev/null || true; \
     rm -rf /root/.npm
