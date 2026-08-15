@@ -156,7 +156,7 @@ REPO="$STATE/repo"
 CONFIG="$STATE/config.toml"
 AUDIT="$STATE/logs/audit.jsonl"
 
-ALL_TASKS=(t01 t02 t03 t04a t04b t05 t06 t10 t11 t12 t20 t21 t22)
+ALL_TASKS=(t01 t02 t03 t04a t04b t05 t06 t10 t11 t12 t20 t21 t22 t30 t31 t32 t33)
 
 cleanup() {
     # Best-effort teardown of anything the suite left behind.
@@ -166,7 +166,10 @@ cleanup() {
                 >/dev/null 2>&1 || true
         done
     fi
-    rm -rf "$STATE"
+    # MSB_E2E_KEEP=1 preserves the state dir for post-mortem debugging.
+    if [[ -z "${MSB_E2E_KEEP:-}" ]]; then
+        rm -rf "$STATE"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -445,6 +448,58 @@ if [[ "$LIST_AFTER" == *"t03"* ]]; then
 else
     pass "t03 gone from list"
 fi
+
+# ─── Phase 5: filesystem adversarial ────────────────────────────────────────
+section "phase 5 — filesystem adversarial (escape attempts)"
+
+step "Host filesystem is invisible to the guest"
+how "guest stats a host-only path (this state dir) and the host home dir"
+expect "both absent in the guest"
+run_task t30 --ephemeral -- sh -c "ls '$STATE' >/dev/null 2>&1 && echo HOST-STATE-VISIBLE; ls /Users >/dev/null 2>&1 && echo HOST-USERS-VISIBLE; echo FS-PROBE-DONE"
+assert_eq "fs probe run exit" "0" "$RC"
+assert_contains "fs probe completed" "FS-PROBE-DONE" "$OUT"
+if [[ "$OUT" == *"HOST-STATE-VISIBLE"* || "$OUT" == *"HOST-USERS-VISIBLE"* ]]; then
+    fail "host filesystem invisible" "guest can see host paths: $OUT"
+else
+    pass "host filesystem invisible"
+fi
+
+step "Absolute symlink in the worktree resolves guest-side, not host-side"
+how "host plants 'hostlink' -> /etc/os-release in the worktree; guest reads it"
+expect "guest sees its own /etc/os-release (Alpine), never host content"
+ln -sfn /etc/os-release "$REPO/hostlink" 2>/dev/null || true
+git -C "$REPO" add -A >/dev/null 2>&1 && git -C "$REPO" commit -qm symlink >/dev/null 2>&1
+HOST_OS_RELEASE="$(cat /etc/os-release 2>/dev/null || echo NO-HOST-OS-RELEASE)"
+run_task t31 --ephemeral -- sh -c 'cat /workspace/hostlink 2>/dev/null || echo LINK-UNREADABLE'
+assert_eq "symlink probe run exit" "0" "$RC"
+if [[ "$HOST_OS_RELEASE" != "NO-HOST-OS-RELEASE" && "$OUT" == *"$HOST_OS_RELEASE"* ]]; then
+    fail "symlink resolves guest-side" "guest read HOST /etc/os-release through the bind mount"
+elif [[ "$OUT" == *"Alpine"* || "$OUT" == *"LINK-UNREADABLE"* || "$OUT" == *"alpine"* ]]; then
+    pass "symlink resolves guest-side"
+else
+    fail "symlink resolves guest-side" "unexpected output: $OUT"
+fi
+rm -f "$REPO/hostlink"
+git -C "$REPO" add -A >/dev/null 2>&1 && git -C "$REPO" commit -qm rm-symlink >/dev/null 2>&1
+
+step "Path traversal out of /workspace stays inside the guest"
+how "guest lists /workspace/../ and checks for host worktree siblings"
+expect "parent is the guest root, not the host worktrees dir"
+run_task t32 --ephemeral -- sh -c 'ls /workspace/../ 2>/dev/null; ls /workspace/../t01 >/dev/null 2>&1 && echo SIBLING-WORKTREE-VISIBLE; echo TRAVERSE-DONE'
+assert_eq "traversal probe run exit" "0" "$RC"
+assert_contains "traversal probe completed" "TRAVERSE-DONE" "$OUT"
+if [[ "$OUT" == *"SIBLING-WORKTREE-VISIBLE"* ]]; then
+    fail "no sibling worktree via traversal" "guest reached another task's worktree"
+else
+    pass "no sibling worktree via traversal"
+fi
+
+step "Host-staged transport declaration is read-only for the agent"
+how "guest (uid 1000) appends to /etc/abox/transport"
+expect "write fails; file content unchanged"
+run_task t33 --ephemeral -- sh -c 'BEFORE=$(cat /etc/abox/transport); { echo tampered >> /etc/abox/transport; } 2>/dev/null; AFTER=$(cat /etc/abox/transport); [ "$BEFORE" = "$AFTER" ] && echo TRANSPORT-IMMUTABLE || echo TRANSPORT-TAMPERED'
+assert_eq "transport probe run exit" "0" "$RC"
+assert_contains "transport declaration immutable for agent" "TRANSPORT-IMMUTABLE" "$OUT"
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 section "summary"
