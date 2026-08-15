@@ -158,10 +158,19 @@ fn guest_setup_script(spec: &SandboxRuntimeSpec, chown_user: &str) -> String {
     // the mount's metadata overlay; host inodes keep their owner.
     script.push_str("mkdir -p /home/abox\n");
     let _ = writeln!(script, "chown {chown_user} /home/abox");
-    let _ = writeln!(script, "chown -R {chown_user} /workspace");
+    // Skip symlink entries: the workspace and caches are agent/repo-
+    // controlled, so a planted symlink must never make setup chown its
+    // target — and chowning the link itself fails (ELOOP) under the Linux
+    // virtiofs backend. Symlink ownership is irrelevant to the agent
+    // (link perms are ignored; unlinking needs only parent-dir write).
+    let _ = writeln!(script, "find /workspace ! -type l -exec chown {chown_user} {{}} +");
     for cache in &spec.caches {
         if !cache.read_only {
-            let _ = writeln!(script, "chown -R {chown_user} {}", sh_escape(&cache.guest_path));
+            let _ = writeln!(
+                script,
+                "find {} ! -type l -exec chown {chown_user} {{}} +",
+                sh_escape(&cache.guest_path)
+            );
         }
     }
 
@@ -732,7 +741,7 @@ mod tests {
             content: b"{}".to_vec(),
         });
         let script = guest_setup_script(&spec, "1000:1000");
-        assert!(script.contains("chown -R 1000:1000 /workspace"));
+        assert!(script.contains("find /workspace ! -type l -exec chown 1000:1000 {} +"));
         assert!(script.contains("cp /abox-meta/root.crt /etc/ssl/certs/abox-ca.pem"));
         assert!(script.contains("'/abox-meta/credentials/0'"));
         assert!(script.contains("chmod '0600'"));
