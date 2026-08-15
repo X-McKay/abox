@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.7.0 — 2026-08-15
+
+### Features
+
+- refactor!: MicroSandbox runtime migration (ADR-008): single-runtime end state (ca12ca8)
+
+### Fixes
+
+- fix(glibc): ship poweroff so python-glibc VMs shut down cleanly (#32) (48fa89e)
+
+### Refactoring
+
+- refactor!: MicroSandbox runtime migration (ADR-008): single-runtime end state (ca12ca8)
+
+### Chores
+
+- chore(deps): bump crossbeam-epoch to 0.9.20 (RUSTSEC-2026-0204) (#33) (4f30fda)
+
+
 ### MicroSandbox runtime migration (ADR-008)
 
 abox's sandbox substrate migrates from a bespoke Cloud Hypervisor stack to
