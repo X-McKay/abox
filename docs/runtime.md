@@ -146,8 +146,8 @@ binary at compile time; repos select a *profile*, never an image reference.
 - `digest = "sha256:…"` pins exact image content; the publish workflow
   (`.github/workflows/images.yml`) fills digests in after each build. An
   empty digest means "not yet published": abox resolves the profile by tag
-  and `abox doctor` reports it as unpinned. As of this writing the images
-  have not yet been published, so all digests are unpinned.
+  and `abox doctor` reports it as unpinned. The 0.7 image series is
+  published to `ghcr.io/x-mckay` with all profile digests pinned.
 - `[images.overrides]` in `~/.abox/config.toml` is a development escape
   hatch mapping a profile to an arbitrary reference (or a local rootfs path,
   used verbatim). Host-owned config only — repo config can never choose an
