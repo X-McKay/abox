@@ -1,6 +1,12 @@
 # Future Work and Roadmap
 
-**Last updated:** 2026-04-12 (credential forwarding feature landed)
+**Last updated:** 2026-08-15 (MicroSandbox migration decision — see ADR-008)
+
+> **Strategic note (2026-08-15):** abox is migrating its sandbox substrate to
+> MicroSandbox and will stop maintaining a bespoke microVM stack. See
+> [ADR-008](decisions/008-microsandbox-runtime-and-product-boundary.md).
+> Items below that expand the Cloud Hypervisor/virtiofsd/kernel/rootfs
+> substrate are **superseded** and marked accordingly; do not invest in them.
 
 This document is the **forward-looking** companion to
 [`docs/backlog/2026-04-08-vm-e2e-mvp-followups.md`](backlog/2026-04-08-vm-e2e-mvp-followups.md).
@@ -49,18 +55,21 @@ Closed the remaining gap in the OAuth tool authentication story:
 
 ## TL;DR — recommended priority order
 
-1. **CI runner with `/dev/kvm`** — Phases 6-7 of e2e only run when
-   VM artifacts are present. A self-hosted runner or scheduled nightly
-   job would catch regressions in the VM boot path.
-2. **F5** — TUI dashboard refresh. Cosmetic; nice-to-have.
-3. **aarch64 SHA verification** — N7 parameterized bootstrap for
-   aarch64 but SHA256 checksums are placeholders. Needs ARM hardware
-   to verify.
-4. **HTTP/2 support in MITM proxy** — Current proxy is HTTP/1.1 only.
-   Some clients negotiate HTTP/2 via ALPN.
+1. **MicroSandbox migration (ADR-008)** — the active workstream. Runtime
+   substrate parity first, then authorization parity, then deletion of the
+   bespoke VM stack. See `docs/decisions/008-*.md` for phase gates.
+2. **F5** — TUI dashboard refresh. Cosmetic; nice-to-have (keep it
+   task/status focused, not a generic sandbox dashboard).
+3. **HTTP/2 support in MITM proxy** — relevant only to whatever request-aware
+   proxy path abox retains after the migration.
 
-Everything else in "Longer-term ideas" is a "would be nice" not
-a "must do".
+Superseded by ADR-008 (do not invest):
+
+- **CI runner with `/dev/kvm` for Cloud Hypervisor e2e** — the boot path it
+  would guard is being deleted; runtime e2e moves to the MicroSandbox contract
+  suite.
+- **aarch64 SHA verification for `bootstrap_vm.sh`** — the bootstrap pipeline
+  is deleted with the raw VM stack; OCI profile images replace it.
 
 ---
 
@@ -82,19 +91,23 @@ a "must do".
 
 ## Open items
 
-### CI runner with `/dev/kvm` — P1, M
+### MicroSandbox migration — P0, XL
 
-Phases 6-7 of `e2e_test.sh` (full VM boot, agent lifecycle, credential
-injection) are gated on VM artifacts. They pass locally but are skipped
-on stock GitHub runners. A self-hosted runner with KVM or a nightly
-scheduled job would close this gap.
+The active workstream (ADR-008). Ordered gates: runtime-neutral port →
+offline MicroSandbox adapter → OCI profiles → direct-vsock command broker →
+egress parity → native network policy compilation → native simple secrets →
+default switch → Cloud Hypervisor deletion.
 
-### aarch64 SHA256 verification — P2, S
+### ~~CI runner with `/dev/kvm` — P1, M~~ (superseded by ADR-008)
 
-`bootstrap_vm.sh` is parameterized for aarch64 but all SHA256 checksums
-for ARM artifacts are placeholder zeros. Needs someone with ARM hardware
-(Raspberry Pi 5, Ampere, Apple Silicon Linux VM) to download the
-artifacts and fill in real checksums.
+Phases 6-7 of `e2e_test.sh` guard the Cloud Hypervisor boot path, which is
+being deleted. Runtime e2e coverage moves to the MicroSandbox runtime
+contract suite.
+
+### ~~aarch64 SHA256 verification — P2, S~~ (superseded by ADR-008)
+
+`bootstrap_vm.sh` is deleted with the raw VM stack; profile delivery moves
+to multi-arch OCI images.
 
 ### HTTP/2 ALPN in MITM proxy — P2, M
 
@@ -109,11 +122,12 @@ this edge case.
 
 These are speculative — listed so they're not lost, not as commitments.
 
-### L1. Per-sandbox resource limits (cgroup v2)
+### ~~L1. Per-sandbox resource limits (cgroup v2)~~ (superseded by ADR-008)
 
-A cgroup v2 wrapper around the cloud-hypervisor process could enforce
-memory and CPU limits per sandbox. `--memory` and `--cpus` control VM
-allocation but don't limit the VMM process itself.
+Resource limits are delegated to the MicroSandbox runtime. Any residual
+host-process confinement work belongs to the runtime-hardening phase of the
+migration (AppArmor/Landlock around the runtime process), not a bespoke
+cgroup wrapper for cloud-hypervisor.
 
 ### L3. Multi-tenant `abox-proxyd` daemon
 
@@ -121,11 +135,12 @@ A real multi-tenant deployment (one machine, many users) would want
 the daemon as the authority, with per-uid socket isolation and a shared
 audit log. Big design lift; probably needs its own ADR.
 
-### L4. Structured guest telemetry
+### L4. Structured guest telemetry / execution receipts
 
-The `aboxstatus` virtiofs share could carry structured agent telemetry
-beyond exit code — wall time, peak RSS, network bytes, CLI proxy call
-counts. Useful for cost tracking and anomaly detection.
+Structured per-task telemetry beyond exit code — wall time, network
+destinations, CLI proxy call counts, authorized/denied effects. Post-ADR-008
+this becomes the "execution receipt" concept delivered through the runtime's
+result channel, not the `aboxstatus` virtiofs share.
 
 ### L5. Ephemeral worktree mode
 
@@ -135,8 +150,9 @@ would be useful for read-only "explore the codebase" agents.
 
 ### L6. macOS host support
 
-Requires a different hypervisor (Hypervisor.framework + Virtualization.framework,
-or Lima/Colima). Out of scope but a recurring ask.
+A recurring ask. Becomes tractable after ADR-008: MicroSandbox (libkrun)
+supports macOS hosts, so this is a qualification exercise on the single
+runtime rather than a second hypervisor integration.
 
 ### L7. Observability dashboard
 
