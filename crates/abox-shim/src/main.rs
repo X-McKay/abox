@@ -5,9 +5,9 @@
 //!
 //! 1. Reads `argv[0]` to determine which command was requested
 //! 2. Serializes the command + args as a JSON line
-//! 3. Sends the request to the host proxy daemon — directly over AF_VSOCK
-//!    (MicroSandbox runtime), or over a Unix socket bridged to vsock by
-//!    `socat` (legacy Cloud Hypervisor guests). See the `transport` module.
+//! 3. Sends the request to the host command broker via the persistent
+//!    `abox-bridge` uplink (or directly over AF_VSOCK). See the `transport`
+//!    module.
 //! 4. Reads the JSON response (exit code, stdout, stderr)
 //! 5. Prints output and exits with the proxied exit code
 //!
@@ -105,8 +105,7 @@ fn parse_args() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
 
 /// Connect to the proxy daemon, send the request, and read the response.
 ///
-/// The transport (direct AF_VSOCK under MicroSandbox, legacy Unix socket
-/// under Cloud Hypervisor) is declared by host-staged immutable config; see
+/// The transport is declared by host-staged immutable config; see
 /// [`transport`].
 fn send_request(request: &ProxyRequest) -> Result<ProxyResponse, Box<dyn std::error::Error>> {
     let mut stream = transport::connect(&transport::resolve_transport())?;

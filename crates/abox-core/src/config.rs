@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// Top-level abox configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AboxConfig {
-    /// Base directory for abox state (worktrees, snapshots, logs).
+    /// Base directory for abox state (worktrees, logs, trust records).
     /// Defaults to `~/.abox`.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
@@ -20,9 +20,9 @@ pub struct AboxConfig {
     #[serde(default)]
     pub runtime_dir: Option<PathBuf>,
 
-    /// Default VM configuration applied to all sandboxes unless overridden.
+    /// Default resources applied to all sandboxes unless overridden.
     #[serde(default)]
-    pub vm_defaults: VmDefaults,
+    pub sandbox_defaults: SandboxDefaults,
 
     /// Proxy daemon configuration.
     #[serde(default)]
@@ -32,65 +32,9 @@ pub struct AboxConfig {
     #[serde(default)]
     pub auth: AuthConfig,
 
-    /// Sandbox runtime selection (transitional; see ADR-008).
-    #[serde(default)]
-    pub runtime: RuntimeConfig,
-
     /// Guest OCI image configuration for the MicroSandbox runtime.
     #[serde(default)]
     pub images: ImagesConfig,
-}
-
-/// Sandbox runtime backend selection.
-///
-/// Transitional (ADR-008): `microsandbox` is the default; `cloud-hypervisor`
-/// remains available as an explicit, deprecated fallback until the legacy
-/// stack is deleted, at which point this section disappears. Host-owned
-/// configuration only — repo config can never select the runtime.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum RuntimeBackend {
-    /// MicroSandbox (libkrun) — the supported runtime.
-    #[default]
-    Microsandbox,
-    /// Legacy Cloud Hypervisor stack — deprecated, migration fallback only.
-    CloudHypervisor,
-}
-
-impl std::fmt::Display for RuntimeBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Microsandbox => write!(f, "microsandbox"),
-            Self::CloudHypervisor => write!(f, "cloud-hypervisor"),
-        }
-    }
-}
-
-/// `[runtime]` section.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RuntimeConfig {
-    /// Which sandbox runtime backend to use. The `ABOX_RUNTIME_BACKEND`
-    /// environment variable overrides this at process start.
-    #[serde(default)]
-    pub backend: RuntimeBackend,
-}
-
-impl RuntimeConfig {
-    /// Resolve the effective backend, honoring the `ABOX_RUNTIME_BACKEND`
-    /// environment override (`microsandbox` | `cloud-hypervisor`).
-    pub fn effective_backend(&self) -> anyhow::Result<RuntimeBackend> {
-        match std::env::var("ABOX_RUNTIME_BACKEND") {
-            Ok(value) => match value.as_str() {
-                "microsandbox" => Ok(RuntimeBackend::Microsandbox),
-                "cloud-hypervisor" => Ok(RuntimeBackend::CloudHypervisor),
-                other => anyhow::bail!(
-                    "invalid ABOX_RUNTIME_BACKEND value {other:?} \
-                     (expected \"microsandbox\" or \"cloud-hypervisor\")"
-                ),
-            },
-            Err(_) => Ok(self.backend),
-        }
-    }
 }
 
 /// `[images]` section — guest OCI image behavior for the MicroSandbox
@@ -104,9 +48,9 @@ pub struct ImagesConfig {
     pub overrides: std::collections::HashMap<String, String>,
 }
 
-/// Default VM resource allocation.
+/// Default sandbox resource allocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VmDefaults {
+pub struct SandboxDefaults {
     /// Memory in MiB. Default: 2048.
     #[serde(default = "default_memory")]
     pub memory_mib: u32,
@@ -114,14 +58,6 @@ pub struct VmDefaults {
     /// Number of vCPUs. Default: 2.
     #[serde(default = "default_vcpus")]
     pub vcpus: u8,
-
-    /// Path to the default VM image.
-    #[serde(default)]
-    pub image_path: Option<PathBuf>,
-
-    /// Path to the kernel (vmlinux).
-    #[serde(default)]
-    pub kernel_path: Option<PathBuf>,
 }
 
 /// Authentication configuration.
@@ -223,12 +159,12 @@ pub struct AdvancedAuthConfig {
     pub stub_files: Vec<CredentialFileEntry>,
 }
 
-/// A stub file to place inside the guest VM at boot.
+/// A stub file to place inside the guest at startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialFileEntry {
     /// Source path on the host. Supports `~` expansion.
     pub host_credential_file: String,
-    /// Absolute destination path inside the VM.
+    /// Absolute destination path inside the guest.
     pub guest: String,
     /// Unix permissions for the file. Default: "0600".
     #[serde(default = "default_credential_mode")]
@@ -249,67 +185,22 @@ pub struct ProxyConfig {
     pub policy_dir: PathBuf,
 }
 
-/// Runtime timing knobs for the VM supervisor.
-///
-/// Centralizes the polling intervals and timeouts that used to be hardcoded
-/// throughout `cloud_hypervisor.rs`, `console.rs`, and `sandbox.rs`. The
-/// defaults match the pre-refactor literals so behavior is unchanged.
-/// Tests can construct a custom instance to drive faster simulations.
-///
-/// Not yet exposed in the TOML schema — the goal of this introduction is
-/// to make tuning *possible* without committing to a public surface.
-#[derive(Debug, Clone, Copy)]
-pub struct VmRuntimeTuning {
-    /// How often `run_sandbox` polls `vm_manager.info()` for VM exit.
-    pub vm_exit_poll_interval: std::time::Duration,
-    /// How often the console tailer polls for new bytes after EOF.
-    pub console_poll_interval: std::time::Duration,
-    /// How long to wait for a virtiofsd / cloud-hypervisor socket file to
-    /// appear before bailing out.
-    pub socket_wait_timeout: std::time::Duration,
-    /// Grace period after sending a stop command before force-killing the VM.
-    pub vm_timeout_grace_period: std::time::Duration,
-}
-
-impl VmRuntimeTuning {
-    /// Default tuning: 250 ms VM exit poll, 50 ms console poll,
-    /// 5 s socket wait.
-    pub const DEFAULT: Self = Self {
-        vm_exit_poll_interval: std::time::Duration::from_millis(250),
-        console_poll_interval: std::time::Duration::from_millis(50),
-        socket_wait_timeout: std::time::Duration::from_secs(5),
-        vm_timeout_grace_period: std::time::Duration::from_secs(10),
-    };
-}
-
-impl Default for VmRuntimeTuning {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
 impl Default for AboxConfig {
     fn default() -> Self {
         Self {
             state_dir: default_state_dir(),
             runtime_dir: None,
-            vm_defaults: VmDefaults::default(),
+            sandbox_defaults: SandboxDefaults::default(),
             proxy: ProxyConfig::default(),
             auth: AuthConfig::default(),
-            runtime: RuntimeConfig::default(),
             images: ImagesConfig::default(),
         }
     }
 }
 
-impl Default for VmDefaults {
+impl Default for SandboxDefaults {
     fn default() -> Self {
-        Self {
-            memory_mib: default_memory(),
-            vcpus: default_vcpus(),
-            image_path: None,
-            kernel_path: None,
-        }
+        Self { memory_mib: default_memory(), vcpus: default_vcpus() }
     }
 }
 
@@ -343,11 +234,6 @@ impl AboxConfig {
         self.state_dir.join("worktrees")
     }
 
-    /// Return the templates directory: `<state_dir>/templates/`.
-    pub fn templates_dir(&self) -> PathBuf {
-        self.state_dir.join("templates")
-    }
-
     /// Return the logs directory: `<state_dir>/logs/`.
     pub fn logs_dir(&self) -> PathBuf {
         self.state_dir.join("logs")
@@ -363,7 +249,7 @@ impl AboxConfig {
     /// If `runtime_dir` is set in config, use it. Otherwise default to
     /// `<state_dir>/r` (a short name chosen deliberately — Linux caps Unix
     /// domain socket paths at 108 bytes, and abox appends per-sandbox suffixes
-    /// like `vfs-status-<task-id>.sock`, so keeping the base path short avoids
+    /// like `msb-<task-id>.sock_5000`, so keeping the base path short avoids
     /// hitting the limit on machines with long home directory paths).
     pub fn runtime_dir(&self) -> PathBuf {
         self.runtime_dir.clone().unwrap_or_else(|| self.state_dir.join("r"))
@@ -372,7 +258,6 @@ impl AboxConfig {
     /// Ensure all required directories exist.
     pub fn ensure_dirs(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(self.worktrees_dir())?;
-        std::fs::create_dir_all(self.templates_dir())?;
         std::fs::create_dir_all(self.logs_dir())?;
         std::fs::create_dir_all(self.trust_dir())?;
         std::fs::create_dir_all(self.runtime_dir())?;
@@ -524,7 +409,7 @@ mod tests {
     #[test]
     fn test_parse_empty_auth_section() {
         let toml_str = r"
-        [vm_defaults]
+        [sandbox_defaults]
         memory_mib = 2048
     ";
         let config: AboxConfig = toml::from_str(toml_str).unwrap();
@@ -538,21 +423,21 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AboxConfig::default();
-        assert_eq!(config.vm_defaults.memory_mib, 2048);
-        assert_eq!(config.vm_defaults.vcpus, 2);
+        assert_eq!(config.sandbox_defaults.memory_mib, 2048);
+        assert_eq!(config.sandbox_defaults.vcpus, 2);
         assert_eq!(config.proxy.egress_port, 18443);
     }
 
     #[test]
     fn test_parse_minimal_toml() {
         let toml_str = r"
-            [vm_defaults]
+            [sandbox_defaults]
             memory_mib = 4096
             vcpus = 4
         ";
         let config: AboxConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.vm_defaults.memory_mib, 4096);
-        assert_eq!(config.vm_defaults.vcpus, 4);
+        assert_eq!(config.sandbox_defaults.memory_mib, 4096);
+        assert_eq!(config.sandbox_defaults.vcpus, 4);
         // Proxy should use defaults
         assert_eq!(config.proxy.egress_port, 18443);
     }

@@ -323,7 +323,7 @@ pub fn default_log_path(logs_dir: &Path) -> PathBuf {
 /// A hash-chained, tamper-evident audit-log writer.
 ///
 /// This is the single writer shared by `abox-proxyd` and the per-VM proxy
-/// bridge (`crate::proxy_bridge::FileAuditSink`), so every audit entry — from
+/// bridge (`crate::command_broker::FileAuditSink`), so every audit entry — from
 /// host CLI proxying or from a guest sandbox — lands in one verifiable chain.
 ///
 /// # Concurrency

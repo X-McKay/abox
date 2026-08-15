@@ -93,43 +93,11 @@ jobs:
           name: abox-guest-bins-${{ matrix.arch }}
           path: abox-guest-bins-${{ matrix.arch }}.tar.gz
 
-  # Legacy Cloud Hypervisor VM assets — transitional (ADR-008); removed
-  # together with the deprecated backend.
-  vm-assets:
-    name: Bundle VM assets (${{ matrix.arch }})
-    strategy:
-      matrix:
-        include:
-          - arch: x86_64
-            os: ubuntu-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: vm-assets-${{ matrix.arch }}
-
-      - name: Bootstrap VM stack
-        run: ./scripts/bootstrap_vm.sh --yes --no-symlink
-
-      - name: Create VM assets tarball
-        run: tar czf abox-vm-assets-${{ matrix.arch }}.tar.gz -C "$HOME/.abox/vm" .
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: abox-vm-assets-${{ matrix.arch }}
-          path: abox-vm-assets-${{ matrix.arch }}.tar.gz
-
   release:
     name: Publish GitHub Release
     # Skip publishing on dry-run (workflow_dispatch with dry_run=true).
     if: ${{ !inputs.dry_run }}
-    needs: [build, guest-binaries, vm-assets]
+    needs: [build, guest-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -148,10 +116,8 @@ jobs:
             cp "$dir/abox" "release/$target"
             chmod +x "release/$target"
           done
-          # Copy guest binary tarballs (staged by `abox init`)
+          # Copy guest binary tarballs (staged by the installer / abox init)
           cp artifacts/abox-guest-bins-*/abox-guest-bins-*.tar.gz release/
-          # Copy legacy VM asset tarballs (transitional; ADR-008)
-          cp artifacts/abox-vm-assets-*/abox-vm-assets-*.tar.gz release/
 
       - name: Generate SHA256SUMS
         run: |

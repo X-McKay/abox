@@ -11,8 +11,7 @@
 use abox_core::project::EnvironmentProfile;
 use abox_core::runtime::{
     ControlChannel, RuntimeEnvironment, RuntimeLifecycle, RuntimeMount, RuntimeNetworkPlan,
-    RuntimeResources, RuntimeStart, SandboxRuntimeSpec, WorkspaceMount, COMMAND_BROKER_PORT,
-    HTTPS_EGRESS_PORT,
+    RuntimeResources, SandboxRuntimeSpec, WorkspaceMount, COMMAND_BROKER_PORT, HTTPS_EGRESS_PORT,
 };
 
 /// Runtime-generic contract assertions. Each function takes any
@@ -54,7 +53,6 @@ mod contract {
             ],
             network: RuntimeNetworkPlan::HostMediated,
             native_secrets: vec![],
-            start: RuntimeStart::Fresh,
             lifecycle: RuntimeLifecycle::default(),
         }
     }

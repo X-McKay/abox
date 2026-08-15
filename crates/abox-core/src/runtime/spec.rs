@@ -2,10 +2,9 @@
 //!
 //! These types describe what the orchestrator *needs* from a sandbox runtime
 //! — a workspace mount, an environment profile, resources, staged inputs,
-//! control channels, and a lifecycle — without leaking any hypervisor- or
-//! runtime-specific concepts (kernel paths, raw image paths, API sockets,
-//! virtiofsd socket names). Adapters translate a [`SandboxRuntimeSpec`] into
-//! whatever their backend requires.
+//! control channels, and a lifecycle — without leaking runtime
+//! implementation details. The adapter translates a [`SandboxRuntimeSpec`]
+//! into whatever its backend requires.
 
 use crate::project::EnvironmentProfile;
 use std::path::PathBuf;
@@ -36,8 +35,8 @@ impl WorkspaceMount {
 #[derive(Debug, Clone)]
 pub enum RuntimeEnvironment {
     /// A named abox guest profile (`base`, `node`, `python`, …). The adapter
-    /// resolves the profile to its backing artifact (raw rootfs image for the
-    /// legacy runtime, pinned OCI image for MicroSandbox).
+    /// resolves the profile to its pinned OCI image
+    /// (see [`super::images::ImageManifest`]).
     Profile(EnvironmentProfile),
 }
 
@@ -167,21 +166,6 @@ pub struct NativeSecretSpec {
     pub allowed_host: String,
 }
 
-/// How to start the sandbox.
-#[derive(Debug, Clone, Default)]
-pub enum RuntimeStart {
-    /// Normal fresh start.
-    #[default]
-    Fresh,
-    /// Restore from a prepared template directory (legacy memory-snapshot
-    /// templates; only supported by runtimes that implement memory
-    /// checkpoints).
-    RestoreTemplate {
-        /// Path to the template directory containing the snapshot files.
-        template_path: PathBuf,
-    },
-}
-
 /// Lifecycle intent for the sandbox.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RuntimeLifecycle {
@@ -238,8 +222,6 @@ pub struct SandboxRuntimeSpec {
     /// Credential rules delegated to native runtime secret substitution
     /// (only meaningful with a [`RuntimeNetworkPlan::Native`] plan).
     pub native_secrets: Vec<NativeSecretSpec>,
-    /// How to start the sandbox.
-    pub start: RuntimeStart,
     /// Lifecycle intent.
     pub lifecycle: RuntimeLifecycle,
 }

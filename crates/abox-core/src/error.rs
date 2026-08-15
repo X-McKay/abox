@@ -32,28 +32,6 @@ pub enum WorkspaceError {
     Io(#[from] std::io::Error),
 }
 
-/// Errors from VM lifecycle operations.
-#[derive(Debug, Error)]
-pub enum VmError {
-    #[error("VM '{id}' not found")]
-    NotFound { id: String },
-
-    #[error("VM '{id}' is in state '{state}', expected '{expected}'")]
-    InvalidState { id: String, state: String, expected: String },
-
-    #[error("failed to start VM '{id}': {reason}")]
-    StartFailed { id: String, reason: String },
-
-    #[error("failed to stop VM '{id}': {reason}")]
-    StopFailed { id: String, reason: String },
-
-    #[error("Cloud Hypervisor API error: {0}")]
-    ApiError(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
 /// Errors from policy evaluation.
 #[derive(Debug, Error)]
 pub enum PolicyError {
@@ -78,20 +56,4 @@ pub enum ConfigError {
 
     #[error("home directory not found")]
     NoHomeDir,
-}
-
-/// Errors from snapshot/template operations.
-#[derive(Debug, Error)]
-pub enum SnapshotError {
-    #[error("template '{name}' not found")]
-    NotFound { name: String },
-
-    #[error("template '{name}' already exists")]
-    AlreadyExists { name: String },
-
-    #[error("Cloud Hypervisor snapshot API failed: {0}")]
-    ApiError(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }

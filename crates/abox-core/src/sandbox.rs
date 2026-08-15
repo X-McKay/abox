@@ -9,17 +9,21 @@
 //! [`SandboxRuntimeSpec`] and delegates isolation mechanics to the configured
 //! [`SandboxRuntimePort`] adapter.
 
-use crate::config::{AboxConfig, CredentialFileEntry, VmRuntimeTuning};
+use crate::config::{AboxConfig, CredentialFileEntry};
 use crate::project::EnvironmentProfile;
 use crate::runtime::{
-    ControlChannel, CredentialToStage, RuntimeEnvironment, RuntimeInstance, RuntimeLifecycle,
-    RuntimeMount, RuntimeNetworkPlan, RuntimeResources, RuntimeStart, RuntimeState,
-    SandboxRuntimePort, SandboxRuntimeSpec, WorkspaceMount, COMMAND_BROKER_PORT, HTTPS_EGRESS_PORT,
+    ControlChannel, CredentialToStage, RuntimeEnvironment, RuntimeLifecycle, RuntimeMount,
+    RuntimeNetworkPlan, RuntimeResources, RuntimeState, SandboxRuntimePort, SandboxRuntimeSpec,
+    WorkspaceMount, COMMAND_BROKER_PORT, HTTPS_EGRESS_PORT,
 };
 use crate::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// How long a timed-out sandbox gets to stop gracefully before it is
+/// force-killed.
+const TIMEOUT_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Parameters for creating a new sandbox.
 #[derive(Debug, Clone)]
@@ -28,8 +32,6 @@ pub struct CreateSandboxParams {
     pub task_id: String,
     /// Base branch to fork from (default: "main").
     pub base_branch: String,
-    /// Optional template to restore from instead of booting fresh.
-    pub template: Option<String>,
     /// Memory override in MiB.
     pub memory_mib: Option<u32>,
     /// vCPU override.
@@ -76,17 +78,29 @@ pub struct CreateSandboxParams {
 }
 
 /// Full sandbox status combining workspace and runtime info.
-///
-/// Field names retain the historical `vm_` prefix for `--json` output
-/// stability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxStatus {
     pub id: String,
     pub branch: String,
     pub worktree_path: String,
-    pub vm_state: String,
-    pub vm_pid: u32,
+    pub state: String,
+    pub pid: u32,
     pub commits_ahead: usize,
+}
+
+/// The guest user's home directory (`abox`, uid 1000, in official images).
+pub const GUEST_AGENT_HOME: &str = "/home/abox";
+
+/// Expand a guest-side path: `~/x` becomes `/home/abox/x`; absolute paths
+/// pass through; anything else is rejected.
+pub fn expand_guest_path(raw: &str) -> Result<String> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(format!("{GUEST_AGENT_HOME}/{rest}"));
+    }
+    if raw.starts_with('/') {
+        return Ok(raw.to_string());
+    }
+    anyhow::bail!("guest path must be absolute or start with ~/: {raw:?}")
 }
 
 /// Convert a TOML value to a JSON value (for stub credential generation).
@@ -118,7 +132,7 @@ pub fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 pub fn stage_credential_files(entries: &[CredentialFileEntry]) -> Vec<CredentialToStage> {
     let mut result = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        let guest_expanded = match crate::boot_meta::expand_guest_path(&entry.guest) {
+        let guest_expanded = match expand_guest_path(&entry.guest) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -182,9 +196,9 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
         &self.config
     }
 
-    /// Runtime directory (where sockets, console logs, and detached
-    /// supervisor PID files live). Exposed so CLI commands like
-    /// `abox run --detach` can write per-sandbox state next to the rest.
+    /// Runtime directory (where control sockets and detached supervisor
+    /// PID files live). Exposed so CLI commands like `abox run --detach`
+    /// can write per-sandbox state next to the rest.
     pub fn runtime_dir(&self) -> std::path::PathBuf {
         self.config.runtime_dir()
     }
@@ -218,20 +232,7 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
             "Worktree created"
         );
 
-        // Step 2: Determine start mode (fresh boot or restore from template).
-        let start = match &params.template {
-            Some(name) => {
-                let template_path = self.config.templates_dir().join(name);
-                if !template_path.exists() {
-                    let _ = self.workspace.remove_worktree(&params.task_id, true);
-                    anyhow::bail!("template '{name}' not found");
-                }
-                RuntimeStart::RestoreTemplate { template_path }
-            }
-            None => RuntimeStart::Fresh,
-        };
-
-        // Inject HTTPS_PROXY env vars so the guest routes HTTPS through the
+        // Step 2: Inject HTTPS_PROXY env vars so the guest routes HTTPS through the
         // per-sandbox egress proxy. The guest bridges its loopback listener
         // at 127.0.0.1:18443 to the HTTPS egress control channel.
         let mut env_vars = params.env_vars;
@@ -285,8 +286,8 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
             workspace: WorkspaceMount::ReadWrite(worktree_path.clone()),
             environment: RuntimeEnvironment::Profile(params.environment_profile),
             resources: RuntimeResources {
-                memory_mib: params.memory_mib.unwrap_or(self.config.vm_defaults.memory_mib),
-                vcpus: params.vcpus.unwrap_or(self.config.vm_defaults.vcpus),
+                memory_mib: params.memory_mib.unwrap_or(self.config.sandbox_defaults.memory_mib),
+                vcpus: params.vcpus.unwrap_or(self.config.sandbox_defaults.vcpus),
             },
             user: params.user,
             env: env_vars,
@@ -302,7 +303,6 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
             control_channels,
             network: params.network_plan.clone(),
             native_secrets: params.native_secrets.clone(),
-            start,
             lifecycle: RuntimeLifecycle {
                 timeout_secs: params.timeout_secs,
                 ephemeral: params.ephemeral,
@@ -327,7 +327,7 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
                     );
                 }
                 return Err(
-                    start_err.context(format!("Failed to start VM for '{}'", params.task_id))
+                    start_err.context(format!("Failed to start sandbox for '{}'", params.task_id))
                 );
             }
         };
@@ -336,8 +336,8 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
             id: params.task_id.clone(),
             branch: format!("agent/{}", params.task_id),
             worktree_path: worktree_path.display().to_string(),
-            vm_state: instance.state.to_string(),
-            vm_pid: instance.pid.unwrap_or(0),
+            state: instance.state.to_string(),
+            pid: instance.pid.unwrap_or(0),
             commits_ahead: 0,
         })
     }
@@ -378,7 +378,7 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
 
         for wt in &worktrees {
             let instance = instances.iter().find(|v| v.id == wt.sandbox_id);
-            let (vm_state, vm_pid) = match instance {
+            let (state, pid) = match instance {
                 Some(v) => (v.state.to_string(), v.pid.unwrap_or(0)),
                 None => (RuntimeState::Stopped.to_string(), 0),
             };
@@ -387,8 +387,8 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
                 id: wt.sandbox_id.clone(),
                 branch: wt.branch.clone(),
                 worktree_path: wt.path.display().to_string(),
-                vm_state,
-                vm_pid,
+                state,
+                pid,
                 commits_ahead: wt.commits_ahead,
             });
         }
@@ -412,39 +412,11 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
         Ok(worktrees.into_iter().find(|w| w.sandbox_id == task_id))
     }
 
-    /// Pause a sandbox (legacy memory-snapshot support).
-    pub async fn pause_sandbox(&self, task_id: &str) -> Result<()> {
-        self.runtime.pause(task_id).await
-    }
-
-    /// Resume a paused sandbox (legacy memory-snapshot support).
-    pub async fn resume_sandbox(&self, task_id: &str) -> Result<()> {
-        self.runtime.resume(task_id).await
-    }
-
-    /// Get runtime info for a specific sandbox.
-    pub async fn runtime_info(&self, task_id: &str) -> Result<RuntimeInstance> {
-        self.runtime.info(task_id).await
-    }
-
-    /// Path to the sandbox's console output file, if the runtime exposes one.
-    pub fn console_output(&self, task_id: &str) -> Option<PathBuf> {
-        self.runtime.console_output(task_id)
-    }
-
-    /// Handles for legacy memory-snapshot creation, if the runtime supports it.
-    pub fn memory_snapshot_handles(
-        &self,
-        task_id: &str,
-    ) -> Option<crate::runtime::MemorySnapshotHandles> {
-        self.runtime.memory_snapshot_handles(task_id)
-    }
-
     /// Foreground variant of `create_sandbox`.
     ///
     /// Creates the worktree, starts the sandbox, binds the per-sandbox
     /// command broker and HTTPS egress proxy to the runtime's control
-    /// sockets, streams the guest console to the orchestrator's stdio,
+    /// sockets (agent output streams through the runtime to this process),
     /// waits for the sandbox to exit, and tears everything down.
     ///
     /// Returns the agent's exit code.
@@ -473,8 +445,8 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
         // audit JSONL file used by abox-proxyd. Fall back to TracingAuditSink
         // if the log file can't be opened.
         let audit_path = self.config.logs_dir().join("audit.jsonl");
-        let audit_sink: std::sync::Arc<dyn crate::proxy_bridge::AuditSink> =
-            match crate::proxy_bridge::FileAuditSink::open(&audit_path) {
+        let audit_sink: std::sync::Arc<dyn crate::command_broker::AuditSink> =
+            match crate::command_broker::FileAuditSink::open(&audit_path) {
                 Ok(sink) => std::sync::Arc::new(sink),
                 Err(e) => {
                     tracing::warn!(
@@ -482,16 +454,16 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
                         path = %audit_path.display(),
                         "Could not open audit log; falling back to tracing-only"
                     );
-                    std::sync::Arc::new(crate::proxy_bridge::TracingAuditSink)
+                    std::sync::Arc::new(crate::command_broker::TracingAuditSink)
                 }
             };
         // Map guest /workspace → host worktree so that the shim's CWD
         // (which is /workspace inside the sandbox) resolves to the real path.
-        let bridge = crate::proxy_bridge::ProxyBridge::new(
+        let bridge = crate::command_broker::CommandBroker::new(
             bridge_socket,
             std::sync::Arc::clone(&policy),
             std::sync::Arc::clone(&audit_sink),
-            crate::proxy_bridge::SandboxAttribution::Fixed(task_id.clone()),
+            crate::command_broker::SandboxAttribution::Fixed(task_id.clone()),
         )
         .with_cwd_map("/workspace", worktree_path);
         let bridge_handle = tokio::spawn(async move {
@@ -559,7 +531,7 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
                         let sandbox_id = sandbox_id.clone();
                         let audit = std::sync::Arc::clone(&audit);
                         async move {
-                            crate::egress::handle_request(
+                            crate::request_broker::handle_request(
                                 req,
                                 &policy,
                                 root_ca,
@@ -625,28 +597,8 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
             }));
         }
 
-        // Spawn the console streamer with a shutdown notify so it can drain
-        // the last bytes of guest output gracefully when the sandbox exits,
-        // instead of being abort()'d mid-read and dropping the trailing
-        // output on slow systems.
-        let console_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
-        let console_handle = self.runtime.console_output(&task_id).map(|console_log| {
-            let console_shutdown_for_task = console_shutdown.clone();
-            tokio::spawn(async move {
-                if let Err(e) = Box::pin(crate::console::tail_to_stdout_until(
-                    &console_log,
-                    console_shutdown_for_task,
-                ))
-                .await
-                {
-                    tracing::debug!(error = %e, "console stream ended");
-                }
-            })
-        });
-
-        // Wait for sandbox exit; the runtime reports the guest exit code.
-        let tuning = VmRuntimeTuning::DEFAULT;
-
+        // Wait for sandbox exit; the runtime reports the guest exit code and
+        // streams agent output to this process's stdio.
         let wait_future = self.runtime.wait(&task_id);
 
         let (timed_out, runtime_exit) = if let Some(secs) = timeout_secs {
@@ -664,7 +616,7 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
                     }
                     // Wait up to the grace period for the sandbox to exit.
                     let grace = self.runtime.wait(&task_id);
-                    if tokio::time::timeout(tuning.vm_timeout_grace_period, grace).await.is_err() {
+                    if tokio::time::timeout(TIMEOUT_KILL_GRACE, grace).await.is_err() {
                         tracing::warn!(
                             task_id = %task_id,
                             "Sandbox did not exit within grace period; force-killing"
@@ -695,15 +647,6 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
                 tracing::warn!(task_id = %task_id, error = %e, "Failed to stop service sidecars");
             }
         }
-        // Signal the console tailer to drain and exit. Wait briefly for it
-        // to finish before we move on; if it stays stuck (shouldn't happen
-        // in practice), the JoinHandle is dropped and the task is cancelled.
-        if let Some(console_handle) = console_handle {
-            console_shutdown.notify_one();
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_millis(500), console_handle).await;
-        }
-
         // Determine exit code: 124 on timeout, otherwise as reported by the
         // runtime's exit channel.
         let exit_code = if timed_out {
@@ -717,8 +660,8 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
             // run produced nothing.
             eprintln!(
                 "abox: sandbox '{task_id}' did not report an exit code; \
-                 rolling back worktree (the sandbox may have crashed before \
-                 guest init ran -- check the console log)"
+                 rolling back worktree (the sandbox may have died before \
+                 the agent could run)"
             );
             tracing::warn!(
                 task_id = %task_id,
@@ -757,13 +700,13 @@ mod tests {
 
     #[test]
     fn stage_expands_tilde_in_guest_path() {
-        let expanded = crate::boot_meta::expand_guest_path("~/.claude/.credentials.json").unwrap();
+        let expanded = expand_guest_path("~/.claude/.credentials.json").unwrap();
         assert_eq!(expanded, "/home/abox/.claude/.credentials.json");
     }
 
     #[test]
     fn stage_rejects_invalid_guest_path() {
-        let result = crate::boot_meta::expand_guest_path("foo/bar");
+        let result = expand_guest_path("foo/bar");
         assert!(result.is_err());
     }
 

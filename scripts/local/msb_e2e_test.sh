@@ -211,7 +211,7 @@ expect "layout complete; scratch repo has an initial commit"
 cat > "$CONFIG" <<EOF
 state_dir = "$STATE"
 
-[vm_defaults]
+[sandbox_defaults]
 memory_mib = 512
 vcpus = 1
 

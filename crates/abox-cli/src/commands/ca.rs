@@ -60,9 +60,6 @@ pub fn execute(cmd: &CaCommand) -> Result<()> {
             println!();
             println!("Sandboxes trust the CA staged at launch, so new runs pick up the");
             println!("new CA automatically. Any running sandboxes must be restarted.");
-            println!();
-            println!("Legacy cloud-hypervisor backend only: the CA is baked into the");
-            println!("guest rootfs — rebuild it with 'just bootstrap-vm'.");
         }
         CaCommand::Path => {
             println!("{}", ca_dir.display());

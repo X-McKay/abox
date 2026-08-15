@@ -7,6 +7,7 @@
 //! support (`sysctl kern.hv_support`) on Apple Silicon, which is what the
 //! MicroSandbox (libkrun) runtime uses.
 
+#[cfg(not(target_os = "macos"))]
 use std::path::Path;
 
 /// Result of a host-virtualization check (KVM on Linux,
@@ -96,6 +97,7 @@ fn parse_hv_support(output: &str) -> bool {
 
 /// Result of a KVM availability check.
 #[derive(Debug)]
+#[cfg(not(target_os = "macos"))]
 pub enum KvmStatus {
     /// `/dev/kvm` exists and is read-write accessible.
     Available,
@@ -107,6 +109,7 @@ pub enum KvmStatus {
 ///
 /// The checks are ordered from most specific to most general so the
 /// remediation message is as actionable as possible.
+#[cfg(not(target_os = "macos"))]
 pub fn diagnose_kvm() -> KvmStatus {
     // ── WSL2 ────────────────────────────────────────────────────────────
     if is_wsl2() && !Path::new("/dev/kvm").exists() {
@@ -169,16 +172,19 @@ pub fn diagnose_kvm() -> KvmStatus {
 }
 
 /// Check `/proc/cpuinfo` for vmx (Intel) or svm (AMD) flags.
+#[cfg(not(target_os = "macos"))]
 fn has_cpu_virt_extensions() -> bool {
     std::fs::read_to_string("/proc/cpuinfo").is_ok_and(|s| s.contains(" vmx") || s.contains(" svm"))
 }
 
 /// Detect WSL2 via `/proc/version`.
+#[cfg(not(target_os = "macos"))]
 fn is_wsl2() -> bool {
     std::fs::read_to_string("/proc/version").is_ok_and(|s| s.to_lowercase().contains("microsoft"))
 }
 
 /// Detect container environment (Docker, Podman, etc.).
+#[cfg(not(target_os = "macos"))]
 fn is_container() -> bool {
     // /.dockerenv is created by Docker; /run/.containerenv by Podman.
     if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
@@ -194,17 +200,20 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn cpu_virt_detection_does_not_panic() {
         // Just ensure the function doesn't panic on the current machine.
         let _ = has_cpu_virt_extensions();
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn container_detection_does_not_panic() {
         let _ = is_container();
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn wsl2_detection_does_not_panic() {
         let _ = is_wsl2();
     }
@@ -232,6 +241,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn diagnose_returns_some_status() {
         // On any Linux machine this should return a concrete status.
         let status = diagnose_kvm();

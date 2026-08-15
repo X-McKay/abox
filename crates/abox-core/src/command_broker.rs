@@ -1,18 +1,19 @@
-//! Embedded credential-proxy server.
+//! The host command broker.
 //!
 //! Accepts JSON [`ProxyRequest`] lines on a Unix socket, evaluates them
 //! against a [`PolicyEngine`], executes allowed commands on the host, and
 //! writes JSON [`ProxyResponse`] back. Used in two configurations:
 //!
-//! 1. **Per-VM bridge (orchestrator).** The bridge binds the
-//!    `<vsock-socket>_5000` path Cloud Hypervisor exposes for the guest's
-//!    vsock port 5000. Every connection that arrives there provably came
-//!    from one specific guest VM, so [`SandboxAttribution::Fixed`] is used
-//!    and the request's own `sandbox_id` field is ignored.
-//! 2. **Shared daemon (`abox-proxyd`).** The bridge binds a regular Unix
+//! 1. **Per-sandbox broker (orchestrator).** The broker binds the sandbox's
+//!    command-broker control socket ([`crate::runtime`] port 5000): the
+//!    runtime routes exactly one guest's vsock traffic there, so every
+//!    connection provably came from that sandbox.
+//!    [`SandboxAttribution::Fixed`] is used and the request's own
+//!    `sandbox_id` field is ignored.
+//! 2. **Shared daemon (`abox-proxyd`).** The broker binds a regular Unix
 //!    socket and uses [`SandboxAttribution::FromRequest`], so different
 //!    sandboxes can share one daemon and the audit log uses whatever id
-//!    each request supplies (with `"unknown"` fallback for legacy shims).
+//!    each request supplies (with `"unknown"` fallback when absent).
 
 use crate::policy::{Decision, PolicyEngine};
 use crate::protocol::{ProxyRequest, ProxyResponse};
@@ -22,14 +23,14 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-/// How the bridge attributes incoming requests to a sandbox identifier.
+/// How the broker attributes incoming requests to a sandbox identifier.
 #[derive(Debug, Clone)]
 pub enum SandboxAttribution {
     /// Trust the `sandbox_id` field on each request (proxyd mode).
     /// Falls back to `"unknown"` when the field is absent.
     FromRequest,
     /// Force every request handled on this socket to use this id
-    /// (per-VM bridge mode — the socket itself proves provenance).
+    /// (per-sandbox broker mode — the socket itself proves provenance).
     Fixed(String),
 }
 
@@ -73,7 +74,7 @@ pub trait AuditSink: Send + Sync {
 }
 
 /// A configured but not-yet-running proxy bridge.
-pub struct ProxyBridge {
+pub struct CommandBroker {
     socket_path: PathBuf,
     policy: Arc<PolicyEngine>,
     audit: Arc<dyn AuditSink>,
@@ -90,7 +91,7 @@ pub struct ProxyBridge {
     cwd_map: Option<(String, PathBuf)>,
 }
 
-impl ProxyBridge {
+impl CommandBroker {
     /// Construct a new bridge. Use [`run`] to bind the socket and serve.
     pub fn new(
         socket_path: PathBuf,
@@ -395,7 +396,7 @@ impl AuditSink for FileAuditSink {
 }
 
 /// The shared chained writer is itself an [`AuditSink`], so the `abox-proxyd`
-/// daemon can plug it straight into a [`ProxyBridge`] without a wrapper. Both
+/// daemon can plug it straight into a [`CommandBroker`] without a wrapper. Both
 /// CLI and egress entries are written to the chain (the trait's default
 /// `log_egress` only traces). Inherent methods are named explicitly to avoid
 /// recursing into these trait methods.
@@ -555,14 +556,6 @@ mod tests {
         assert!(err.contains("escapes the sandbox worktree"), "unexpected error: {err}");
     }
 
-    #[test]
-    fn guest_init_locks_proxy_socket_to_abox_user() {
-        let init_sh = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/init.sh"));
-        assert!(init_sh.contains("chown 1000:1000 /run/abox-proxy.sock"));
-        assert!(init_sh.contains("chmod 0600 /run/abox-proxy.sock"));
-        assert!(!init_sh.contains("chmod 666 /run/abox-proxy.sock"));
-    }
-
     #[tokio::test]
     async fn fixed_attribution_overrides_request_field() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -570,7 +563,7 @@ mod tests {
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let sink = CountingSink::new();
-        let bridge = ProxyBridge::new(
+        let bridge = CommandBroker::new(
             socket.clone(),
             allow_all_engine(),
             sink.clone() as Arc<dyn AuditSink>,
@@ -623,7 +616,7 @@ mod tests {
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let sink = CountingSink::new();
-        let bridge = ProxyBridge::new(
+        let bridge = CommandBroker::new(
             socket.clone(),
             allow_all_engine(),
             sink.clone() as Arc<dyn AuditSink>,
@@ -671,7 +664,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let socket = tmp.path().join("bridge.sock");
         let sink = CountingSink::new();
-        let bridge = ProxyBridge::new(
+        let bridge = CommandBroker::new(
             socket.clone(),
             allow_all_engine(),
             sink.clone() as Arc<dyn AuditSink>,
@@ -713,7 +706,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let socket = tmp.path().join("bridge.sock");
         let sink = CountingSink::new();
-        let bridge = ProxyBridge::new(
+        let bridge = CommandBroker::new(
             socket.clone(),
             allow_all_engine(),
             sink.clone() as Arc<dyn AuditSink>,

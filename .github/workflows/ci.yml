@@ -64,8 +64,8 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
-  e2e-phases-1-5:
-    name: e2e (phases 1-5; phase 6 skipped — no /dev/kvm on CI)
+  e2e-runtime:
+    name: runtime e2e (live microVMs via KVM)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -73,20 +73,28 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
-
-      - name: Install Python (for proxy_send helper in e2e_test.sh)
-        uses: actions/setup-python@v6
         with:
-          python-version: '3.x'
+          key: e2e-runtime
 
-      - name: Run e2e script
-        # Phase 6 is gated on ~/.abox/vm/cloud-hypervisor + rootfs.raw
-        # existing, which they don't on a stock GitHub runner. The script
-        # prints "skipped: VM artifacts not found" and continues.
-        run: ./scripts/local/e2e_test.sh
+      - name: Cache MicroSandbox runtime bundle
+        uses: actions/cache@v4
+        with:
+          path: ~/.microsandbox
+          key: msb-runtime-${{ runner.os }}-0.6.9
+
+      - name: Run the live runtime e2e suite
+        # GitHub-hosted Ubuntu runners expose /dev/kvm; the msb runtime
+        # bundle is installed by the microsandbox crate's build script on
+        # first build. The suite skips cleanly (exit 0 with a "skipped:"
+        # message) if virtualization or runtime assets are unavailable.
+        run: |
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          ./scripts/local/msb_e2e_test.sh
 
   runtime-attestation:
     name: Runtime attestation (label required when runtime paths touched)
@@ -104,10 +112,7 @@ jobs:
         with:
           filters: |
             runtime:
-              - 'guest/**'
               - 'images/**'
-              - 'scripts/build_rootfs.sh'
-              - 'scripts/bootstrap_vm.sh'
               - 'crates/abox-core/**'
               - 'crates/abox-proxyd/**'
               - 'crates/abox-protocol/**'
@@ -120,17 +125,14 @@ jobs:
         with:
           script: |
             const labels = context.payload.pull_request.labels.map(l => l.name);
-            // `vm-attested` is accepted as a legacy alias during the
-            // ADR-008 migration.
-            if (!labels.includes('runtime-attested') && !labels.includes('vm-attested')) {
+            if (!labels.includes('runtime-attested')) {
               core.setFailed(
                 'This PR touches runtime/guest/broker code. Run `just e2e-runtime` ' +
-                '(and `just e2e-vm` if the legacy backend is affected) locally, ' +
-                'then add the `runtime-attested` label and comment with the ' +
-                'timestamp. See docs/contributing/pre-pr-checklist.md.'
+                'locally, then add the `runtime-attested` label and comment with ' +
+                'the timestamp. See docs/contributing/pre-pr-checklist.md.'
               );
             } else {
-              core.info('runtime attestation label present. Trust-but-post-a-timestamp-comment.');
+              core.info('runtime-attested label present. Trust-but-post-a-timestamp-comment.');
             }
 
       - name: No-op when runtime paths untouched
@@ -158,7 +160,6 @@ jobs:
               - 'crates/**'
               - 'scripts/**'
               - 'templates/**'
-              - 'guest/**'
               - 'images/**'
               - 'justfile'
               - '.github/workflows/**'

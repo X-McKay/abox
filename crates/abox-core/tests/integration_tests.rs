@@ -1,8 +1,8 @@
 //! Integration tests for abox-core.
 //!
 //! These tests exercise the public API of abox-core components in combination,
-//! including the config loader, policy engine, workspace manager, snapshot
-//! manager, and sandbox orchestrator (with mock VM).
+//! including the config loader, policy engine, workspace manager, and sandbox
+//! orchestrator (with mock runtime).
 
 use abox_core::adapters::git2_workspace::Git2Workspace;
 use abox_core::config::AboxConfig;
@@ -10,7 +10,6 @@ use abox_core::policy::{CliPolicy, Decision, EgressRule, PolicyEngine, PolicyFil
 use abox_core::project::EnvironmentProfile;
 use abox_core::runtime::testing::{MockBehavior, MockRuntime};
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
-use abox_core::snapshot::SnapshotManager;
 use abox_core::workspace::{FileStatus, WorkspacePort};
 use git2::Repository;
 use std::path::{Path, PathBuf};
@@ -27,11 +26,9 @@ fn test_config_load_from_file() {
         r#"
 state_dir = "/custom/state"
 
-[vm_defaults]
+[sandbox_defaults]
 memory_mib = 8192
 vcpus = 8
-image_path = "/custom/image.raw"
-kernel_path = "/custom/vmlinux"
 
 [proxy]
 egress_port = 9999
@@ -42,10 +39,8 @@ policy_dir = "/custom/policies"
 
     let config = AboxConfig::load(&config_path).unwrap();
     assert_eq!(config.state_dir, PathBuf::from("/custom/state"));
-    assert_eq!(config.vm_defaults.memory_mib, 8192);
-    assert_eq!(config.vm_defaults.vcpus, 8);
-    assert_eq!(config.vm_defaults.image_path, Some(PathBuf::from("/custom/image.raw")));
-    assert_eq!(config.vm_defaults.kernel_path, Some(PathBuf::from("/custom/vmlinux")));
+    assert_eq!(config.sandbox_defaults.memory_mib, 8192);
+    assert_eq!(config.sandbox_defaults.vcpus, 8);
     assert_eq!(config.proxy.egress_port, 9999);
     assert_eq!(config.proxy.policy_dir, PathBuf::from("/custom/policies"));
 }
@@ -53,8 +48,8 @@ policy_dir = "/custom/policies"
 #[test]
 fn test_config_load_nonexistent_returns_defaults() {
     let config = AboxConfig::load(Path::new("/nonexistent/config.toml")).unwrap();
-    assert_eq!(config.vm_defaults.memory_mib, 2048);
-    assert_eq!(config.vm_defaults.vcpus, 2);
+    assert_eq!(config.sandbox_defaults.memory_mib, 2048);
+    assert_eq!(config.sandbox_defaults.vcpus, 2);
     assert_eq!(config.proxy.egress_port, 18443);
 }
 
@@ -64,7 +59,6 @@ fn test_config_ensure_dirs() {
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
     config.ensure_dirs().unwrap();
     assert!(config.worktrees_dir().exists());
-    assert!(config.templates_dir().exists());
     assert!(config.logs_dir().exists());
 }
 
@@ -72,7 +66,6 @@ fn test_config_ensure_dirs() {
 fn test_config_directory_helpers() {
     let config = AboxConfig { state_dir: PathBuf::from("/test/state"), ..Default::default() };
     assert_eq!(config.worktrees_dir(), PathBuf::from("/test/state/worktrees"));
-    assert_eq!(config.templates_dir(), PathBuf::from("/test/state/templates"));
     assert_eq!(config.logs_dir(), PathBuf::from("/test/state/logs"));
     // runtime_dir defaults to <state_dir>/r when not configured (short path to avoid
     // Unix domain socket 108-byte limit with per-sandbox suffixes).
@@ -94,13 +87,12 @@ fn test_config_partial_toml_uses_defaults() {
     let tmp = TempDir::new().unwrap();
     let config_path = tmp.path().join("config.toml");
     // Only set memory, everything else should default
-    std::fs::write(&config_path, "[vm_defaults]\nmemory_mib = 4096\n").unwrap();
+    std::fs::write(&config_path, "[sandbox_defaults]\nmemory_mib = 4096\n").unwrap();
 
     let config = AboxConfig::load(&config_path).unwrap();
-    assert_eq!(config.vm_defaults.memory_mib, 4096);
-    assert_eq!(config.vm_defaults.vcpus, 2); // default
+    assert_eq!(config.sandbox_defaults.memory_mib, 4096);
+    assert_eq!(config.sandbox_defaults.vcpus, 2); // default
     assert_eq!(config.proxy.egress_port, 18443); // default
-    assert!(config.vm_defaults.image_path.is_none()); // default
 }
 
 // ─── Policy Engine Tests ────────────────────────────────────────────────────
@@ -589,84 +581,6 @@ fn test_workspace_merge_clean() {
     assert!(main_tree.get_name("new_feature.rs").is_some());
 }
 
-// ─── Snapshot Manager Tests ─────────────────────────────────────────────────
-
-#[test]
-fn test_snapshot_manager_list_empty() {
-    let tmp = TempDir::new().unwrap();
-    let template_dir = tmp.path().join("templates");
-    let runtime_dir = tmp.path().join("runtime");
-
-    let mgr =
-        SnapshotManager::new(template_dir.clone(), runtime_dir, tmp.path().to_path_buf()).unwrap();
-    let templates = mgr.list_templates().unwrap();
-    assert!(templates.is_empty());
-}
-
-#[test]
-fn test_snapshot_manager_list_with_templates() {
-    let tmp = TempDir::new().unwrap();
-    let template_dir = tmp.path().join("templates");
-    let runtime_dir = tmp.path().join("runtime");
-
-    let mgr =
-        SnapshotManager::new(template_dir.clone(), runtime_dir, tmp.path().to_path_buf()).unwrap();
-
-    // Create fake template directories with files
-    let t1 = template_dir.join("base-python");
-    std::fs::create_dir_all(&t1).unwrap();
-    std::fs::write(t1.join("snapshot.bin"), "fake snapshot data 12345").unwrap();
-
-    let t2 = template_dir.join("base-rust");
-    std::fs::create_dir_all(&t2).unwrap();
-    std::fs::write(t2.join("snapshot.bin"), "more fake data").unwrap();
-    std::fs::write(t2.join("memory.bin"), "fake memory dump").unwrap();
-
-    let templates = mgr.list_templates().unwrap();
-    assert_eq!(templates.len(), 2);
-
-    let names: Vec<&str> = templates.iter().map(|t| t.name.as_str()).collect();
-    assert!(names.contains(&"base-python"));
-    assert!(names.contains(&"base-rust"));
-
-    // base-rust should be larger (two files)
-    let rust_template = templates.iter().find(|t| t.name == "base-rust").unwrap();
-    let python_template = templates.iter().find(|t| t.name == "base-python").unwrap();
-    assert!(rust_template.size_bytes > python_template.size_bytes);
-}
-
-#[test]
-fn test_snapshot_manager_delete() {
-    let tmp = TempDir::new().unwrap();
-    let template_dir = tmp.path().join("templates");
-    let runtime_dir = tmp.path().join("runtime");
-
-    let mgr =
-        SnapshotManager::new(template_dir.clone(), runtime_dir, tmp.path().to_path_buf()).unwrap();
-
-    // Create a fake template
-    let t1 = template_dir.join("to-delete");
-    std::fs::create_dir_all(&t1).unwrap();
-    std::fs::write(t1.join("snapshot.bin"), "data").unwrap();
-
-    assert_eq!(mgr.list_templates().unwrap().len(), 1);
-
-    mgr.delete_template("to-delete").unwrap();
-    assert_eq!(mgr.list_templates().unwrap().len(), 0);
-    assert!(!t1.exists());
-}
-
-#[test]
-fn test_snapshot_manager_delete_nonexistent_fails() {
-    let tmp = TempDir::new().unwrap();
-    let template_dir = tmp.path().join("templates");
-    let runtime_dir = tmp.path().join("runtime");
-
-    let mgr = SnapshotManager::new(template_dir, runtime_dir, tmp.path().to_path_buf()).unwrap();
-    let result = mgr.delete_template("nonexistent");
-    assert!(result.is_err());
-}
-
 // ─── Sandbox Orchestrator Tests (with MockRuntime) ─────────────────────────
 
 #[tokio::test]
@@ -683,7 +597,6 @@ async fn test_orchestrator_create_sandbox() {
         .create_sandbox(CreateSandboxParams {
             task_id: "fix-auth".to_string(),
             base_branch: "main".to_string(),
-            template: None,
             memory_mib: None,
             vcpus: None,
             user: None,
@@ -708,8 +621,8 @@ async fn test_orchestrator_create_sandbox() {
 
     assert_eq!(status.id, "fix-auth");
     assert_eq!(status.branch, "agent/fix-auth");
-    assert_eq!(status.vm_state, "running");
-    assert_eq!(status.vm_pid, 12345);
+    assert_eq!(status.state, "running");
+    assert_eq!(status.pid, 12345);
 }
 
 /// `abox path <task>` is a thin wrapper over `worktree_info`; this verifies the
@@ -728,7 +641,6 @@ async fn test_worktree_info_lookup() {
         .create_sandbox(CreateSandboxParams {
             task_id: "collect-me".to_string(),
             base_branch: "main".to_string(),
-            template: None,
             memory_mib: None,
             vcpus: None,
             user: None,
@@ -773,7 +685,6 @@ async fn test_orchestrator_create_multiple_sandboxes() {
         orch.create_sandbox(CreateSandboxParams {
             task_id: task.to_string(),
             base_branch: "main".to_string(),
-            template: None,
             memory_mib: None,
             vcpus: None,
             user: None,
@@ -819,7 +730,6 @@ async fn test_orchestrator_stop_sandbox() {
     orch.create_sandbox(CreateSandboxParams {
         task_id: "task-1".to_string(),
         base_branch: "main".to_string(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -862,7 +772,6 @@ async fn test_orchestrator_stop_with_clean() {
     orch.create_sandbox(CreateSandboxParams {
         task_id: "task-1".to_string(),
         base_branch: "main".to_string(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -906,7 +815,6 @@ async fn test_orchestrator_divergence() {
         .create_sandbox(CreateSandboxParams {
             task_id: "task-1".to_string(),
             base_branch: "main".to_string(),
-            template: None,
             memory_mib: None,
             vcpus: None,
             user: None,
@@ -960,7 +868,6 @@ async fn test_orchestrator_vm_config_overrides() {
     orch.create_sandbox(CreateSandboxParams {
         task_id: "task-custom".to_string(),
         base_branch: "main".to_string(),
-        template: None,
         memory_mib: Some(8192),
         vcpus: Some(4),
         user: Some("agent-user".to_string()),
@@ -1018,7 +925,6 @@ async fn test_run_sandbox_polls_until_vm_exits() {
     let params = CreateSandboxParams {
         task_id: "run-sandbox-test".into(),
         base_branch: "main".into(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -1083,7 +989,6 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
     let params = CreateSandboxParams {
         task_id: "silent-fail".into(),
         base_branch: "main".into(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -1131,32 +1036,6 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
     );
 }
 
-// ─── read_exit_code tests ───────────────────────────────────────────────────
-
-#[test]
-fn test_read_exit_code_present() {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("exit-code"), "42\n").unwrap();
-    let code = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path())
-        .expect("read_exit_code succeeds");
-    assert_eq!(code, 42);
-}
-
-#[test]
-fn test_read_exit_code_missing_file_returns_none() {
-    let tmp = tempfile::tempdir().unwrap();
-    let result = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path());
-    assert!(result.is_none());
-}
-
-#[test]
-fn test_read_exit_code_malformed_returns_none() {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("exit-code"), "not-a-number").unwrap();
-    let code = abox_core::adapters::cloud_hypervisor::read_exit_code(tmp.path());
-    assert_eq!(code, None);
-}
-
 // ─── Timeout Tests ─────────────────────────────────────────────────────────
 
 #[tokio::test(start_paused = true)]
@@ -1180,7 +1059,6 @@ async fn test_run_sandbox_timeout_returns_124() {
     let params = CreateSandboxParams {
         task_id: "timeout-test".into(),
         base_branch: "main".into(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -1254,7 +1132,6 @@ async fn test_run_sandbox_exits_before_timeout() {
     let params = CreateSandboxParams {
         task_id: "quick-exit".into(),
         base_branch: "main".into(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -1314,7 +1191,6 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
     let params = CreateSandboxParams {
         task_id: "ephemeral-test".into(),
         base_branch: "main".into(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -1375,7 +1251,6 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
     let params = CreateSandboxParams {
         task_id: "non-ephemeral-test".into(),
         base_branch: "main".into(),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,

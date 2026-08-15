@@ -1,9 +1,7 @@
 //! `abox-bridge` — Guest-side TCP/Unix↔vsock forwarder.
 //!
 //! Listens on guest loopback TCP ports and/or guest Unix sockets and
-//! forwards each connection to the host over AF_VSOCK (CID 2). Under the
-//! MicroSandbox runtime this replaces the `socat` bridges the legacy guest
-//! init script used for:
+//! forwards each connection to the host over AF_VSOCK (CID 2):
 //!
 //! - the command broker (`/run/abox-proxy.sock` → vsock 5000),
 //! - the HTTPS egress proxy (`127.0.0.1:18443` → vsock 5001), and

@@ -7,15 +7,14 @@
 //!   ([`crate::runtime::images`]);
 //! - the task worktree bind-mounts read-write at `/workspace`; guest
 //!   ownership is granted through the mount's metadata overlay (a root
-//!   `chown` before the agent runs), so host inodes keep their owner exactly
-//!   like the legacy virtiofsd uid-map did;
+//!   `chown` before the agent runs), so host inodes keep their owner;
 //! - prompt/prepare/credential-stub/input files are staged as pre-boot
 //!   rootfs patches under `/abox-meta` (read-only modes);
 //! - control channels (command broker, HTTPS egress, service bridges) are
 //!   vsock routes from well-known guest ports to per-sandbox host Unix
 //!   sockets — attribution stays host-controlled;
 //! - the agent runs as a non-root exec through the guest agent, so its exit
-//!   code propagates directly (no status-share file protocol);
+//!   code propagates directly;
 //! - `mount_excludes` become tmpfs volumes shadowing workspace
 //!   subdirectories.
 //!
@@ -28,8 +27,8 @@
 use crate::runtime::images::ImageManifest;
 use crate::runtime::spec::NativeNetworkPlan;
 use crate::runtime::{
-    RuntimeExit, RuntimeInstance, RuntimeNetworkPlan, RuntimeStart, RuntimeState,
-    SandboxRuntimePort, SandboxRuntimeSpec, COMMAND_BROKER_PORT,
+    RuntimeExit, RuntimeInstance, RuntimeNetworkPlan, RuntimeState, SandboxRuntimePort,
+    SandboxRuntimeSpec, COMMAND_BROKER_PORT,
 };
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -288,13 +287,6 @@ fn bridge_args(spec: &SandboxRuntimeSpec) -> Vec<String> {
 
 impl SandboxRuntimePort for MicrosandboxRuntime {
     async fn start(&self, spec: SandboxRuntimeSpec) -> Result<RuntimeInstance> {
-        if let RuntimeStart::RestoreTemplate { .. } = spec.start {
-            anyhow::bail!(
-                "memory-snapshot templates are not supported by the MicroSandbox runtime; \
-                 use environment warming ('abox env warm') instead"
-            );
-        }
-
         let id = spec.id.clone();
         let image =
             self.manifest.image_for_profile(spec.environment.profile()).with_context(|| {
@@ -614,8 +606,7 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
             None
         };
 
-        // Agent exit ends the sandbox (parity with the legacy guest init,
-        // which powered the VM off after the agent finished).
+        // Agent exit ends the sandbox: the task is the sandbox's lifetime.
         let _ = sandbox.stop().await;
         if let Some(entry) = self.tasks.lock().unwrap().remove(id) {
             self.remove_control_sockets(id, &entry.control_ports);
@@ -709,7 +700,6 @@ mod tests {
             }],
             network: RuntimeNetworkPlan::HostMediated,
             native_secrets: vec![],
-            start: RuntimeStart::Fresh,
             lifecycle: RuntimeLifecycle::default(),
         }
     }

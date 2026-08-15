@@ -354,7 +354,6 @@ async fn warm_environment<W: WorkspacePort, R: SandboxRuntimePort>(
     let params = CreateSandboxParams {
         task_id: warm_task_id(&resolved.project_id),
         base_branch: default_prepare_base_branch(repo_root),
-        template: None,
         memory_mib: None,
         vcpus: None,
         user: None,
@@ -553,7 +552,6 @@ fn cache_dirs_present(state_dir: &Path, resolved: &ResolvedProjectConfig) -> boo
 mod tests {
     use super::*;
     use abox_core::ca::RootCa;
-    use abox_core::config::VmDefaults;
     use abox_core::policy::{PolicyEngine, PolicyFile};
     use abox_core::project::{rootfs_token, EnvironmentProfile};
     use abox_core::runtime::testing::MockRuntime;
@@ -662,22 +660,7 @@ mod tests {
     }
 
     fn test_config(state_dir: &Path) -> AboxConfig {
-        let rootfs = state_dir.join("vm/rootfs.raw");
-        let kernel = state_dir.join("vm/vmlinux");
-        std::fs::create_dir_all(rootfs.parent().unwrap()).unwrap();
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&kernel, b"kernel").unwrap();
-
-        AboxConfig {
-            state_dir: state_dir.to_path_buf(),
-            vm_defaults: VmDefaults {
-                memory_mib: 2048,
-                vcpus: 2,
-                image_path: Some(rootfs),
-                kernel_path: Some(kernel),
-            },
-            ..Default::default()
-        }
+        AboxConfig { state_dir: state_dir.to_path_buf(), ..Default::default() }
     }
 
     #[test]

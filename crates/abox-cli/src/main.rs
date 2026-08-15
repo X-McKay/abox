@@ -4,10 +4,9 @@ mod commands;
 mod kvm;
 mod msb;
 mod tui;
-mod virtiofsd;
 
 use abox_core::adapters::git2_workspace::Git2Workspace;
-use abox_core::adapters::selector::SelectedRuntime;
+use abox_core::adapters::microsandbox::MicrosandboxRuntime;
 use abox_core::config::AboxConfig;
 use abox_core::sandbox::SandboxOrchestrator;
 use anyhow::{Context, Result};
@@ -17,7 +16,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "abox",
-    about = "Parallel AI Agent Sandboxing with MicroVMs",
+    about = "Least-privilege execution and authorization for autonomous coding agents",
     version,
     propagate_version = true
 )]
@@ -60,9 +59,6 @@ enum Commands {
     #[command(alias = "ls")]
     List(commands::list::ListArgs),
 
-    /// Attach to a sandbox's console.
-    Attach(commands::attach::AttachArgs),
-
     /// Stop a sandbox.
     Stop(commands::stop::StopArgs),
 
@@ -75,12 +71,6 @@ enum Commands {
 
     /// Merge a sandbox's branch back into the base branch.
     Merge(commands::merge::MergeArgs),
-
-    /// Manage VM snapshot templates.
-    Template(commands::template::TemplateArgs),
-
-    /// Manage sandbox snapshots (create, restore, list, prune).
-    Snapshot(commands::snapshot::SnapshotArgs),
 
     /// Manage the root CA for HTTPS credential injection.
     #[command(subcommand)]
@@ -150,14 +140,6 @@ async fn main() -> Result<()> {
         return if ok { Ok(()) } else { std::process::exit(1) };
     }
 
-    // Template List and Delete do not need the orchestrator.
-    // Template Create does — it falls through to the orchestrator block below.
-    if let Some(Commands::Template(args)) = command.as_ref() {
-        if commands::template::execute_without_orchestrator(args, &config)? {
-            return Ok(());
-        }
-    }
-
     // CA command does not need the orchestrator
     if let Some(Commands::Ca(cmd)) = command.as_ref() {
         return commands::ca::execute(cmd);
@@ -178,14 +160,6 @@ async fn main() -> Result<()> {
     if let Some(Commands::Tui) = command.as_ref() {
         let mut state = tui::dashboard::DashboardState::new();
         return tui::dashboard::run_dashboard(&mut state);
-    }
-
-    // Snapshot list/delete/prune do not need the orchestrator.
-    // Snapshot create/restore do — they fall through to the orchestrator block.
-    if let Some(Commands::Snapshot(args)) = command.as_ref() {
-        if commands::snapshot::execute_without_orchestrator(args, &config)? {
-            return Ok(());
-        }
     }
 
     // Audit command does not need the orchestrator
@@ -216,12 +190,11 @@ async fn main() -> Result<()> {
 
     // Build the orchestrator
     let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
-    let runtime = SelectedRuntime::from_config(&config)?;
-    tracing::debug!(backend = %runtime.backend(), "sandbox runtime selected");
+    let runtime = MicrosandboxRuntime::new(&config)?;
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, runtime);
 
     // The root CA is only consumed by `abox run` (it backs the per-sandbox
-    // MITM egress proxy). Loading it for read-only commands like `list`,
+    // request broker). Loading it for read-only commands like `list`,
     // `stop`, `merge`, or `divergence` would unnecessarily couple them to the
     // CA's on-disk state — a corrupt or read-only `~/.abox/ca/` would block
     // commands that have nothing to do with the proxy. Defer the load into
@@ -236,7 +209,8 @@ async fn main() -> Result<()> {
                 abox_core::ca::RootCa::load_or_generate(&ca_dir)
                     .context("Failed to load or generate root CA")?,
             );
-            // Boxed: the runtime-selector enum makes these futures large.
+            // Boxed: the sandbox lifecycle future is large (guest exec
+            // streaming state machines).
             Box::pin(commands::run::execute(
                 args,
                 &repo_path,
@@ -262,21 +236,10 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::List(ref args) => commands::list::execute(args, &orchestrator).await,
-        Commands::Attach(args) => commands::attach::execute(args, &orchestrator).await,
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,
         Commands::Divergence(ref args) => commands::divergence::execute(args, &orchestrator),
         Commands::Path(ref args) => commands::path::execute(args, &orchestrator),
         Commands::Merge(ref args) => commands::merge::execute(args, &orchestrator),
-        Commands::Template(ref args) => match &args.action {
-            commands::template::TemplateAction::Create { name, from } => {
-                commands::template::execute_create(name, from, &orchestrator, &config).await
-            }
-            _ => unreachable!(),
-        },
-        Commands::Snapshot(ref args) => {
-            Box::pin(commands::snapshot::execute_with_orchestrator(args, &orchestrator, &config))
-                .await
-        }
         Commands::Ca(_)
         | Commands::Grant(_)
         | Commands::Services(_)

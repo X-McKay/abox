@@ -2,9 +2,10 @@
 # agent_smoke_test.sh — Local-only smoke tests for Claude Code and Codex
 #                       inside abox sandboxes.
 #
-# Exercises real API calls through the MITM credential-injecting proxy.
-# Requires:
-#   - /dev/kvm + bootstrapped VM artifacts (abox doctor)
+# Exercises real API calls through the MITM credential-injecting request
+# broker. Requires:
+#   - Hardware virtualization + MicroSandbox runtime assets (abox doctor)
+#   - Guest binaries staged (just build-guest-bins) or baked into the images
 #   - Valid Claude OAuth at ~/.claude/.credentials.json
 #   - Valid Codex OAuth at ~/.codex/auth.json
 #
@@ -123,11 +124,9 @@ cat > "$SCRATCH/config.toml" <<EOF
 state_dir = "$SCRATCH/state"
 runtime_dir = "$SCRATCH/r"
 
-[vm_defaults]
+[sandbox_defaults]
 memory_mib = 2048
 vcpus = 2
-image_path = "$HOME/.abox/vm/rootfs.raw"
-kernel_path = "$HOME/.abox/vm/vmlinux"
 
 [proxy]
 policy_dir = "$SCRATCH/state/policies"
@@ -197,7 +196,7 @@ if [[ "$FILTER" == "all" || "$FILTER" == "claude" ]]; then
     # operation as destructive and declines / asks for confirmation instead of
     # running it. Newer, more cautious models do the latter and never attempt
     # the push, so accept both. (The policy denial itself is exercised
-    # deterministically by e2e_test.sh phase 7, `force push denied by policy`.)
+    # deterministically by the runtime e2e suite's force-push denial case.)
     if [ -n "$T4_JSON" ] && echo "$T4_JSON" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -237,14 +236,14 @@ if [[ "$FILTER" == "all" || "$FILTER" == "codex" ]]; then
     c1_run 1
     # Match "6" as a standalone word/number (not in timestamps or log lines)
     if grep -P '^\s*6\s*$|^.*codex.*\n6$' "$LOG" >/dev/null 2>&1 || \
-       grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
+       grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
         pass "C1: single-turn smoke"
     else
         echo "  retrying C1 in 5s..."
         sleep 5
         c1_run 2
         if grep -P '^\s*6\s*$|^.*codex.*\n6$' "$LOG" >/dev/null 2>&1 || \
-           grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
+           grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning\|user$" "$LOG" | grep -q "6"; then
             pass "C1: single-turn smoke (retry)"
         else
             fail "C1: single-turn smoke" "see $LOG"
@@ -259,13 +258,13 @@ if [[ "$FILTER" == "all" || "$FILTER" == "codex" ]]; then
     }
     c2_run 1
     # Filter out log noise, then look for content words from the README
-    if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
+    if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
         pass "C2: multi-turn tool use"
     else
         echo "  retrying C2 in 5s..."
         sleep 5
         c2_run 2
-        if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|cloud-hyper\|socat\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
+        if grep -v "INFO\|WARN\|ERROR\|virtiofsd\|abox\|Debug\|Sandbox\|tokens\|Reconnect\|bubblewrap\|gitdir\|session\|OpenAI\|workdir\|model:\|provider:\|approval:\|sandbox:\|reasoning" "$LOG" | grep -qi -E "scratch|smoke|fox|test|repo|agent"; then
             pass "C2: multi-turn tool use (retry)"
         else
             fail "C2: multi-turn tool use" "see $LOG"

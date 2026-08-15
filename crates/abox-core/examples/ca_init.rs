@@ -1,6 +1,6 @@
 //! Generate the abox root CA if it doesn't already exist.
 //!
-//! Used by `bootstrap_vm.sh` to ensure a CA cert is available before
+//! Ensures a root CA exists on disk (idempotent) before
 //! building the guest rootfs.
 
 fn main() -> anyhow::Result<()> {

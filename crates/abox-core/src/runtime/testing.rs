@@ -31,8 +31,6 @@ struct MockState {
     started: Vec<SandboxRuntimeSpec>,
     stopped: Vec<String>,
     killed: Vec<String>,
-    paused: Vec<String>,
-    resumed: Vec<String>,
 }
 
 /// In-memory mock runtime.
@@ -78,16 +76,6 @@ impl MockRuntime {
     /// Sandbox ids passed to `kill()`, in order.
     pub fn killed(&self) -> Vec<String> {
         self.state.lock().unwrap().killed.clone()
-    }
-
-    /// Sandbox ids passed to `pause()`, in order.
-    pub fn paused(&self) -> Vec<String> {
-        self.state.lock().unwrap().paused.clone()
-    }
-
-    /// Sandbox ids passed to `resume()`, in order.
-    pub fn resumed(&self) -> Vec<String> {
-        self.state.lock().unwrap().resumed.clone()
     }
 
     fn is_running(&self, id: &str) -> bool {
@@ -155,15 +143,5 @@ impl SandboxRuntimePort for MockRuntime {
 
     fn control_socket(&self, id: &str, guest_port: u32) -> PathBuf {
         self.control_dir.join(format!("mock-{id}.sock_{guest_port}"))
-    }
-
-    async fn pause(&self, id: &str) -> Result<()> {
-        self.state.lock().unwrap().paused.push(id.to_string());
-        Ok(())
-    }
-
-    async fn resume(&self, id: &str) -> Result<()> {
-        self.state.lock().unwrap().resumed.push(id.to_string());
-        Ok(())
     }
 }

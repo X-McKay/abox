@@ -4,10 +4,9 @@
 //!     cargo bench -p abox-core
 //!
 //! These cover the CPU-bound code that runs on every proxied request
-//! (policy evaluation, request/response serialization, boot meta
-//! generation). They don't need a VM or /dev/kvm — they run in CI
-//! and catch performance regressions in the policy engine, the
-//! serialization layer, and the boot meta stager.
+//! (policy evaluation, request/response serialization). They don't need
+//! a VM or /dev/kvm — they run in CI and catch performance regressions
+//! in the policy engine and the serialization layer.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
@@ -136,46 +135,5 @@ fn serialization(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── Boot meta generation ───────────────────────────────────────────────────
-
-fn boot_meta(c: &mut Criterion) {
-    use abox_core::boot_meta::BootMeta;
-
-    let meta = BootMeta {
-        sandbox_id: "fix-auth".into(),
-        agent_command: vec!["claude".into(), "--model".into(), "opus".into()],
-        env: vec![
-            ("ANTHROPIC_API_KEY".into(), "sk-ant-12345".into()),
-            ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
-        ],
-        credential_files: vec![],
-        mount_excludes: vec![],
-    };
-
-    let mut group = c.benchmark_group("boot_meta");
-
-    group.bench_function("to_json", |b| {
-        b.iter(|| black_box(&meta).to_json().unwrap());
-    });
-
-    group.bench_function("runner_script", |b| {
-        b.iter(|| black_box(&meta).runner_script());
-    });
-
-    let json = meta.to_json().unwrap();
-    group.bench_function("from_json", |b| {
-        b.iter(|| BootMeta::from_json(black_box(&json)).unwrap());
-    });
-
-    group.bench_function("stage_to_tmpdir", |b| {
-        let tmp = tempfile::tempdir().unwrap();
-        b.iter(|| {
-            black_box(&meta).stage(tmp.path()).unwrap();
-        });
-    });
-
-    group.finish();
-}
-
-criterion_group!(benches, policy_evaluation, serialization, boot_meta);
+criterion_group!(benches, policy_evaluation, serialization);
 criterion_main!(benches);

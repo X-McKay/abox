@@ -2,25 +2,28 @@
 //!
 //! Two transports exist:
 //!
-//! - **Unix socket** (`/run/abox-proxy.sock`) — the legacy Cloud Hypervisor
-//!   guest layout, where `guest/init.sh` bridges the socket to vsock via
-//!   `socat`.
-//! - **Direct AF_VSOCK** — the MicroSandbox layout. The runtime routes guest
-//!   connections to `VMADDR_CID_HOST` (CID 2) at a fixed port to a
-//!   per-sandbox host Unix socket, so sandbox attribution derives from the
-//!   host-side route, never from anything the guest asserts.
+//! - **Unix socket** (`/run/abox-proxy.sock`, the default) — the shim
+//!   connects to the persistent `abox-bridge` process, which multiplexes
+//!   every exchange over one long-lived vsock uplink to the host command
+//!   broker (see `bridge.rs` for why per-process vsock connects are
+//!   avoided).
+//! - **Direct AF_VSOCK** — the shim connects straight to
+//!   `VMADDR_CID_HOST` (CID 2) at the declared port. The runtime routes
+//!   that port to a per-sandbox host Unix socket, so sandbox attribution
+//!   derives from the host-side route, never from anything the guest
+//!   asserts.
 //!
 //! The transport is declared by host-staged **immutable** configuration:
-//! `/etc/abox/transport`, written into the guest image/rootfs by the host
-//! before boot. The guest cannot escalate by editing it — pointing the shim
-//! at a different vsock port only reaches whatever the host routed there
-//! (nothing, for unrouted ports).
+//! `/etc/abox/transport`, patched into the guest rootfs before boot. The
+//! guest cannot escalate by editing it — pointing the shim at a different
+//! vsock port only reaches whatever the host routed there (nothing, for
+//! unrouted ports).
 //!
 //! File format (first non-comment line wins):
 //!
 //! ```text
-//! vsock:5000            # AF_VSOCK to CID 2, port 5000
 //! unix:/run/abox-proxy.sock
+//! vsock:5000            # AF_VSOCK to CID 2, port 5000
 //! ```
 
 use std::io::{Read, Write};
@@ -28,8 +31,8 @@ use std::io::{Read, Write};
 /// Host-staged transport declaration.
 pub const TRANSPORT_CONFIG_PATH: &str = "/etc/abox/transport";
 
-/// Legacy Unix socket path inside the guest (socat-bridged to vsock).
-pub const LEGACY_PROXY_SOCKET: &str = "/run/abox-proxy.sock";
+/// Default guest Unix socket (served by the persistent `abox-bridge`).
+pub const DEFAULT_PROXY_SOCKET: &str = "/run/abox-proxy.sock";
 
 /// vsock CID of the host from a guest's perspective.
 #[cfg(target_os = "linux")]
@@ -117,13 +120,13 @@ pub fn parse_transport(content: &str) -> Option<Transport> {
     None
 }
 
-/// Resolve the transport for a given default vsock port: host-staged config
-/// first, legacy Unix socket otherwise.
+/// Resolve the transport: host-staged config first, the default guest Unix
+/// socket otherwise.
 pub fn resolve_transport() -> Transport {
     match std::fs::read_to_string(TRANSPORT_CONFIG_PATH) {
         Ok(content) => parse_transport(&content)
-            .unwrap_or_else(|| Transport::Unix(LEGACY_PROXY_SOCKET.to_string())),
-        Err(_) => Transport::Unix(LEGACY_PROXY_SOCKET.to_string()),
+            .unwrap_or_else(|| Transport::Unix(DEFAULT_PROXY_SOCKET.to_string())),
+        Err(_) => Transport::Unix(DEFAULT_PROXY_SOCKET.to_string()),
     }
 }
 

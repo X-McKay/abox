@@ -30,8 +30,8 @@ impl From<&SandboxStatus> for ListItem {
         Self {
             id: s.id.clone(),
             branch: s.branch.clone(),
-            state: s.vm_state.clone(),
-            pid: s.vm_pid,
+            state: s.state.clone(),
+            pid: s.pid,
             ahead: s.commits_ahead,
             worktree_path: s.worktree_path.clone(),
         }
@@ -60,7 +60,7 @@ pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     for s in &sandboxes {
         println!(
             "{:<16} {:<24} {:<10} {:<8} {:<8}",
-            s.id, s.branch, s.vm_state, s.vm_pid, s.commits_ahead
+            s.id, s.branch, s.state, s.pid, s.commits_ahead
         );
     }
     println!();
@@ -79,8 +79,8 @@ mod tests {
             id: "t".into(),
             branch: "agent/t".into(),
             worktree_path: "/w/t".into(),
-            vm_state: "running".into(),
-            vm_pid: 42,
+            state: "running".into(),
+            pid: 42,
             commits_ahead: 3,
         };
         let item = ListItem::from(&s);

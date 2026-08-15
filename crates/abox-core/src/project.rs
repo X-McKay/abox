@@ -129,11 +129,6 @@ impl EnvironmentProfile {
         }
     }
 
-    /// Return true when this profile expects a dedicated rootfs image.
-    pub fn uses_dedicated_image(&self) -> bool {
-        *self != Self::Base
-    }
-
     /// Lowercase profile name used in paths and records.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -573,7 +568,7 @@ impl ProjectConfig {
             validate_mount_excludes(&environment.mount_excludes)?;
         }
 
-        // Each host-port bridge becomes a guest-side socat TCP listener, so guest
+        // Each host-port bridge becomes a guest-side loopback listener, so guest
         // ports must be non-zero and unique across host-port bridges and the
         // well-known ports of declared [services] sidecars — otherwise the
         // in-guest listeners would collide at boot.
@@ -935,67 +930,23 @@ pub fn clear_environment_state(state_dir: &Path, project_id: &str) -> Result<boo
     Ok(true)
 }
 
-/// Build a compact token describing the current guest rootfs image for
+/// Build a compact token describing the current guest image for
 /// environment freshness checks.
 pub fn rootfs_token(config: &AboxConfig) -> Result<String> {
     rootfs_token_for_profile(config, EnvironmentProfile::Base)
 }
 
-/// Build a compact token describing the current guest rootfs image for a
-/// specific environment profile.
-///
-/// Under the MicroSandbox runtime the token is the resolved OCI reference
-/// (digest-pinned once published), so a profile image bump invalidates
-/// warmed environments. The legacy Cloud Hypervisor path hashes the raw
-/// rootfs build-inputs stamp.
+/// Build a compact token describing the current guest image for a specific
+/// environment profile: the resolved OCI reference (digest-pinned once
+/// published), so a profile image bump invalidates warmed environments.
 pub fn rootfs_token_for_profile(
     config: &AboxConfig,
     profile: EnvironmentProfile,
 ) -> Result<String> {
-    if config.runtime.effective_backend()? == crate::config::RuntimeBackend::Microsandbox {
-        let manifest = crate::runtime::images::ImageManifest::embedded()?
-            .with_overrides(config.images.overrides.clone());
-        let image = manifest.image_for_profile(profile)?;
-        return Ok(format!("oci:{}", image.pull_reference()));
-    }
-
-    let image_path = image_path_for_profile(config, profile);
-    let inputs_path = image_path.with_file_name(format!(
-        "{}.inputs",
-        image_path.file_name().and_then(|name| name.to_str()).unwrap_or("rootfs.raw")
-    ));
-    if inputs_path.exists() {
-        let inputs = std::fs::read(&inputs_path)
-            .with_context(|| format!("Reading rootfs inputs {}", inputs_path.display()))?;
-        return Ok(format!(
-            "{}:inputs:{}",
-            image_path.display(),
-            hash_hex(&Sha256::digest(&inputs))
-        ));
-    }
-
-    let metadata = std::fs::metadata(&image_path)
-        .with_context(|| format!("Reading rootfs metadata {}", image_path.display()))?;
-    Ok(format!("{}:size:{}", image_path.display(), metadata.len()))
-}
-
-/// Resolve the guest rootfs path for a selected environment profile.
-pub fn image_path_for_profile(config: &AboxConfig, profile: EnvironmentProfile) -> PathBuf {
-    let default_vm_dir = config.state_dir.join("vm");
-    match profile {
-        EnvironmentProfile::Base => config
-            .vm_defaults
-            .image_path
-            .clone()
-            .unwrap_or_else(|| default_vm_dir.join("rootfs.raw")),
-        _ => default_vm_dir.join("profiles").join(profile.as_str()).join("rootfs.raw"),
-    }
-}
-
-/// Resolve the guest kernel path shared by all environment profiles.
-pub fn kernel_path_for_profile(config: &AboxConfig) -> PathBuf {
-    let default_vm_dir = config.state_dir.join("vm");
-    config.vm_defaults.kernel_path.clone().unwrap_or_else(|| default_vm_dir.join("vmlinux"))
+    let manifest = crate::runtime::images::ImageManifest::embedded()?
+        .with_overrides(config.images.overrides.clone());
+    let image = manifest.image_for_profile(profile)?;
+    Ok(format!("oci:{}", image.pull_reference()))
 }
 
 /// Choose the best default branch to fork for a repo-local prepare sandbox.
@@ -1849,39 +1800,6 @@ mod tests {
     }
 
     #[test]
-    fn rootfs_token_prefers_inputs_stamp_over_mutable_image_mtime() {
-        let temp = tempdir().unwrap();
-        let vm_dir = temp.path().join("vm");
-        std::fs::create_dir_all(&vm_dir).unwrap();
-        let image_path = vm_dir.join("rootfs.raw");
-        let inputs_path = vm_dir.join("rootfs.raw.inputs");
-        std::fs::write(&image_path, b"rootfs-bytes").unwrap();
-        std::fs::write(&inputs_path, b"stable-inputs").unwrap();
-
-        let config = crate::config::AboxConfig {
-            state_dir: temp.path().to_path_buf(),
-            vm_defaults: crate::config::VmDefaults {
-                memory_mib: 2048,
-                vcpus: 2,
-                image_path: Some(image_path.clone()),
-                kernel_path: None,
-            },
-            // The inputs-stamp path is legacy-runtime behavior.
-            runtime: crate::config::RuntimeConfig {
-                backend: crate::config::RuntimeBackend::CloudHypervisor,
-            },
-            ..Default::default()
-        };
-
-        let first = rootfs_token(&config).unwrap();
-        std::fs::write(&image_path, b"rootfs-bytes-mutated-at-runtime").unwrap();
-        let second = rootfs_token(&config).unwrap();
-
-        assert_eq!(first, second);
-        assert!(first.contains(":inputs:"));
-    }
-
-    #[test]
     fn rootfs_token_uses_oci_reference_under_microsandbox() {
         let temp = tempdir().unwrap();
         let config = crate::config::AboxConfig {
@@ -1890,20 +1808,6 @@ mod tests {
         };
         let token = rootfs_token(&config).unwrap();
         assert!(token.starts_with("oci:ghcr.io/x-mckay/abox-guest-base"), "token: {token}");
-    }
-
-    #[test]
-    fn profile_image_path_uses_profiles_subdir_for_non_base_profiles() {
-        let temp = tempdir().unwrap();
-        let config = crate::config::AboxConfig {
-            state_dir: temp.path().to_path_buf(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            image_path_for_profile(&config, EnvironmentProfile::Python),
-            temp.path().join("vm/profiles/python/rootfs.raw")
-        );
     }
 
     #[test]
