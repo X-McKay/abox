@@ -64,13 +64,17 @@ owns the security semantics on top: what the agent is *authorized* to do. See
 
 - Rust toolchain (`cargo`)
 - `just` command runner (`cargo install just`) — for development workflows
+- **Linux only:** the libcap-ng development headers, needed at link time by
+  the libkrun device layer (`libcap-ng-dev` on Debian/Ubuntu, `libcap-ng-devel`
+  on Fedora)
 
 ### Installation
 
 **From source** (recommended):
 
 ```bash
-# Prerequisites: Rust (https://rustup.rs), just (cargo install just)
+# Prerequisites: Rust (https://rustup.rs), just (cargo install just),
+# and on Linux the libcap-ng headers (apt install libcap-ng-dev)
 git clone https://github.com/X-McKay/abox.git
 cd abox
 cargo build --release

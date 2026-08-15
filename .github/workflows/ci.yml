@@ -33,6 +33,10 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
 
+      # libkrun's device layer (capng crate) links against libcap-ng on Linux.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcap-ng-dev
+
       # The microsandbox crate's build script installs the msb runtime bundle
       # into ~/.microsandbox on first build; cache it so CI doesn't
       # re-download it every run.
@@ -80,6 +84,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: e2e-runtime
+
+      # libkrun's device layer (capng crate) links against libcap-ng on Linux.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcap-ng-dev
 
       - name: Cache MicroSandbox runtime bundle
         uses: actions/cache@v4
