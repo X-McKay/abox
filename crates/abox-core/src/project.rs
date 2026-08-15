@@ -943,10 +943,22 @@ pub fn rootfs_token(config: &AboxConfig) -> Result<String> {
 
 /// Build a compact token describing the current guest rootfs image for a
 /// specific environment profile.
+///
+/// Under the MicroSandbox runtime the token is the resolved OCI reference
+/// (digest-pinned once published), so a profile image bump invalidates
+/// warmed environments. The legacy Cloud Hypervisor path hashes the raw
+/// rootfs build-inputs stamp.
 pub fn rootfs_token_for_profile(
     config: &AboxConfig,
     profile: EnvironmentProfile,
 ) -> Result<String> {
+    if config.runtime.effective_backend()? == crate::config::RuntimeBackend::Microsandbox {
+        let manifest = crate::runtime::images::ImageManifest::embedded()?
+            .with_overrides(config.images.overrides.clone());
+        let image = manifest.image_for_profile(profile)?;
+        return Ok(format!("oci:{}", image.pull_reference()));
+    }
+
     let image_path = image_path_for_profile(config, profile);
     let inputs_path = image_path.with_file_name(format!(
         "{}.inputs",
@@ -1854,6 +1866,10 @@ mod tests {
                 image_path: Some(image_path.clone()),
                 kernel_path: None,
             },
+            // The inputs-stamp path is legacy-runtime behavior.
+            runtime: crate::config::RuntimeConfig {
+                backend: crate::config::RuntimeBackend::CloudHypervisor,
+            },
             ..Default::default()
         };
 
@@ -1863,6 +1879,17 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.contains(":inputs:"));
+    }
+
+    #[test]
+    fn rootfs_token_uses_oci_reference_under_microsandbox() {
+        let temp = tempdir().unwrap();
+        let config = crate::config::AboxConfig {
+            state_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let token = rootfs_token(&config).unwrap();
+        assert!(token.starts_with("oci:ghcr.io/x-mckay/abox-guest-base"), "token: {token}");
     }
 
     #[test]
