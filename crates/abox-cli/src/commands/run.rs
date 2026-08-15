@@ -737,9 +737,20 @@ fn spawn_detached<W: WorkspacePort, R: SandboxRuntimePort>(
     Ok(())
 }
 
-/// Remove every occurrence of `--detach` from an argv list.
+/// Remove `--detach` from the abox-option region of an argv list — i.e.
+/// only before the first `--`. Everything after the delimiter belongs to
+/// the guest command and is preserved verbatim.
 fn strip_detach_flag(argv: &[String]) -> Vec<String> {
-    argv.iter().filter(|a| a.as_str() != "--detach").cloned().collect()
+    let mut in_guest_command = false;
+    argv.iter()
+        .filter(|a| {
+            if a.as_str() == "--" {
+                in_guest_command = true;
+            }
+            in_guest_command || a.as_str() != "--detach"
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -779,6 +790,24 @@ mod tests {
     fn test_strip_detach_at_start() {
         let raw = vec!["--detach".to_string(), "run".to_string(), "--task".to_string()];
         assert_eq!(strip_detach_flag(&raw), vec!["run", "--task"]);
+    }
+
+    #[test]
+    fn test_strip_detach_preserves_guest_detach_after_delimiter() {
+        // `--detach` after `--` belongs to the guest command and must survive.
+        let raw = vec![
+            "run".to_string(),
+            "--task".to_string(),
+            "x".to_string(),
+            "--detach".to_string(),
+            "--".to_string(),
+            "tool".to_string(),
+            "--detach".to_string(),
+        ];
+        assert_eq!(
+            strip_detach_flag(&raw),
+            vec!["run", "--task", "x", "--", "tool", "--detach"]
+        );
     }
 
     #[test]
