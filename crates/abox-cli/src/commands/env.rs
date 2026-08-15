@@ -7,8 +7,8 @@ use abox_core::project::{
     record_environment_state, rootfs_token_for_profile, EnvironmentProfile, EnvironmentStateRecord,
     ProjectConfig, ResolvedProjectConfig,
 };
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -66,10 +66,10 @@ pub fn execute_without_orchestrator(
     }
 }
 
-pub async fn execute_warm<W: WorkspacePort, V: VmPort>(
+pub async fn execute_warm<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &EnvArgs,
     repo_root: &Path,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
 ) -> Result<()> {
@@ -145,10 +145,10 @@ pub async fn execute_warm<W: WorkspacePort, V: VmPort>(
     Ok(())
 }
 
-pub(crate) async fn ensure_warm_environment_for_run<W: WorkspacePort, V: VmPort>(
+pub(crate) async fn ensure_warm_environment_for_run<W: WorkspacePort, R: SandboxRuntimePort>(
     repo_root: &Path,
     resolved: Option<&ResolvedProjectConfig>,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
 ) -> Result<()> {
@@ -327,10 +327,10 @@ fn evaluate_warm_state(
     Ok(WarmEvaluation { rootfs_token, environment_fingerprint, current_state })
 }
 
-async fn warm_environment<W: WorkspacePort, V: VmPort>(
+async fn warm_environment<W: WorkspacePort, R: SandboxRuntimePort>(
     repo_root: &Path,
     resolved: &ResolvedProjectConfig,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
     evaluation: &WarmEvaluation,
@@ -554,7 +554,7 @@ mod tests {
     use abox_core::config::VmDefaults;
     use abox_core::policy::{PolicyEngine, PolicyFile};
     use abox_core::project::{rootfs_token, EnvironmentProfile};
-    use abox_core::vm::{VmConfig, VmInfo, VmState};
+    use abox_core::runtime::testing::MockRuntime;
     use abox_core::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -589,34 +589,6 @@ mod tests {
             _base_branch: &str,
         ) -> anyhow::Result<Vec<String>> {
             panic!("workspace should not be used in this test")
-        }
-    }
-
-    struct PanicVm;
-
-    impl VmPort for PanicVm {
-        async fn start(&self, _config: abox_core::vm::VmConfig) -> anyhow::Result<VmInfo> {
-            panic!("vm should not be started in this test")
-        }
-
-        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
-            panic!("vm should not be used in this test")
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            panic!("vm should not be used in this test")
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            panic!("vm should not be used in this test")
-        }
-
-        async fn info(&self, _id: &str) -> anyhow::Result<VmInfo> {
-            panic!("vm should not be used in this test")
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            panic!("vm should not be used in this test")
         }
     }
 
@@ -667,74 +639,6 @@ mod tests {
             _base_branch: &str,
         ) -> anyhow::Result<Vec<String>> {
             Ok(vec![])
-        }
-    }
-
-    struct RecordingVm {
-        started: Arc<Mutex<Vec<VmConfig>>>,
-        stopped: Arc<Mutex<Vec<String>>>,
-        status_root: PathBuf,
-    }
-
-    impl RecordingVm {
-        fn new(status_root: PathBuf) -> Self {
-            Self {
-                started: Arc::new(Mutex::new(Vec::new())),
-                stopped: Arc::new(Mutex::new(Vec::new())),
-                status_root,
-            }
-        }
-    }
-
-    impl VmPort for RecordingVm {
-        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-            let id = config.id.clone();
-            let status_dir = self.status_root.join(&id);
-            std::fs::create_dir_all(&status_dir)?;
-            std::fs::write(status_dir.join("exit-code"), "0\n")?;
-            self.started.lock().unwrap().push(config);
-            Ok(VmInfo {
-                id,
-                pid: 12345,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/mock-api.sock"),
-                console_socket: PathBuf::from("/tmp/mock-console.sock"),
-            })
-        }
-
-        async fn stop(&self, id: &str) -> anyhow::Result<()> {
-            self.stopped.lock().unwrap().push(id.to_string());
-            Ok(())
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-            Ok(VmInfo {
-                id: id.to_string(),
-                pid: 12345,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/mock-api.sock"),
-                console_socket: PathBuf::from("/tmp/mock-console.sock"),
-            })
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-
-        async fn wait_for_exit(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn status_dir(&self, id: &str) -> Option<PathBuf> {
-            Some(self.status_root.join(id))
         }
     }
 
@@ -876,7 +780,11 @@ mod tests {
         )
         .unwrap();
 
-        let orchestrator = SandboxOrchestrator::new(config, PanicWorkspace, PanicVm);
+        let orchestrator = SandboxOrchestrator::new(
+            config,
+            PanicWorkspace,
+            MockRuntime::panicking(tmp.path().to_path_buf()),
+        );
         let policy = std::sync::Arc::new(
             PolicyEngine::from_policy_file(PolicyFile {
                 cli: vec![],
@@ -906,10 +814,8 @@ mod tests {
         let workspace = RecordingWorkspace::new(config.worktrees_dir());
         let workspace_created = Arc::clone(&workspace.created);
         let workspace_removed = Arc::clone(&workspace.removed);
-        let vm = RecordingVm::new(config.runtime_dir().join("status-mock"));
-        let started = Arc::clone(&vm.started);
-        let stopped = Arc::clone(&vm.stopped);
-        let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm);
+        let vm = MockRuntime::new(config.runtime_dir());
+        let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm.clone());
 
         let policy = std::sync::Arc::new(
             PolicyEngine::from_policy_file(PolicyFile {
@@ -934,19 +840,22 @@ mod tests {
         .await
         .unwrap();
 
-        let started_configs = started.lock().unwrap().clone();
-        assert_eq!(started_configs.len(), 1, "cold warm flow should run exactly one prepare VM");
-        let warm_config = &started_configs[0];
-        assert!(warm_config.id.starts_with("warm-"));
-        assert_eq!(warm_config.agent_command, vec!["sh", "/abox-meta/prepare.sh"]);
-        assert!(warm_config
-            .env_vars
+        let started_specs = vm.started();
+        assert_eq!(started_specs.len(), 1, "cold warm flow should run exactly one prepare VM");
+        let warm_spec = &started_specs[0];
+        assert!(warm_spec.id.starts_with("warm-"));
+        assert_eq!(warm_spec.command, vec!["sh", "/abox-meta/prepare.sh"]);
+        assert!(warm_spec
+            .env
             .contains(&("NPM_CONFIG_CACHE".to_string(), "/abox-cache/npm".to_string())));
+        assert_eq!(warm_spec.caches.len(), 1, "cache root should be mounted into the guest");
         assert_eq!(
-            warm_config.cache_mount_dir,
-            Some(project_cache_root(&config.state_dir, &resolved.project_id))
+            warm_spec.caches[0].host_path,
+            project_cache_root(&config.state_dir, &resolved.project_id)
         );
-        assert!(warm_config
+        assert_eq!(warm_spec.caches[0].guest_path, "/abox-cache");
+        assert!(!warm_spec.caches[0].read_only);
+        assert!(warm_spec
             .staged_prepare_script
             .as_deref()
             .is_some_and(|script| script.contains("echo warm")));
@@ -960,14 +869,14 @@ mod tests {
             1,
             "ephemeral warm flow should clean up its worktree"
         );
-        assert_eq!(stopped.lock().unwrap().len(), 1, "ephemeral warm flow should stop the VM");
+        assert_eq!(vm.stopped().len(), 1, "ephemeral warm flow should stop the VM");
 
         ensure_warm_environment_for_run(repo_root, Some(&resolved), &orchestrator, policy, root_ca)
             .await
             .unwrap();
 
         assert_eq!(
-            started.lock().unwrap().len(),
+            vm.started().len(),
             1,
             "ready warm state should be reused without starting another VM"
         );

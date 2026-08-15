@@ -1,7 +1,7 @@
 //! `abox list` — List all active sandboxes.
 
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::{SandboxOrchestrator, SandboxStatus};
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
 use clap::Args;
@@ -38,9 +38,9 @@ impl From<&SandboxStatus> for ListItem {
     }
 }
 
-pub async fn execute<W: WorkspacePort, V: VmPort>(
+pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &ListArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     let sandboxes = orchestrator.list_sandboxes().await?;
 

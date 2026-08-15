@@ -1,8 +1,8 @@
 //! `abox stop` — Stop a sandbox and optionally clean up.
 
 use super::validate_task_arg;
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::SandboxOrchestrator;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
 use clap::Args;
@@ -17,9 +17,9 @@ pub struct StopArgs {
     pub clean: bool,
 }
 
-pub async fn execute<W: WorkspacePort, V: VmPort>(
+pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: StopArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     validate_task_arg(&args.task)?;
 

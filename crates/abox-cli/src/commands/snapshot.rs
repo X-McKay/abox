@@ -18,14 +18,13 @@
 use super::validate_task_arg;
 use abox_core::config::AboxConfig;
 use abox_core::project::EnvironmentProfile;
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
 use abox_core::snapshot::{validate_template_name, SnapshotManager};
 use abox_core::util::format_size;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use std::collections::HashMap;
 
 #[derive(Debug, Args)]
 pub struct SnapshotArgs {
@@ -107,9 +106,9 @@ pub fn execute_without_orchestrator(args: &SnapshotArgs, config: &AboxConfig) ->
 }
 
 /// Execute snapshot create/restore, which require the orchestrator.
-pub async fn execute_with_orchestrator<W: WorkspacePort, V: VmPort>(
+pub async fn execute_with_orchestrator<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &SnapshotArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     config: &AboxConfig,
 ) -> Result<()> {
     let snap_mgr = SnapshotManager::new(
@@ -160,30 +159,28 @@ fn list_snapshots(snap_mgr: &SnapshotManager) -> Result<()> {
     Ok(())
 }
 
-async fn create_snapshot<W: WorkspacePort, V: VmPort>(
+async fn create_snapshot<W: WorkspacePort, R: SandboxRuntimePort>(
     name: &str,
     from: &str,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     snap_mgr: &SnapshotManager,
 ) -> Result<()> {
     println!("Creating snapshot '{name}' from sandbox '{from}'...");
 
-    // Look up the VM info (gives us the API socket path).
-    let info = orchestrator.vm_info(from).await?;
+    // Verify the sandbox exists, then get the runtime's snapshot handles
+    // (hypervisor API socket + filesystem-share socket names to re-pin).
+    orchestrator.runtime_info(from).await?;
+    let handles = orchestrator
+        .memory_snapshot_handles(from)
+        .ok_or_else(|| anyhow::anyhow!("this runtime does not support memory snapshots"))?;
 
     // Pause the sandbox so the snapshot is consistent.
     println!("  Pausing sandbox...");
     orchestrator.pause_sandbox(from).await?;
 
-    // Record the virtiofsd socket filenames so restores can recreate them.
-    let mut virtiofs_sockets = HashMap::new();
-    virtiofs_sockets.insert("workspace".to_string(), format!("vfs-{from}.sock"));
-    virtiofs_sockets.insert("meta".to_string(), format!("vfs-meta-{from}.sock"));
-    virtiofs_sockets.insert("status".to_string(), format!("vfs-status-{from}.sock"));
-
     // Create the snapshot. On failure, attempt to resume the sandbox so we
     // don't leave it stuck in the paused state.
-    match snap_mgr.create_snapshot(&info.api_socket, name, virtiofs_sockets).await {
+    match snap_mgr.create_snapshot(&handles.api_socket, name, handles.virtiofs_sockets).await {
         Ok(path) => {
             orchestrator.resume_sandbox(from).await?;
             let size = abox_core::snapshot::dir_size(&path).unwrap_or(0);
@@ -200,10 +197,10 @@ async fn create_snapshot<W: WorkspacePort, V: VmPort>(
     }
 }
 
-async fn restore_snapshot<W: WorkspacePort, V: VmPort>(
+async fn restore_snapshot<W: WorkspacePort, R: SandboxRuntimePort>(
     name: &str,
     sandbox_id: &str,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     snap_mgr: &SnapshotManager,
 ) -> Result<()> {
     // Verify the snapshot exists before doing any work.

@@ -1,8 +1,8 @@
 //! `abox merge` — Merge a sandbox's branch back into the base branch.
 
 use super::validate_task_arg;
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::SandboxOrchestrator;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::Result;
 use clap::Args;
@@ -17,9 +17,9 @@ pub struct MergeArgs {
     pub base: String,
 }
 
-pub fn execute<W: WorkspacePort, V: VmPort>(
+pub fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &MergeArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     validate_task_arg(&args.task)?;
 

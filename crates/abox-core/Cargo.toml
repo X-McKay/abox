@@ -37,10 +37,15 @@ webpki-roots = "0.26"
 rustls-pemfile = "2"
 rustix = { version = "1", features = ["fs"] }
 
+[features]
+# Exposes `runtime::testing::MockRuntime` for downstream test suites.
+test-support = []
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+abox-core = { path = ".", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }

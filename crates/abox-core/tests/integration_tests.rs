@@ -8,9 +8,9 @@ use abox_core::adapters::git2_workspace::Git2Workspace;
 use abox_core::config::AboxConfig;
 use abox_core::policy::{CliPolicy, Decision, EgressRule, PolicyEngine, PolicyFile};
 use abox_core::project::EnvironmentProfile;
+use abox_core::runtime::testing::{MockBehavior, MockRuntime};
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
 use abox_core::snapshot::SnapshotManager;
-use abox_core::vm::{VmConfig, VmInfo, VmPort, VmState};
 use abox_core::workspace::{FileStatus, WorkspacePort};
 use git2::Repository;
 use std::path::{Path, PathBuf};
@@ -664,95 +664,7 @@ fn test_snapshot_manager_delete_nonexistent_fails() {
     assert!(result.is_err());
 }
 
-// ─── Sandbox Orchestrator Tests (with Mock VM) ─────────────────────────────
-
-/// Create a TempDir with a minimal vm/ directory containing dummy artifact
-/// files so that the orchestrator's existence checks pass in unit tests.
-fn setup_vm_artifacts(tmp: &TempDir) {
-    let vm_dir = tmp.path().join("vm");
-    std::fs::create_dir_all(&vm_dir).unwrap();
-    std::fs::write(vm_dir.join("rootfs.raw"), b"fake rootfs").unwrap();
-    std::fs::write(vm_dir.join("vmlinux"), b"fake kernel").unwrap();
-}
-
-/// A mock VM port that doesn't actually start any VMs.
-/// Used to test the orchestrator's coordination logic.
-struct MockVmPort {
-    started: std::sync::Mutex<Vec<VmConfig>>,
-    stopped: std::sync::Mutex<Vec<String>>,
-}
-
-impl MockVmPort {
-    fn new() -> Self {
-        Self {
-            started: std::sync::Mutex::new(Vec::new()),
-            stopped: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn started_ids(&self) -> Vec<String> {
-        self.started.lock().unwrap().iter().map(|c| c.id.clone()).collect()
-    }
-
-    #[allow(dead_code)]
-    fn stopped_ids(&self) -> Vec<String> {
-        self.stopped.lock().unwrap().clone()
-    }
-}
-
-impl VmPort for MockVmPort {
-    async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-        let id = config.id.clone();
-        self.started.lock().unwrap().push(config);
-        Ok(VmInfo {
-            id,
-            pid: 12345,
-            state: VmState::Running,
-            api_socket: PathBuf::from("/tmp/mock-api.sock"),
-            console_socket: PathBuf::from("/tmp/mock-console.sock"),
-        })
-    }
-
-    async fn stop(&self, id: &str) -> anyhow::Result<()> {
-        self.stopped.lock().unwrap().push(id.to_string());
-        Ok(())
-    }
-
-    async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-        Ok(VmInfo {
-            id: id.to_string(),
-            pid: 12345,
-            state: VmState::Running,
-            api_socket: PathBuf::from("/tmp/mock-api.sock"),
-            console_socket: PathBuf::from("/tmp/mock-console.sock"),
-        })
-    }
-
-    async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-        Ok(self
-            .started
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|c| VmInfo {
-                id: c.id.clone(),
-                pid: 12345,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/mock-api.sock"),
-                console_socket: PathBuf::from("/tmp/mock-console.sock"),
-            })
-            .collect())
-    }
-}
+// ─── Sandbox Orchestrator Tests (with MockRuntime) ─────────────────────────
 
 #[tokio::test]
 async fn test_orchestrator_create_sandbox() {
@@ -760,10 +672,8 @@ async fn test_orchestrator_create_sandbox() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
-
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
-    let vm = MockVmPort::new();
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orch = SandboxOrchestrator::new(config, ws, vm);
 
     let status = orch
@@ -805,10 +715,8 @@ async fn test_worktree_info_lookup() {
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
-
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
-    let vm = MockVmPort::new();
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orch = SandboxOrchestrator::new(config, ws, vm);
 
     let status = orch
@@ -850,10 +758,8 @@ async fn test_orchestrator_create_multiple_sandboxes() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
-
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
-    let vm = MockVmPort::new();
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orch = SandboxOrchestrator::new(config, ws, vm);
 
     for task in &["task-a", "task-b", "task-c"] {
@@ -897,10 +803,8 @@ async fn test_orchestrator_stop_sandbox() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
-
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
-    let vm = MockVmPort::new();
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orch = SandboxOrchestrator::new(config, ws, vm);
 
     orch.create_sandbox(CreateSandboxParams {
@@ -940,10 +844,8 @@ async fn test_orchestrator_stop_with_clean() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
-
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
-    let vm = MockVmPort::new();
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orch = SandboxOrchestrator::new(config, ws, vm);
 
     orch.create_sandbox(CreateSandboxParams {
@@ -983,10 +885,8 @@ async fn test_orchestrator_divergence() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
-
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
-    let vm = MockVmPort::new();
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orch = SandboxOrchestrator::new(config, ws, vm);
 
     let status = orch
@@ -1038,11 +938,9 @@ async fn test_orchestrator_vm_config_overrides() {
     let wt_base = tmp.path().join("worktrees");
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
-
     let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
-    let vm = MockVmPort::new();
-    let orch = SandboxOrchestrator::new(config, ws, vm);
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
+    let orch = SandboxOrchestrator::new(config, ws, vm.clone());
 
     orch.create_sandbox(CreateSandboxParams {
         task_id: "task-custom".to_string(),
@@ -1068,10 +966,18 @@ async fn test_orchestrator_vm_config_overrides() {
     .await
     .unwrap();
 
-    // Verify the VM was started with the overridden config
-    // We need to access the mock's internal state
-    // Since we can't easily access it through the orchestrator,
-    // we verify the status output is correct
+    // Verify the sandbox was started with the overridden spec.
+    let started = vm.started();
+    assert_eq!(started.len(), 1);
+    let spec = &started[0];
+    assert_eq!(spec.id, "task-custom");
+    assert_eq!(spec.resources.memory_mib, 8192);
+    assert_eq!(spec.resources.vcpus, 4);
+    assert_eq!(spec.user.as_deref(), Some("agent-user"));
+    assert!(spec.env.contains(&("FOO".to_string(), "bar".to_string())));
+    assert_eq!(spec.command, vec!["claude".to_string()]);
+    assert_eq!(spec.workspace.host_path(), &wt_base.join("task-custom"));
+
     let statuses = orch.list_sandboxes().await.unwrap();
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].id, "task-custom");
@@ -1079,81 +985,17 @@ async fn test_orchestrator_vm_config_overrides() {
 
 #[tokio::test]
 async fn test_run_sandbox_polls_until_vm_exits() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A mock VM port whose `info()` returns Ok on the first call and Err
-    /// on all subsequent calls, simulating a VM whose guest agent exited
-    /// promptly with code 0. The mock exposes a `status_dir` so
-    /// `run_sandbox` can read a pre-staged "0\n" exit-code file (mirroring
-    /// what the real `aboxstatus` virtiofs share would contain after a
-    /// clean guest poweroff).
-    struct ExitingMockVm {
-        info_calls: AtomicUsize,
-        status_dir: PathBuf,
-    }
-
-    impl VmPort for ExitingMockVm {
-        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-            Ok(VmInfo {
-                id: config.id,
-                pid: 12345,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/api.sock"),
-                console_socket: PathBuf::from("/tmp/console.sock"),
-            })
-        }
-
-        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-            // First call: VM still exists. All subsequent calls: VM is gone.
-            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                Ok(VmInfo {
-                    id: id.to_string(),
-                    pid: 12345,
-                    state: VmState::Running,
-                    api_socket: PathBuf::from("/tmp/api.sock"),
-                    console_socket: PathBuf::from("/tmp/console.sock"),
-                })
-            } else {
-                anyhow::bail!("VM exited")
-            }
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-
-        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
-            Some(self.status_dir.clone())
-        }
-    }
-
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
-    // Pre-stage a clean exit code (0) like a real guest poweroff would.
-    let status_dir = tmp.path().join("status-run-sandbox-test");
-    std::fs::create_dir_all(&status_dir).unwrap();
-    std::fs::write(status_dir.join("exit-code"), "0\n").unwrap();
-
-    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0), status_dir };
+    // A sandbox whose guest agent exits promptly with code 0; the runtime
+    // reports the clean exit through its exit channel (mirroring what a
+    // real guest poweroff would produce).
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {
@@ -1204,75 +1046,19 @@ async fn test_run_sandbox_polls_until_vm_exits() {
 
 #[tokio::test]
 async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A mock VM that exits without writing an exit-code file.
-    /// Simulates a VM crash before guest init completed.
-    struct ExitingMockVmNoStatus {
-        info_calls: AtomicUsize,
-        status_dir: PathBuf,
-    }
-
-    impl VmPort for ExitingMockVmNoStatus {
-        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-            Ok(VmInfo {
-                id: config.id,
-                pid: 99999,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/api.sock"),
-                console_socket: PathBuf::from("/tmp/console.sock"),
-            })
-        }
-
-        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                Ok(VmInfo {
-                    id: id.to_string(),
-                    pid: 99999,
-                    state: VmState::Running,
-                    api_socket: PathBuf::from("/tmp/api.sock"),
-                    console_socket: PathBuf::from("/tmp/console.sock"),
-                })
-            } else {
-                anyhow::bail!("VM exited")
-            }
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-
-        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
-            Some(self.status_dir.clone())
-        }
-    }
-
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
-    // Create a status dir with NO exit-code file (simulates crash).
-    let status_dir = tmp.path().join("status-silent-fail");
-    std::fs::create_dir_all(&status_dir).unwrap();
-
-    let vm = ExitingMockVmNoStatus { info_calls: AtomicUsize::new(0), status_dir };
+    // A sandbox that terminates without reporting an exit code — simulates
+    // a crash before guest init completed.
+    let vm = MockRuntime::with_behavior(
+        tmp.path().to_path_buf(),
+        MockBehavior { exit_code: None, ..MockBehavior::default() },
+    );
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {
@@ -1352,71 +1138,23 @@ fn test_read_exit_code_malformed_returns_none() {
 
 // ─── Timeout Tests ─────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_run_sandbox_timeout_returns_124() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A mock VM that never exits on its own — `info()` always returns Ok.
-    /// `stop()` records calls so we can verify graceful shutdown was attempted,
-    /// and after stop is called, `info()` starts returning Err (simulating
-    /// the VM exiting after graceful shutdown).
-    struct NeverExitVm {
-        stop_calls: AtomicUsize,
-    }
-
-    impl VmPort for NeverExitVm {
-        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-            Ok(VmInfo {
-                id: config.id,
-                pid: 99999,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/api.sock"),
-                console_socket: PathBuf::from("/tmp/console.sock"),
-            })
-        }
-
-        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
-            self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-            // After stop() is called, simulate VM gone.
-            if self.stop_calls.load(Ordering::SeqCst) > 0 {
-                anyhow::bail!("VM exited after stop");
-            }
-            Ok(VmInfo {
-                id: id.to_string(),
-                pid: 99999,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/api.sock"),
-                console_socket: PathBuf::from("/tmp/console.sock"),
-            })
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-    }
-
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
-    let vm = NeverExitVm { stop_calls: AtomicUsize::new(0) };
-    let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
+    // A sandbox that never exits on its own — the orchestrator must enforce
+    // the timeout, attempt a graceful stop, and force-kill after the grace
+    // period. (Paused tokio time auto-advances through the grace wait.)
+    let vm = MockRuntime::with_behavior(
+        tmp.path().to_path_buf(),
+        MockBehavior { never_exit: true, ..MockBehavior::default() },
+    );
+    let orchestrator = SandboxOrchestrator::new(config, workspace, vm.clone());
 
     let params = CreateSandboxParams {
         task_id: "timeout-test".into(),
@@ -1459,79 +1197,35 @@ async fn test_run_sandbox_timeout_returns_124() {
         .await
         .unwrap();
     assert_eq!(exit, 124, "timeout should produce exit code 124");
+
+    // Graceful shutdown must have been attempted before force-killing.
+    assert_eq!(vm.stopped(), vec!["timeout-test".to_string()]);
+    assert_eq!(
+        vm.killed(),
+        vec!["timeout-test".to_string()],
+        "sandbox that ignores stop must be force-killed after the grace period"
+    );
 }
 
 #[tokio::test]
 async fn test_run_sandbox_exits_before_timeout() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A mock VM that exits after 1 info() call, well before any timeout.
-    struct QuickExitVm {
-        info_calls: AtomicUsize,
-        status_dir: PathBuf,
-    }
-
-    impl VmPort for QuickExitVm {
-        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-            Ok(VmInfo {
-                id: config.id,
-                pid: 12345,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/api.sock"),
-                console_socket: PathBuf::from("/tmp/console.sock"),
-            })
-        }
-
-        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                Ok(VmInfo {
-                    id: id.to_string(),
-                    pid: 12345,
-                    state: VmState::Running,
-                    api_socket: PathBuf::from("/tmp/api.sock"),
-                    console_socket: PathBuf::from("/tmp/console.sock"),
-                })
-            } else {
-                anyhow::bail!("VM exited")
-            }
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-
-        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
-            Some(self.status_dir.clone())
-        }
-    }
-
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
-    // Pre-stage exit code 42.
-    let status_dir = tmp.path().join("status-quick-exit");
-    std::fs::create_dir_all(&status_dir).unwrap();
-    std::fs::write(status_dir.join("exit-code"), "42\n").unwrap();
-
-    let vm = QuickExitVm { info_calls: AtomicUsize::new(0), status_dir };
+    // A sandbox that exits with code 42 after a short delay, well before
+    // the timeout fires.
+    let vm = MockRuntime::with_behavior(
+        tmp.path().to_path_buf(),
+        MockBehavior {
+            exit_code: Some(42),
+            exit_delay: Some(std::time::Duration::from_millis(50)),
+            ..MockBehavior::default()
+        },
+    );
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {
@@ -1581,73 +1275,15 @@ async fn test_run_sandbox_exits_before_timeout() {
 
 #[tokio::test]
 async fn test_run_sandbox_ephemeral_cleans_up() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct ExitingMockVm {
-        info_calls: AtomicUsize,
-        status_dir: PathBuf,
-    }
-
-    impl VmPort for ExitingMockVm {
-        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-            Ok(VmInfo {
-                id: config.id,
-                pid: 12345,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/api.sock"),
-                console_socket: PathBuf::from("/tmp/console.sock"),
-            })
-        }
-
-        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                Ok(VmInfo {
-                    id: id.to_string(),
-                    pid: 12345,
-                    state: VmState::Running,
-                    api_socket: PathBuf::from("/tmp/api.sock"),
-                    console_socket: PathBuf::from("/tmp/console.sock"),
-                })
-            } else {
-                anyhow::bail!("VM exited")
-            }
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-
-        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
-            Some(self.status_dir.clone())
-        }
-    }
-
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
-    let status_dir = tmp.path().join("status-ephemeral");
-    std::fs::create_dir_all(&status_dir).unwrap();
-    std::fs::write(status_dir.join("exit-code"), "0\n").unwrap();
-
-    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0), status_dir };
+    // A sandbox whose guest agent exits cleanly with code 0.
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {
@@ -1698,73 +1334,15 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
 
 #[tokio::test]
 async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct ExitingMockVm {
-        info_calls: AtomicUsize,
-        status_dir: PathBuf,
-    }
-
-    impl VmPort for ExitingMockVm {
-        async fn start(&self, config: VmConfig) -> anyhow::Result<VmInfo> {
-            Ok(VmInfo {
-                id: config.id,
-                pid: 12345,
-                state: VmState::Running,
-                api_socket: PathBuf::from("/tmp/api.sock"),
-                console_socket: PathBuf::from("/tmp/console.sock"),
-            })
-        }
-
-        async fn stop(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn pause(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn resume(&self, _id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn info(&self, id: &str) -> anyhow::Result<VmInfo> {
-            let n = self.info_calls.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                Ok(VmInfo {
-                    id: id.to_string(),
-                    pid: 12345,
-                    state: VmState::Running,
-                    api_socket: PathBuf::from("/tmp/api.sock"),
-                    console_socket: PathBuf::from("/tmp/console.sock"),
-                })
-            } else {
-                anyhow::bail!("VM exited")
-            }
-        }
-
-        async fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-
-        fn status_dir(&self, _id: &str) -> Option<PathBuf> {
-            Some(self.status_dir.clone())
-        }
-    }
-
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");
     let workspace = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
     let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
-    setup_vm_artifacts(&tmp);
     config.ensure_dirs().unwrap();
 
-    let status_dir = tmp.path().join("status-non-ephemeral");
-    std::fs::create_dir_all(&status_dir).unwrap();
-    std::fs::write(status_dir.join("exit-code"), "0\n").unwrap();
-
-    let vm = ExitingMockVm { info_calls: AtomicUsize::new(0), status_dir };
+    // A sandbox whose guest agent exits cleanly with code 0.
+    let vm = MockRuntime::new(tmp.path().to_path_buf());
     let orchestrator = SandboxOrchestrator::new(config, workspace, vm);
 
     let params = CreateSandboxParams {

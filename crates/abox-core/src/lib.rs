@@ -8,9 +8,11 @@
 //!
 //! The crate follows hexagonal (ports & adapters) architecture:
 //!
-//! - **Ports** define trait interfaces: [`workspace::WorkspacePort`], [`vm::VmPort`]
+//! - **Ports** define trait interfaces: [`workspace::WorkspacePort`],
+//!   [`runtime::SandboxRuntimePort`]
 //! - **Adapters** implement those traits: [`adapters::git2_workspace::Git2Workspace`],
-//!   [`adapters::cloud_hypervisor::CloudHypervisorAdapter`]
+//!   [`adapters::cloud_hypervisor_runtime::CloudHypervisorRuntime`] (legacy,
+//!   transitional per ADR-008)
 //! - **Domain types** live in [`config`], [`policy`], [`protocol`], [`error`]
 //! - **Orchestration** happens in [`sandbox::SandboxOrchestrator`]
 
@@ -28,6 +30,7 @@ pub mod policy;
 pub mod project;
 pub mod protocol;
 pub mod proxy_bridge;
+pub mod runtime;
 pub mod sandbox;
 pub mod services;
 pub mod snapshot;

@@ -28,6 +28,7 @@ dependencies = [
 name = "abox-core"
 version = "0.6.0"
 dependencies = [
+ "abox-core",
  "abox-protocol",
  "anyhow",
  "bytes",

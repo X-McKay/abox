@@ -1,0 +1,45 @@
+# abox guest profile → OCI image manifest.
+#
+# This file is the host-owned map from abox environment profiles to the
+# pinned OCI images that back them under the MicroSandbox runtime. It is
+# embedded into the abox binary at compile time; users never manage image
+# URLs directly (ADR-008).
+#
+# `digest` pins the exact image content. It is filled in by the image
+# publish workflow (.github/workflows/images.yml) after each build; an empty
+# digest means "not yet published" and resolves to the tag instead — abox
+# doctor reports such profiles as unpinned.
+#
+# Development override: [images.overrides] in ~/.abox/config.toml maps a
+# profile name to an arbitrary image reference (host-owned config only —
+# never repo config).
+
+version = 1
+
+# abox release series these images are built for.
+release = "0.7"
+
+[profiles.base]
+reference = "ghcr.io/x-mckay/abox-guest-base"
+tag = "0.7"
+digest = ""
+
+[profiles.node]
+reference = "ghcr.io/x-mckay/abox-guest-node"
+tag = "0.7"
+digest = ""
+
+[profiles.python]
+reference = "ghcr.io/x-mckay/abox-guest-python"
+tag = "0.7"
+digest = ""
+
+[profiles.python-glibc]
+reference = "ghcr.io/x-mckay/abox-guest-python-glibc"
+tag = "0.7"
+digest = ""
+
+[profiles.rust]
+reference = "ghcr.io/x-mckay/abox-guest-rust"
+tag = "0.7"
+digest = ""

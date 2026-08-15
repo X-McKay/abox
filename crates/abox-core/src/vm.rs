@@ -18,31 +18,13 @@ pub enum StartMode {
     },
 }
 
-/// A credential file ready to be written into the boot metadata directory.
-///
-/// Produced by [`crate::sandbox::stage_credential_files()`] from
-/// [`crate::config::CredentialFileEntry`] entries. Carries the file content
-/// so the VM adapter can write it into the meta directory at boot time.
-#[derive(Debug, Clone)]
-pub struct CredentialToStage {
-    /// Index in the credentials directory (maps to `credentials/<index>`).
-    pub index: usize,
-    /// Absolute destination path inside the guest VM.
-    pub guest_path: String,
-    /// Unix permissions (e.g., "0600").
-    pub mode: String,
-    /// File content to write.
-    pub content: Vec<u8>,
-}
+/// Credential stub staged into the guest. Shared with the runtime-neutral
+/// spec; see [`crate::runtime::spec::CredentialToStage`].
+pub use crate::runtime::spec::CredentialToStage;
 
-/// A host file to stage read-only into `/abox-meta/inputs/<guest_name>`.
-#[derive(Debug, Clone)]
-pub struct InputFile {
-    /// Absolute path to the file on the host.
-    pub host_path: PathBuf,
-    /// File name inside `/abox-meta/inputs/` (validated single component).
-    pub guest_name: String,
-}
+/// Host file staged read-only into `/abox-meta/inputs/<guest_name>`. Shared
+/// with the runtime-neutral spec; see [`crate::runtime::spec::RuntimeInput`].
+pub use crate::runtime::spec::RuntimeInput as InputFile;
 
 /// Configuration for creating a new sandbox VM.
 #[derive(Debug, Clone)]

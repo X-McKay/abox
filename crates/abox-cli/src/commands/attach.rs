@@ -4,8 +4,8 @@
 //! an interactive terminal inside the sandbox.
 
 use super::validate_task_arg;
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::SandboxOrchestrator;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::{Context, Result};
 use clap::Args;
@@ -16,15 +16,18 @@ pub struct AttachArgs {
     pub task: String,
 }
 
-pub async fn execute<W: WorkspacePort, V: VmPort>(
+pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: AttachArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     validate_task_arg(&args.task)?;
 
-    let vm_info = orchestrator.vm_info(&args.task).await.context("Failed to get VM info")?;
+    // Verify the sandbox exists and is managed before attaching.
+    orchestrator.runtime_info(&args.task).await.context("Failed to get sandbox info")?;
 
-    let console_socket = vm_info.console_socket;
+    let console_socket = orchestrator
+        .console_output(&args.task)
+        .context("This runtime does not expose a console to attach to")?;
 
     println!("Attaching to sandbox '{}' (Ctrl+] to detach)...", args.task);
     println!();

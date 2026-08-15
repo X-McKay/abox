@@ -33,4 +33,5 @@ crossterm = "0.28"
 workspace = true
 
 [dev-dependencies]
+abox-core = { path = "../abox-core", features = ["test-support"] }
 tempfile = "3"

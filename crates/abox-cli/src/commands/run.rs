@@ -10,9 +10,9 @@ use abox_core::project::{
     is_approved, project_cache_root, record_approval, standalone_network_scope, EnvironmentProfile,
     NetworkMode, ProjectConfig, ResolvedProjectConfig,
 };
+use abox_core::runtime::SandboxRuntimePort;
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
 use abox_core::util::validate_env_key;
-use abox_core::vm::VmPort;
 use abox_core::workspace::WorkspacePort;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -437,10 +437,10 @@ fn ensure_host_ports_allowed(
     Ok(())
 }
 
-pub async fn execute<W: WorkspacePort, V: VmPort>(
+pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: RunArgs,
     repo_root: &Path,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
     policy: std::sync::Arc<abox_core::policy::PolicyEngine>,
     root_ca: std::sync::Arc<abox_core::ca::RootCa>,
 ) -> Result<()> {
@@ -728,9 +728,9 @@ fn ensure_project_trusted(
 ///
 /// Note: task ID validation is performed before reaching this function, so
 /// the task string is already known-safe when used to construct file paths.
-fn spawn_detached<W: WorkspacePort, V: VmPort>(
+fn spawn_detached<W: WorkspacePort, R: SandboxRuntimePort>(
     args: &RunArgs,
-    orchestrator: &SandboxOrchestrator<W, V>,
+    orchestrator: &SandboxOrchestrator<W, R>,
 ) -> Result<()> {
     let runtime = orchestrator.runtime_dir();
     std::fs::create_dir_all(&runtime)?;

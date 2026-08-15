@@ -5,7 +5,7 @@ mod kvm;
 mod tui;
 mod virtiofsd;
 
-use abox_core::adapters::cloud_hypervisor::CloudHypervisorAdapter;
+use abox_core::adapters::cloud_hypervisor_runtime::CloudHypervisorRuntime;
 use abox_core::adapters::git2_workspace::Git2Workspace;
 use abox_core::config::AboxConfig;
 use abox_core::sandbox::SandboxOrchestrator;
@@ -215,8 +215,8 @@ async fn main() -> Result<()> {
 
     // Build the orchestrator
     let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
-    let vm_manager = CloudHypervisorAdapter::new(config.runtime_dir(), config.state_dir.clone())?;
-    let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, vm_manager);
+    let runtime = CloudHypervisorRuntime::new(config.clone())?;
+    let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, runtime);
 
     // The root CA is only consumed by `abox run` (it backs the per-sandbox
     // MITM egress proxy). Loading it for read-only commands like `list`,
