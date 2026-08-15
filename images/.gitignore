@@ -1,0 +1,4 @@
+# Per-arch guest binaries staged into the build contexts by CI or by hand for
+# local builds (see README.md). Build outputs — never committed.
+*/abox-shim-*
+*/abox-bridge-*

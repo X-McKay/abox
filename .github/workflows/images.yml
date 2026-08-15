@@ -1,0 +1,279 @@
+# images.yml — build and publish the abox guest profile OCI images (ADR-008).
+#
+# Builds the guest-side static musl binaries (abox-shim + abox-bridge) for
+# x86_64 and aarch64, bakes them into each profile image under images/, and
+# pushes multi-arch (linux/amd64 + linux/arm64) images to
+# ghcr.io/x-mckay/abox-guest-<profile>. arm64 matters: macOS Apple Silicon
+# hosts run arm64 guests.
+#
+# After the push, the workflow captures each image's content digest, rewrites
+# the `digest = "..."` fields in images/manifest.toml, uploads the result as
+# an artifact, and (on workflow_dispatch with open_pr=true) opens a PR with
+# the manifest bump.
+name: images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (empty = the `release` value in images/manifest.toml)"
+        required: false
+        default: ""
+      open_pr:
+        description: "Open a PR bumping the digests in images/manifest.toml"
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags:
+      - "images-v*"
+
+# Default: enough to push images. The manifest job elevates its own
+# permissions for the PR path.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NS: ghcr.io/x-mckay
+  PROFILES: base node python python-glibc rust
+
+jobs:
+  # ── resolve ──────────────────────────────────────────────────────────────
+  # Decide the image tag once, so every downstream job agrees on it:
+  #   push of images-vX.Y   -> "X.Y"
+  #   dispatch with `tag`   -> the input
+  #   dispatch without      -> the `release` value in images/manifest.toml
+  resolve:
+    name: resolve image tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/images-v* ]]; then
+            tag="${GITHUB_REF#refs/tags/images-v}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$(sed -n 's/^release = "\(.*\)"$/\1/p' images/manifest.toml | head -n1)"
+          fi
+          if [[ -z "$tag" ]]; then
+            echo "ERROR: could not resolve an image tag" >&2
+            exit 1
+          fi
+          echo "resolved image tag: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  # ── guest-binaries ───────────────────────────────────────────────────────
+  # Cross-compile abox-shim and abox-bridge (both bin targets of the
+  # crates/abox-shim package) as static musl binaries for both guest
+  # architectures, and publish them as one artifact with per-arch names that
+  # match what the Dockerfiles COPY via TARGETARCH.
+  guest-binaries:
+    name: build abox-shim + abox-bridge (musl, both arches)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain with musl targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      # musl-tools provides musl-gcc for the x86_64 target; the aarch64 musl
+      # target links with the aarch64 GNU cross-gcc plus rustc's bundled musl
+      # libc (-C link-self-contained=yes), so no aarch64-musl sysroot is
+      # needed.
+      - name: Install cross linkers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools gcc-aarch64-linux-gnu
+
+      - name: Build static musl binaries
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C link-self-contained=yes"
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          cargo build --release -p abox-shim --target x86_64-unknown-linux-musl
+          cargo build --release -p abox-shim --target aarch64-unknown-linux-musl
+
+      - name: Stage per-arch binaries
+        run: |
+          set -euo pipefail
+          mkdir -p guest-bins
+          cp target/x86_64-unknown-linux-musl/release/abox-shim    guest-bins/abox-shim-amd64
+          cp target/x86_64-unknown-linux-musl/release/abox-bridge  guest-bins/abox-bridge-amd64
+          cp target/aarch64-unknown-linux-musl/release/abox-shim   guest-bins/abox-shim-arm64
+          cp target/aarch64-unknown-linux-musl/release/abox-bridge guest-bins/abox-bridge-arm64
+          # Sanity: everything must be statically linked.
+          for f in guest-bins/*; do
+            file "$f"
+            file "$f" | grep -Eq 'statically linked|static-pie linked' \
+              || { echo "ERROR: $f is not statically linked" >&2; exit 1; }
+          done
+
+      - name: Upload guest binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-binaries
+          path: guest-bins/
+          if-no-files-found: error
+
+  # ── images ───────────────────────────────────────────────────────────────
+  # One matrix leg per guest profile. Stages both arch binaries into the
+  # profile's build context (the Dockerfile picks the right one with
+  # TARGETARCH), builds linux/amd64 + linux/arm64 in one buildx invocation
+  # (QEMU emulates the non-native arch for RUN steps), pushes to GHCR, and
+  # records the pushed index digest for the manifest job.
+  images:
+    name: build + push ${{ matrix.profile }}
+    needs: [resolve, guest-binaries]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [base, node, python, python-glibc, rust]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download guest binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-binaries
+          path: guest-bins
+
+      - name: Stage guest binaries into build context
+        run: cp guest-bins/abox-shim-* guest-bins/abox-bridge-* "images/${{ matrix.profile }}/"
+
+      - name: Set up QEMU (arm64 emulation for RUN steps)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: images/${{ matrix.profile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE_NS }}/abox-guest-${{ matrix.profile }}:${{ needs.resolve.outputs.tag }}
+          # Keep the pushed artifact a plain two-entry OCI index (no extra
+          # provenance manifests) so the recorded digest pins exactly the two
+          # platform images.
+          provenance: false
+
+      - name: Record pushed digest
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          echo "${{ steps.build.outputs.digest }}" > "digests/${{ matrix.profile }}"
+          cat "digests/${{ matrix.profile }}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.profile }}
+          path: digests/${{ matrix.profile }}
+          if-no-files-found: error
+
+  # ── manifest ─────────────────────────────────────────────────────────────
+  # Collect the pushed digests, rewrite images/manifest.toml, upload the
+  # updated manifest as an artifact, and optionally open the bump PR
+  # (workflow_dispatch with open_pr=true only).
+  manifest:
+    name: update images/manifest.toml
+    needs: [resolve, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the bump branch (PR path only)
+      pull-requests: write # open the bump PR (PR path only)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Rewrite manifest digests
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import pathlib
+          import re
+          import sys
+
+          manifest = pathlib.Path("images/manifest.toml")
+          text = manifest.read_text()
+
+          for path in sorted(pathlib.Path("digests").iterdir()):
+              profile = path.name
+              digest = path.read_text().strip()
+              if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                  sys.exit(f"bad digest for {profile}: {digest!r}")
+              # Replace the digest line inside this profile's section only.
+              # Section bodies contain no '[' until the next section header.
+              pattern = re.compile(
+                  r'(\[profiles\.' + re.escape(profile) + r'\][^\[]*?digest = ")[^"]*(")',
+                  re.S,
+              )
+              text, n = pattern.subn(lambda m: m.group(1) + digest + m.group(2), text)
+              if n != 1:
+                  sys.exit(f"profile {profile}: expected 1 digest field, patched {n}")
+              print(f"{profile}: {digest}")
+
+          manifest.write_text(text)
+          EOF
+          git diff -- images/manifest.toml
+
+      - name: Upload updated manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest
+          path: images/manifest.toml
+          if-no-files-found: error
+
+      # PR path: only on manual dispatch with open_pr=true. Note that PRs
+      # opened with GITHUB_TOKEN do not trigger `on: pull_request` workflows;
+      # close/reopen the PR (or push to its branch) to run CI on it.
+      - name: Open manifest bump PR
+        if: github.event_name == 'workflow_dispatch' && inputs.open_pr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: images/manifest.toml
+          commit-message: "chore(images): pin guest image digests for tag ${{ needs.resolve.outputs.tag }}"
+          branch: images/manifest-bump-${{ needs.resolve.outputs.tag }}
+          title: "chore(images): pin guest image digests for tag ${{ needs.resolve.outputs.tag }}"
+          body: |
+            Automated bump of `images/manifest.toml` after publishing the
+            guest profile images with tag `${{ needs.resolve.outputs.tag }}`
+            (run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+          delete-branch: true
