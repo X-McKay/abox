@@ -22,24 +22,24 @@ release = "0.7"
 [profiles.base]
 reference = "ghcr.io/x-mckay/abox-guest-base"
 tag = "0.7"
-digest = ""
+digest = "sha256:6440a2b8a562e5007b3228d4c67ee9662745ce1264d4834f2f16a91b8ac7344a"
 
 [profiles.node]
 reference = "ghcr.io/x-mckay/abox-guest-node"
 tag = "0.7"
-digest = ""
+digest = "sha256:1171c22bb9078ece4897303634c7f21da885f25a8c1726bd2350817ccc6b5118"
 
 [profiles.python]
 reference = "ghcr.io/x-mckay/abox-guest-python"
 tag = "0.7"
-digest = ""
+digest = "sha256:d2aebf83ee6af39c5dab172cb89fb1d83a438bf93251c4195a80194beaa17ddf"
 
 [profiles.python-glibc]
 reference = "ghcr.io/x-mckay/abox-guest-python-glibc"
 tag = "0.7"
-digest = ""
+digest = "sha256:46cd81565f725fcc2bfc6946c01a6b613cb7e43cde3fb06d32f3ac4938da97ef"
 
 [profiles.rust]
 reference = "ghcr.io/x-mckay/abox-guest-rust"
 tag = "0.7"
-digest = ""
+digest = "sha256:0fd455c10e605f8ae441286992c30326be55aaa2ee99ce0004efd9fa7cbebfa2"

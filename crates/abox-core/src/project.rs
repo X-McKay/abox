@@ -776,7 +776,7 @@ impl ResolvedProjectConfig {
             }
         }
 
-        Ok(hash_hex(hasher.finalize().as_slice()))
+        Ok(hash_hex(&hasher.finalize()))
     }
 }
 
@@ -1089,7 +1089,7 @@ fn build_approval_fingerprint(inputs: &ApprovalFingerprintInputs<'_>) -> String 
         hasher.update(bytes);
     }
 
-    hash_hex(hasher.finalize().as_slice())
+    hash_hex(&hasher.finalize())
 }
 
 fn normalized_caches(caches: Option<&Vec<String>>) -> Vec<String> {
