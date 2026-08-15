@@ -83,6 +83,16 @@ run_sandbox() {
     TASK_IDS+=("$task_id")
     timeout "${TIMEOUT:-90}" "$ABOX_BIN" --config "$SCRATCH/config.toml" --repo "$SCRATCH" run --task "$task_id" --ephemeral -- "$@" \
         >"$log" 2>&1 || true
+    # A sandbox that never booted must never satisfy a downstream content
+    # grep (the error text contains the run id, which can match loose
+    # patterns). Keep the raw output in a sidecar and reduce the assertion
+    # log to a single marker line so every content assertion fails.
+    if grep -q "Failed to start sandbox" "$log"; then
+        mv "$log" "$log.boot-failure"
+        # Keep this marker free of digits/paths: loose content greps (e.g.
+        # C1 looking for "6") must not match it.
+        echo 'SANDBOX-START-FAILED (see the .boot-failure sidecar log)' > "$log"
+    fi
     echo "$log"
 }
 
@@ -231,7 +241,7 @@ if [[ "$FILTER" == "all" || "$FILTER" == "codex" ]]; then
     echo "[C1] Single-turn smoke (3+3)..."
     c1_run() {
         TIMEOUT=60 LOG=$(run_sandbox "c1-smoke-$1" /bin/sh -c \
-            'cd /workspace && codex exec --full-auto "What is 3+3? Answer with just the number." 2>&1')
+            'cd /workspace && codex exec --full-auto "What is 3+3? Answer with just the number." </dev/null 2>&1')
     }
     c1_run 1
     # Match "6" as a standalone word/number (not in timestamps or log lines)
@@ -254,7 +264,7 @@ if [[ "$FILTER" == "all" || "$FILTER" == "codex" ]]; then
     echo "[C2] Multi-turn tool use (read README)..."
     c2_run() {
         TIMEOUT=60 LOG=$(run_sandbox "c2-tool-$1" /bin/sh -c \
-            'cd /workspace && codex exec --full-auto "Read README.md and tell me what it says in 5 words." 2>&1')
+            'cd /workspace && codex exec --full-auto "Read README.md and tell me what it says in 5 words." </dev/null 2>&1')
     }
     c2_run 1
     # Filter out log noise, then look for content words from the README
