@@ -68,6 +68,11 @@ pub struct CreateSandboxParams {
     pub host_port_bridges: Vec<crate::services::HostPortPlan>,
     /// Arbitrary host files to stage read-only under `/abox-meta/inputs/`.
     pub input_files: Vec<crate::runtime::RuntimeInput>,
+    /// Compiled runtime network plan (from the repo's network mode; see
+    /// [`crate::policy::compile_runtime_network_plan`]).
+    pub network_plan: RuntimeNetworkPlan,
+    /// Credential rules delegated to native runtime secret substitution.
+    pub native_secrets: Vec<crate::runtime::spec::NativeSecretSpec>,
 }
 
 /// Full sandbox status combining workspace and runtime info.
@@ -295,7 +300,8 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
             mount_excludes: params.mount_excludes.clone(),
             services,
             control_channels,
-            network: RuntimeNetworkPlan::HostMediated,
+            network: params.network_plan.clone(),
+            native_secrets: params.native_secrets.clone(),
             start,
             lifecycle: RuntimeLifecycle {
                 timeout_secs: params.timeout_secs,

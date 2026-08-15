@@ -508,6 +508,18 @@ pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
         policy
     };
 
+    // Compile the repo's network intent into the runtime-neutral plan the
+    // sandbox runtime enforces (safe → no guest networking; scoped/open →
+    // native public-only plans that always exclude host/private/metadata).
+    let network_plan = match network_scope.as_ref() {
+        Some(scope) => abox_core::policy::compile_runtime_network_plan(scope)?,
+        None => abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+    };
+    // Credential rules that opted into native runtime substitution. Fails
+    // closed when a native-marked rule cannot be represented under this
+    // network plan.
+    let native_secrets = policy.native_secret_specs(&network_plan)?;
+
     let cache_mount_dir = resolved_project.as_ref().and_then(|resolved| {
         if resolved.has_durable_caches() {
             env_vars.extend(resolved.cache_env_vars());
@@ -576,6 +588,8 @@ pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
         service_bridges,
         host_port_bridges,
         input_files,
+        network_plan,
+        native_secrets,
     };
 
     println!("Sandbox '{}' starting...", args.task);

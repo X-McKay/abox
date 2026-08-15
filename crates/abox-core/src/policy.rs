@@ -117,6 +117,15 @@ pub struct EgressRule {
     #[serde(default = "default_header_template")]
     pub header_template: String,
 
+    /// Opt in to native runtime secret substitution (MicroSandbox) instead
+    /// of abox's request broker, when the rule shape allows it: `env_var`
+    /// source, no `credential_file`, no `request_rules`, raw `{value}`
+    /// template, and a compiled native network plan. Rules that opt in but
+    /// cannot be represented exactly fail at launch — enforcement is never
+    /// silently downgraded.
+    #[serde(default)]
+    pub native_substitution: bool,
+
     /// Optional per-request rules that filter by HTTP method and path.
     ///
     /// Rules are evaluated top-to-bottom; the first match wins. If **no** rule
@@ -353,6 +362,16 @@ impl PolicyEngine {
                 })?;
             }
 
+            if rule.native_substitution {
+                rule.native_substitution_requirements().with_context(|| {
+                    format!(
+                        "Egress rule #{idx} ({}) opts into native_substitution but cannot be \
+                         represented natively",
+                        rule.domain
+                    )
+                })?;
+            }
+
             // Per-request rules are only enforced for domains the proxy actually
             // terminates (MITM). A TLS-bypassed domain is tunneled as opaque TCP,
             // so the proxy never sees the method/path and could not enforce these
@@ -538,6 +557,153 @@ impl PolicyEngine {
         } else {
             Err(Decision::Deny(format!("No egress rule for domain '{domain}'")))
         }
+    }
+}
+
+/// Who enforces a credential rule at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialExecutionStrategy {
+    /// The rule is delegated to the runtime's native secret substitution
+    /// (host-held source reference; guest sees only a placeholder).
+    MicrosandboxNative,
+    /// The rule is enforced by abox's request broker (TLS-terminating
+    /// egress proxy with header injection and per-request rules).
+    AboxRequestBroker,
+}
+
+impl std::fmt::Display for CredentialExecutionStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MicrosandboxNative => write!(f, "MicroSandbox native"),
+            Self::AboxRequestBroker => write!(f, "abox request broker"),
+        }
+    }
+}
+
+impl EgressRule {
+    /// The enforcement strategy for this rule.
+    pub fn execution_strategy(&self) -> CredentialExecutionStrategy {
+        if self.native_substitution {
+            CredentialExecutionStrategy::MicrosandboxNative
+        } else {
+            CredentialExecutionStrategy::AboxRequestBroker
+        }
+    }
+
+    /// Check the structural requirements for native substitution.
+    fn native_substitution_requirements(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.env_var.is_some(),
+            "native substitution requires an `env_var` host source"
+        );
+        anyhow::ensure!(
+            self.credential_file.is_none(),
+            "native substitution cannot read `credential_file` sources \
+             (provider-specific file parsing stays in the abox request broker)"
+        );
+        anyhow::ensure!(
+            self.request_rules.is_empty(),
+            "native substitution cannot enforce method/path `request_rules` \
+             (request-aware policy stays in the abox request broker)"
+        );
+        anyhow::ensure!(
+            self.header_template == "{value}",
+            "native substitution requires the raw `{{value}}` header template"
+        );
+        Ok(())
+    }
+}
+
+/// Compile abox's user-facing network intent into a runtime-neutral plan.
+///
+/// `safe` compiles to a fully host-mediated plan (no guest networking at
+/// all). `scoped` and `open` compile to native plans whose invariants are
+/// documented on [`crate::runtime::spec::NativeNetworkPlan`] — in
+/// particular, `open` is broad public internet access, never unrestricted
+/// networking: host, loopback, private ranges, link-local, and cloud
+/// metadata remain denied.
+pub fn compile_runtime_network_plan(
+    scope: &NetworkScope,
+) -> Result<crate::runtime::RuntimeNetworkPlan> {
+    use crate::runtime::spec::NativeNetworkPlan;
+    match scope.mode {
+        NetworkMode::Safe => Ok(crate::runtime::RuntimeNetworkPlan::HostMediated),
+        NetworkMode::Scoped => {
+            let compiled = CompiledNetworkScope::from_scope(scope.clone())?;
+            Ok(crate::runtime::RuntimeNetworkPlan::Native(NativeNetworkPlan {
+                allow_public: false,
+                allowed_hosts: compiled.allowed_domains,
+            }))
+        }
+        NetworkMode::Open => Ok(crate::runtime::RuntimeNetworkPlan::Native(NativeNetworkPlan {
+            allow_public: true,
+            allowed_hosts: Vec::new(),
+        })),
+    }
+}
+
+impl PolicyEngine {
+    /// Collect the native secret specs for rules classified as
+    /// [`CredentialExecutionStrategy::MicrosandboxNative`].
+    ///
+    /// Fails closed when a native-marked rule cannot be represented under
+    /// the given network plan: native substitution rides the runtime's TLS
+    /// interception, which requires native networking.
+    pub fn native_secret_specs(
+        &self,
+        network: &crate::runtime::RuntimeNetworkPlan,
+    ) -> Result<Vec<crate::runtime::spec::NativeSecretSpec>> {
+        let mut specs = Vec::new();
+        for rule in &self.egress_rules {
+            if rule.execution_strategy() != CredentialExecutionStrategy::MicrosandboxNative {
+                continue;
+            }
+            anyhow::ensure!(
+                matches!(network, crate::runtime::RuntimeNetworkPlan::Native(_)),
+                "egress rule for '{}' opts into native secret substitution, which requires a \
+                 native network plan (scoped/open); the current mode is safe/host-mediated. \
+                 Remove `native_substitution` or change the network mode.",
+                rule.domain
+            );
+            let env_var = rule
+                .env_var
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("native rule '{}' missing env_var", rule.domain))?;
+            specs.push(crate::runtime::spec::NativeSecretSpec {
+                env_var: env_var.clone(),
+                source_env_var: env_var,
+                allowed_host: rule.domain.clone(),
+            });
+        }
+        Ok(specs)
+    }
+
+    /// Human-readable report of who enforces each credential rule
+    /// (`abox project explain`).
+    pub fn credential_enforcement_report(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for rule in &self.egress_rules {
+            let source = if rule.env_var.is_some() {
+                "host env var"
+            } else if rule.credential_file.is_some() {
+                "host credential file"
+            } else {
+                "none"
+            };
+            let mut line = format!(
+                "{}
+  secret source: {}
+  enforcement: {}",
+                rule.domain,
+                source,
+                rule.execution_strategy()
+            );
+            if !rule.request_rules.is_empty() {
+                line.push_str(&format!("\n  request policy: {}", rule.request_rules.join("; ")));
+            }
+            lines.push(line);
+        }
+        lines
     }
 }
 
@@ -777,6 +943,7 @@ mod tests {
             egress: vec![EgressRule {
                 domain: "api.anthropic.com".to_string(),
                 inject_header: "x-api-key".to_string(),
+                native_substitution: false,
                 env_var: Some("ANTHROPIC_API_KEY".to_string()),
                 credential_file: None,
                 json_path: None,
@@ -1255,6 +1422,7 @@ mod tests {
         let rule = EgressRule {
             domain: "api.github.com".into(),
             inject_header: "Authorization".into(),
+            native_substitution: false,
             env_var: None,
             credential_file: None,
             json_path: None,
@@ -1271,6 +1439,7 @@ mod tests {
         let rule = EgressRule {
             domain: "api.example.com".into(),
             inject_header: "Authorization".into(),
+            native_substitution: false,
             env_var: None,
             credential_file: None,
             json_path: None,
@@ -1331,6 +1500,7 @@ mod tests {
         let rule = EgressRule {
             domain: "api.anthropic.com".into(),
             inject_header: "Authorization".into(),
+            native_substitution: false,
             env_var: None,
             credential_file: Some(tmp.path().display().to_string()),
             json_path: Some("claudeAiOauth.accessToken".into()),
@@ -1353,6 +1523,7 @@ mod tests {
         let rule = EgressRule {
             domain: "x".into(),
             inject_header: "Authorization".into(),
+            native_substitution: false,
             env_var: Some(env_key.into()),
             credential_file: Some("/nonexistent".into()),
             json_path: Some("a.b".into()),
@@ -1370,6 +1541,7 @@ mod tests {
         let rule = EgressRule {
             domain: "x".into(),
             inject_header: "Authorization".into(),
+            native_substitution: false,
             env_var: None,
             credential_file: Some("/definitely/does/not/exist.json".into()),
             json_path: Some("a".into()),
@@ -1386,6 +1558,7 @@ mod tests {
             egress: vec![EgressRule {
                 domain: "api.example.com".into(),
                 inject_header: "Authorization".into(),
+                native_substitution: false,
                 env_var: None,
                 credential_file: Some("/some/file.json".into()),
                 json_path: None,
@@ -1436,5 +1609,166 @@ mod tests {
     #[test]
     fn test_expand_tilde_no_tilde() {
         assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+    }
+
+    // ─── Runtime network plan compilation (ADR-008 Phase 6) ────────────────
+
+    fn scope(mode: NetworkMode, bundles: &[&str], domains: &[&str]) -> NetworkScope {
+        NetworkScope {
+            mode,
+            bundles: bundles.iter().map(ToString::to_string).collect(),
+            domains: domains.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn compile_safe_is_host_mediated() {
+        let plan = compile_runtime_network_plan(&scope(NetworkMode::Safe, &[], &[])).unwrap();
+        assert_eq!(plan, crate::runtime::RuntimeNetworkPlan::HostMediated);
+    }
+
+    #[test]
+    fn compile_scoped_expands_bundles_and_domains() {
+        let plan = compile_runtime_network_plan(&scope(
+            NetworkMode::Scoped,
+            &["npm-public"],
+            &["api.example.com"],
+        ))
+        .unwrap();
+        let crate::runtime::RuntimeNetworkPlan::Native(native) = plan else {
+            panic!("scoped must compile to a native plan");
+        };
+        assert!(!native.allow_public);
+        assert!(native.allowed_hosts.contains(&"api.example.com".to_string()));
+        assert!(native.allowed_hosts.contains(&"registry.npmjs.org".to_string()));
+    }
+
+    #[test]
+    fn compile_open_is_public_only() {
+        let plan = compile_runtime_network_plan(&scope(NetworkMode::Open, &[], &[])).unwrap();
+        let crate::runtime::RuntimeNetworkPlan::Native(native) = plan else {
+            panic!("open must compile to a native plan");
+        };
+        assert!(native.allow_public);
+        assert!(native.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn compile_scoped_unknown_bundle_fails() {
+        assert!(
+            compile_runtime_network_plan(&scope(NetworkMode::Scoped, &["no-such"], &[])).is_err()
+        );
+    }
+
+    // ─── Credential execution strategy (ADR-008 Phase 7) ───────────────────
+
+    fn native_rule() -> EgressRule {
+        EgressRule {
+            domain: "api.openai.com".into(),
+            inject_header: "Authorization".into(),
+            native_substitution: true,
+            env_var: Some("OPENAI_API_KEY".into()),
+            credential_file: None,
+            json_path: None,
+            header_template: "{value}".into(),
+            request_rules: vec![],
+        }
+    }
+
+    fn engine_with_rules(rules: Vec<EgressRule>) -> PolicyEngine {
+        PolicyEngine::from_policy_file(PolicyFile {
+            cli: vec![],
+            egress: rules,
+            default_cli_action: "deny".into(),
+            default_egress_action: "deny".into(),
+            bypass_tls: vec![],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn default_rules_stay_on_request_broker() {
+        let rule = EgressRule { native_substitution: false, ..native_rule() };
+        assert_eq!(rule.execution_strategy(), CredentialExecutionStrategy::AboxRequestBroker);
+    }
+
+    #[test]
+    fn native_rule_classified_native() {
+        assert_eq!(
+            native_rule().execution_strategy(),
+            CredentialExecutionStrategy::MicrosandboxNative
+        );
+    }
+
+    #[test]
+    fn native_substitution_requires_env_var_source() {
+        let mut rule = native_rule();
+        rule.env_var = None;
+        rule.credential_file = Some("~/.x.json".into());
+        rule.json_path = Some("token".into());
+        let err = PolicyEngine::from_policy_file(PolicyFile {
+            cli: vec![],
+            egress: vec![rule],
+            default_cli_action: "deny".into(),
+            default_egress_action: "deny".into(),
+            bypass_tls: vec![],
+        });
+        assert!(err.is_err(), "credential_file rules cannot opt into native substitution");
+    }
+
+    #[test]
+    fn native_substitution_rejects_request_rules() {
+        let mut rule = native_rule();
+        rule.request_rules = vec!["allow GET /v1/**".into()];
+        let err = PolicyEngine::from_policy_file(PolicyFile {
+            cli: vec![],
+            egress: vec![rule],
+            default_cli_action: "deny".into(),
+            default_egress_action: "deny".into(),
+            bypass_tls: vec![],
+        });
+        assert!(err.is_err(), "request-aware rules must stay on the abox broker");
+    }
+
+    #[test]
+    fn native_secret_specs_fail_closed_without_native_network() {
+        let engine = engine_with_rules(vec![native_rule()]);
+        let err = engine.native_secret_specs(&crate::runtime::RuntimeNetworkPlan::HostMediated);
+        assert!(err.is_err(), "native secrets require a native network plan");
+    }
+
+    #[test]
+    fn native_secret_specs_produced_under_native_network() {
+        let engine = engine_with_rules(vec![native_rule()]);
+        let plan = crate::runtime::RuntimeNetworkPlan::Native(
+            crate::runtime::spec::NativeNetworkPlan::default(),
+        );
+        let specs = engine.native_secret_specs(&plan).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].env_var, "OPENAI_API_KEY");
+        assert_eq!(specs[0].source_env_var, "OPENAI_API_KEY");
+        assert_eq!(specs[0].allowed_host, "api.openai.com");
+    }
+
+    #[test]
+    fn enforcement_report_names_each_rule() {
+        let engine = engine_with_rules(vec![
+            native_rule(),
+            EgressRule {
+                domain: "api.github.com".into(),
+                inject_header: "Authorization".into(),
+                native_substitution: false,
+                env_var: None,
+                credential_file: Some("~/.config/gh/hosts.yml".into()),
+                json_path: Some("token".into()),
+                header_template: "Bearer {value}".into(),
+                request_rules: vec!["allow GET /repos/**".into(), "deny * /**".into()],
+            },
+        ]);
+        let report = engine.credential_enforcement_report();
+        assert_eq!(report.len(), 2);
+        assert!(report[0].contains("MicroSandbox native"));
+        assert!(report[1].contains("abox request broker"));
+        assert!(report[1].contains("allow GET /repos/**"));
     }
 }

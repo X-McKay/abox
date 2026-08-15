@@ -372,6 +372,8 @@ async fn warm_environment<W: WorkspacePort, R: SandboxRuntimePort>(
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     let exit_code = orchestrator.run_sandbox(params, policy, root_ca).await?;

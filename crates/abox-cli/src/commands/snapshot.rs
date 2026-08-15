@@ -240,6 +240,8 @@ async fn restore_snapshot<W: WorkspacePort, R: SandboxRuntimePort>(
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     orchestrator.create_sandbox(params).await?;

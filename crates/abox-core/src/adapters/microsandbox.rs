@@ -26,6 +26,7 @@
 //! spec combinations fail at start time rather than degrade.
 
 use crate::runtime::images::ImageManifest;
+use crate::runtime::spec::NativeNetworkPlan;
 use crate::runtime::{
     RuntimeExit, RuntimeInstance, RuntimeNetworkPlan, RuntimeStart, RuntimeState,
     SandboxRuntimePort, SandboxRuntimeSpec, COMMAND_BROKER_PORT,
@@ -202,6 +203,62 @@ fn guest_setup_script(spec: &SandboxRuntimeSpec, chown_user: &str) -> String {
     script
 }
 
+/// Compile a [`NativeNetworkPlan`] into a MicroSandbox `NetworkPolicy`.
+///
+/// The plan's invariants are implemented as explicit first-match deny rules
+/// so they can never be shadowed: loopback, private ranges, link-local,
+/// cloud metadata, multicast, and the host itself are denied before any
+/// allow rule. Egress is TCP 443 plus gateway DNS only; ingress is denied
+/// entirely; defaults are deny.
+fn compile_msb_network_policy(
+    plan: &NativeNetworkPlan,
+) -> anyhow::Result<microsandbox::NetworkPolicy> {
+    use microsandbox_network::policy::{
+        Action, Destination, DestinationGroup, Direction, DomainName, PortRange, Protocol, Rule,
+    };
+
+    let mut rules = Vec::new();
+    // Narrow gateway-only DNS first (UDP/TCP 53 to the gateway forwarder):
+    // it must precede the Host-group denial below, or first-match-wins would
+    // block every DNS query. Required for hostname resolution under a
+    // deny-by-default policy; the runtime pins resolved IPs to names.
+    rules.push(Rule::allow_dns());
+    for group in [
+        DestinationGroup::Loopback,
+        DestinationGroup::Private,
+        DestinationGroup::LinkLocal,
+        DestinationGroup::Metadata,
+        DestinationGroup::Multicast,
+        DestinationGroup::Host,
+    ] {
+        rules.push(Rule::deny_egress(Destination::Group(group)));
+    }
+
+    let https = |destination: Destination| Rule {
+        direction: Direction::Egress,
+        destination,
+        protocols: vec![Protocol::Tcp],
+        ports: vec![PortRange::single(443)],
+        action: Action::Allow,
+    };
+
+    if plan.allow_public {
+        rules.push(https(Destination::Group(DestinationGroup::Public)));
+    } else {
+        for host in &plan.allowed_hosts {
+            let name = DomainName::try_from(host.as_str())
+                .map_err(|e| anyhow::anyhow!("invalid allowed host {host:?}: {e}"))?;
+            rules.push(https(Destination::Domain(name)));
+        }
+    }
+
+    Ok(microsandbox::NetworkPolicy {
+        default_egress: Action::Deny,
+        default_ingress: Action::Deny,
+        rules,
+    })
+}
+
 /// Assemble `abox-bridge` arguments for the guest-side loopback bridges:
 /// the HTTPS egress port plus one per service/host-port bridge.
 fn bridge_args(spec: &SandboxRuntimeSpec) -> Vec<String> {
@@ -248,6 +305,35 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
             RuntimeNetworkPlan::HostMediated => {
                 builder = builder.disable_network();
             }
+            RuntimeNetworkPlan::Native(plan) => {
+                let policy = compile_msb_network_policy(plan)?;
+                builder = builder.network(|n| n.policy(policy));
+            }
+        }
+
+        // Native secret substitution: host-held source references only —
+        // real values are resolved by the runtime at spawn from the host
+        // environment and never persist in durable sandbox state.
+        for secret in &spec.native_secrets {
+            anyhow::ensure!(
+                matches!(spec.network, RuntimeNetworkPlan::Native(_)),
+                "native secret substitution for '{}' requires a native network plan",
+                secret.allowed_host
+            );
+            let env_var = secret.env_var.clone();
+            let source = secret.source_env_var.clone();
+            let host = secret.allowed_host.clone();
+            builder = builder.secret(move |s| {
+                let s = s
+                    .env(env_var)
+                    .source(microsandbox::SecretSource::Env { var: source })
+                    .require_tls_identity(true);
+                if let Some(suffix) = host.strip_prefix("*.") {
+                    s.allow_host_pattern(format!("*.{suffix}"))
+                } else {
+                    s.allow_host(host)
+                }
+            });
         }
 
         // Native max-duration as defense in depth behind the orchestrator's
@@ -603,6 +689,7 @@ mod tests {
                 guest_port: COMMAND_BROKER_PORT,
             }],
             network: RuntimeNetworkPlan::HostMediated,
+            native_secrets: vec![],
             start: RuntimeStart::Fresh,
             lifecycle: RuntimeLifecycle::default(),
         }
@@ -658,5 +745,141 @@ mod tests {
     #[test]
     fn sandbox_name_is_prefixed() {
         assert_eq!(MicrosandboxRuntime::sandbox_name("fix-auth"), "abox-fix-auth");
+    }
+
+    // ─── Native network plan compilation: SSRF invariants ──────────────────
+    //
+    // These are release gates (ADR-008 §5.5, plan §Phase 6): loopback,
+    // private ranges, link-local, cloud metadata, multicast, and the host
+    // must be denied by explicit first-match rules in every compiled plan,
+    // egress is TCP 443 + gateway DNS only, ingress and defaults deny.
+
+    use microsandbox_network::policy::{Action, Destination, DestinationGroup, Direction};
+
+    fn assert_baseline_invariants(policy: &microsandbox::NetworkPolicy) {
+        assert_eq!(policy.default_egress, Action::Deny, "default egress must deny");
+        assert_eq!(policy.default_ingress, Action::Deny, "default ingress must deny");
+
+        // Rule 0 is the narrow gateway DNS allow (must precede the Host
+        // denial); rules 1-6 are the group denials — before ANY other allow.
+        let dns = &policy.rules[0];
+        assert_eq!(dns.action, Action::Allow);
+        assert_eq!(dns.ports, vec![microsandbox_network::policy::PortRange::single(53)]);
+        let expected_denies = [
+            DestinationGroup::Loopback,
+            DestinationGroup::Private,
+            DestinationGroup::LinkLocal,
+            DestinationGroup::Metadata,
+            DestinationGroup::Multicast,
+            DestinationGroup::Host,
+        ];
+        for (i, group) in expected_denies.iter().enumerate() {
+            let rule = &policy.rules[i + 1];
+            assert_eq!(rule.action, Action::Deny, "rule {} must deny", i + 1);
+            assert!(
+                matches!(&rule.destination, Destination::Group(g) if g == group),
+                "rule {} must deny group {group:?}, got {:?}",
+                i + 1,
+                rule.destination
+            );
+        }
+
+        // No allow rule may target loopback/private/link-local/metadata/
+        // multicast ranges or arbitrary ports.
+        for rule in &policy.rules {
+            if rule.action != Action::Allow {
+                continue;
+            }
+            match &rule.destination {
+                Destination::Group(DestinationGroup::Host) => {
+                    // Only the narrow gateway DNS rule may target Host.
+                    assert_eq!(
+                        rule.ports,
+                        vec![microsandbox_network::policy::PortRange::single(53)],
+                        "Host-directed allow must be DNS-only"
+                    );
+                }
+                Destination::Group(DestinationGroup::Public) | Destination::Domain(_) => {
+                    assert_eq!(rule.direction, Direction::Egress);
+                    assert_eq!(
+                        rule.ports,
+                        vec![microsandbox_network::policy::PortRange::single(443)],
+                        "non-DNS allows must be limited to TCP 443"
+                    );
+                }
+                other => panic!("unexpected allow destination {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn open_plan_is_public_only_never_unrestricted() {
+        let policy = compile_msb_network_policy(&NativeNetworkPlan {
+            allow_public: true,
+            allowed_hosts: vec![],
+        })
+        .unwrap();
+        assert_baseline_invariants(&policy);
+        assert!(
+            policy.rules.iter().any(|r| r.action == Action::Allow
+                && matches!(r.destination, Destination::Group(DestinationGroup::Public))),
+            "open must allow public egress"
+        );
+    }
+
+    #[test]
+    fn scoped_plan_allows_only_listed_hosts() {
+        let policy = compile_msb_network_policy(&NativeNetworkPlan {
+            allow_public: false,
+            allowed_hosts: vec!["registry.npmjs.org".into(), "api.example.com".into()],
+        })
+        .unwrap();
+        assert_baseline_invariants(&policy);
+        let allowed_domains: Vec<String> = policy
+            .rules
+            .iter()
+            .filter(|r| r.action == Action::Allow)
+            .filter_map(|r| match &r.destination {
+                Destination::Domain(d) => Some(d.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(allowed_domains, vec!["registry.npmjs.org", "api.example.com"]);
+        assert!(
+            !policy.rules.iter().any(|r| r.action == Action::Allow
+                && matches!(r.destination, Destination::Group(DestinationGroup::Public))),
+            "scoped must not allow public egress"
+        );
+    }
+
+    #[test]
+    fn scoped_plan_rejects_invalid_hostnames() {
+        assert!(compile_msb_network_policy(&NativeNetworkPlan {
+            allow_public: false,
+            allowed_hosts: vec!["not a hostname".into()],
+        })
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn native_secrets_require_native_network_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config =
+            crate::config::AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+        let runtime = MicrosandboxRuntime::new(&config).unwrap();
+
+        let mut spec = test_spec();
+        spec.native_secrets.push(crate::runtime::spec::NativeSecretSpec {
+            env_var: "OPENAI_API_KEY".into(),
+            source_env_var: "OPENAI_API_KEY".into(),
+            allowed_host: "api.openai.com".into(),
+        });
+        // Network stays HostMediated → start() must fail closed before any
+        // runtime interaction (the guard runs before sandbox creation).
+        let err = runtime.start(spec).await.unwrap_err();
+        assert!(
+            err.to_string().contains("requires a native network plan"),
+            "unexpected error: {err:#}"
+        );
     }
 }

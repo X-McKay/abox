@@ -264,6 +264,7 @@ fn test_policy_multiple_egress_rules() {
             EgressRule {
                 domain: "api.anthropic.com".to_string(),
                 inject_header: "x-api-key".to_string(),
+                native_substitution: false,
                 env_var: Some("ANTHROPIC_API_KEY".to_string()),
                 credential_file: None,
                 json_path: None,
@@ -273,6 +274,7 @@ fn test_policy_multiple_egress_rules() {
             EgressRule {
                 domain: "api.openai.com".to_string(),
                 inject_header: "Authorization".to_string(),
+                native_substitution: false,
                 env_var: Some("OPENAI_API_KEY".to_string()),
                 credential_file: None,
                 json_path: None,
@@ -282,6 +284,7 @@ fn test_policy_multiple_egress_rules() {
             EgressRule {
                 domain: "*.amazonaws.com".to_string(),
                 inject_header: "Authorization".to_string(),
+                native_substitution: false,
                 env_var: Some("AWS_TOKEN".to_string()),
                 credential_file: None,
                 json_path: None,
@@ -697,6 +700,8 @@ async fn test_orchestrator_create_sandbox() {
             service_bridges: Vec::new(),
             host_port_bridges: Vec::new(),
             input_files: Vec::new(),
+            network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+            native_secrets: Vec::new(),
         })
         .await
         .unwrap();
@@ -740,6 +745,8 @@ async fn test_worktree_info_lookup() {
             service_bridges: Vec::new(),
             host_port_bridges: Vec::new(),
             input_files: Vec::new(),
+            network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+            native_secrets: Vec::new(),
         })
         .await
         .unwrap();
@@ -783,6 +790,8 @@ async fn test_orchestrator_create_multiple_sandboxes() {
             service_bridges: Vec::new(),
             host_port_bridges: Vec::new(),
             input_files: Vec::new(),
+            network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+            native_secrets: Vec::new(),
         })
         .await
         .unwrap();
@@ -827,6 +836,8 @@ async fn test_orchestrator_stop_sandbox() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     })
     .await
     .unwrap();
@@ -868,6 +879,8 @@ async fn test_orchestrator_stop_with_clean() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     })
     .await
     .unwrap();
@@ -910,6 +923,8 @@ async fn test_orchestrator_divergence() {
             service_bridges: Vec::new(),
             host_port_bridges: Vec::new(),
             input_files: Vec::new(),
+            network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+            native_secrets: Vec::new(),
         })
         .await
         .unwrap();
@@ -962,6 +977,8 @@ async fn test_orchestrator_vm_config_overrides() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     })
     .await
     .unwrap();
@@ -1018,6 +1035,8 @@ async fn test_run_sandbox_polls_until_vm_exits() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1081,6 +1100,8 @@ async fn test_silent_failure_missing_exit_code_returns_1_and_rolls_back() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1176,6 +1197,8 @@ async fn test_run_sandbox_timeout_returns_124() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1248,6 +1271,8 @@ async fn test_run_sandbox_exits_before_timeout() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1306,6 +1331,8 @@ async fn test_run_sandbox_ephemeral_cleans_up() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(
@@ -1365,6 +1392,8 @@ async fn test_run_sandbox_non_ephemeral_preserves_worktree() {
         service_bridges: Vec::new(),
         host_port_bridges: Vec::new(),
         input_files: Vec::new(),
+        network_plan: abox_core::runtime::RuntimeNetworkPlan::HostMediated,
+        native_secrets: Vec::new(),
     };
 
     let policy = std::sync::Arc::new(

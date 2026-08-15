@@ -43,6 +43,9 @@ rustix = { version = "1", features = ["fs"] }
 # runtime by `abox init`); `keyring` is deliberately off (no dbus — abox
 # pulls public images anonymously).
 microsandbox = { version = "=0.6.9", default-features = false, features = ["net", "prebuilt"] }
+# Direct access to the network policy types (Destination, DomainName, …) the
+# facade does not re-export. Same exact pin as `microsandbox`.
+microsandbox-network = "=0.6.9"
 
 [features]
 # Exposes `runtime::testing::MockRuntime` for downstream test suites.

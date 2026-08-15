@@ -114,13 +114,57 @@ pub struct ControlChannel {
 }
 
 /// How the sandbox's network is provisioned.
-#[derive(Debug, Clone, Default)]
+///
+/// Compiled from abox's user-facing network modes by
+/// [`crate::policy::compile_runtime_network_plan`]. The runtime adapter
+/// translates the plan mechanically and never widens it — `safe`/`scoped`
+/// semantics and the "open ≠ unrestricted" invariant are decided here, not
+/// by runtime defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RuntimeNetworkPlan {
     /// The guest has no direct network path. All egress is host-mediated
     /// through abox control channels (command broker + HTTPS egress proxy),
-    /// where abox policy is enforced.
+    /// where abox policy is enforced. Used by `safe` mode.
     #[default]
     HostMediated,
+    /// Native guest networking compiled from abox intent, for traffic that
+    /// does not cooperate with the proxy environment. The host-mediated
+    /// proxy channel remains active (and preferred — `HTTPS_PROXY` stays
+    /// set) for managed/credential domains and auditing.
+    Native(NativeNetworkPlan),
+}
+
+/// A compiled native network plan.
+///
+/// Invariants the adapter must implement (and tests assert):
+/// - loopback, private ranges, link-local, cloud metadata, multicast, and
+///   the host itself are always denied — `open` is public-internet only;
+/// - egress is limited to TCP 443 plus DNS to the gateway;
+/// - ingress is denied entirely;
+/// - allowed hostnames are DNS-pinned and SNI-verified by the runtime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeNetworkPlan {
+    /// `true` for `open` mode: allow all public destinations. `false` for
+    /// `scoped`: only `allowed_hosts` are reachable directly.
+    pub allow_public: bool,
+    /// Exact hostnames allowed for direct egress (`scoped` mode: resolved
+    /// bundles plus explicitly approved domains).
+    pub allowed_hosts: Vec<String>,
+}
+
+/// A credential rule delegated to the runtime's native secret substitution
+/// (see [`crate::policy::CredentialExecutionStrategy`]). The real value
+/// stays on the host and is referenced by source environment variable —
+/// never passed by value — so it cannot persist in runtime state. The guest
+/// sees only a placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSecretSpec {
+    /// Guest environment variable the placeholder is exposed as.
+    pub env_var: String,
+    /// Host environment variable holding the real value (source reference).
+    pub source_env_var: String,
+    /// The only destination host the substituted value may be sent to.
+    pub allowed_host: String,
 }
 
 /// How to start the sandbox.
@@ -191,6 +235,9 @@ pub struct SandboxRuntimeSpec {
     pub control_channels: Vec<ControlChannel>,
     /// Network provisioning plan.
     pub network: RuntimeNetworkPlan,
+    /// Credential rules delegated to native runtime secret substitution
+    /// (only meaningful with a [`RuntimeNetworkPlan::Native`] plan).
+    pub native_secrets: Vec<NativeSecretSpec>,
     /// How to start the sandbox.
     pub start: RuntimeStart,
     /// Lifecycle intent.
