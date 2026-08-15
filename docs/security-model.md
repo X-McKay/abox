@@ -29,7 +29,7 @@ Everything that runs, or can influence what runs, inside the sandbox:
 ### Trusted
 
 - **The abox host process** (orchestrator, CLI) and the host-side brokers
-  (command broker / `ProxyBridge`, HTTPS egress proxy, `abox-proxyd`).
+  (`CommandBroker`, the HTTPS request broker / egress proxy, `abox-proxyd`).
 - **Host-owned policy and config files:** `~/.abox/config.toml`,
   `~/.abox/policies/*.toml`, and the image manifest embedded in the abox
   binary.
@@ -89,9 +89,8 @@ enables.
 
 8. **Fail closed.** Configurations the runtime cannot represent exactly are
    rejected at policy-load or launch time — never approximated. Examples:
-   memory-snapshot restore under MicroSandbox, `native_substitution` in
-   `safe` mode, a profile with no image mapping, an unknown network scope
-   entry.
+   `native_substitution` in `safe` mode, a profile with no image mapping, an
+   unknown network scope entry.
 
 ## Network plan invariants
 

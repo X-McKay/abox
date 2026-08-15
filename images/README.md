@@ -3,8 +3,6 @@
 OCI images that back the abox guest environment profiles under the
 MicroSandbox runtime (see
 [ADR-008](../docs/decisions/008-microsandbox-runtime-and-product-boundary.md)).
-They replace the raw ext4 rootfs artifacts previously assembled by
-`scripts/build_rootfs.sh` + `scripts/bootstrap_vm.sh`.
 
 ## Profiles → images
 
@@ -33,7 +31,7 @@ Every image additionally ships the common abox guest contract:
 
 Deliberately absent (the MicroSandbox runtime provides them, or the abox
 adapter writes them at launch): any init system (`/sbin/init`), kernel,
-`socat`, `su-exec`/`gosu`, and the `/etc/abox/transport` declaration. Images
+`su-exec`/`gosu`, and the `/etc/abox/transport` declaration. Images
 set no `USER` and no `ENTRYPOINT`; the runtime supplies PID 1 (agentd) and its
 exec API performs user switching.
 

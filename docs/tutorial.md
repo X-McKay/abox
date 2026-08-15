@@ -1,6 +1,6 @@
 # abox in 10 minutes
 
-A zero-to-first-sandbox walkthrough for a Rust-familiar developer who has never seen abox before. Real commands, real captured output. By the end you will have booted a MicroSandbox microVM, run a guest command inside it, watched the audit log attribute the call to your sandbox, and cleaned up.
+A zero-to-first-sandbox walkthrough for a Rust-familiar developer who has never seen abox before. By the end you will have booted a MicroSandbox microVM, run a guest command inside it, watched the audit log attribute the call to your sandbox, and cleaned up.
 
 If you want the *why* — what each component does and how they fit together — read [`docs/explainer.md`](explainer.md) after this. This page is "do".
 
@@ -70,9 +70,7 @@ This walks every prerequisite in order:
 7. Checks host-staged guest binaries and verifies each requested guest profile resolves to an OCI image, printing the image it will pull.
 
 There is no VM bootstrap, kernel download, or rootfs build — guest
-environments are OCI images pulled on first use. (The old
-`bootstrap_vm.sh` flow still exists for the deprecated Cloud Hypervisor
-backend only; see [`vm-setup.md`](vm-setup.md).)
+environments are OCI images pulled on first use.
 
 The default policy allows common `git` and constrained `gh` operations, denies dangerous mutations such as `git push --force`, and default-denies unknown HTTPS egress. Matching HTTPS requests go through the MITM proxy, which injects host-side credentials for Anthropic and OpenAI/Codex. GitHub stays on the host through managed `git` / `gh` execution. Domains listed in `bypass_tls` remain plain TCP passthrough for cert-pinned clients.
 
@@ -92,7 +90,7 @@ abox init --profile node --profile python --profile rust
 
 ---
 
-## 5. Your first sandbox
+## 4. Your first sandbox
 
 You need a git repo for the agent to work in. We'll make a tiny scratch one:
 
@@ -112,34 +110,20 @@ Now boot a sandbox in this repo:
 abox run --task hello -- /bin/sh -c "echo hello from inside the sandbox; /usr/local/bin/git log --oneline"
 ```
 
-You'll see the sandbox start, your command's output, and a clean exit
-(this capture is from the legacy Cloud Hypervisor backend — the exact log
-lines differ under MicroSandbox, and the first run per profile also pulls
-the guest OCI image):
+You'll see the sandbox start, your command's output, and a clean exit. The
+first run of a profile also pulls its guest OCI image into the MicroSandbox
+cache (a one-time download of a few hundred MB), so expect the very first
+boot to take noticeably longer than the ones after it. Concretely: a
+"Sandbox 'hello' starting..." line, log lines from the runtime adapter and
+the per-sandbox command broker, then your command's output — the
+`echo` line and the one-commit `git log` — and finally
+`Sandbox 'hello' exited cleanly.`
 
-```
-Sandbox 'hello' starting...
-[INFO  abox_core::adapters::cloud_hypervisor] MicroVM started sandbox_id=hello pid=2271574 memory_mib=512 vcpus=1
-[INFO  abox_core::proxy_bridge] proxy bridge listening socket=…/r/vsock-hello.sock_5000 attribution=Fixed("hello")
-
-==> abox guest init: online
-    kernel: 6.16.9+
-    root:   /dev/root ext4
-
-==> running /abox-meta/runner.sh
-hello from inside the sandbox
-ea68f62 init
-
-==> abox guest init: poweroff (rc=0)
-
-Sandbox 'hello' exited cleanly.
-```
-
-What just happened, in one paragraph: `abox run` created a git worktree on a new branch `agent/hello`, started a MicroSandbox microVM from the `base` guest image with that worktree bind-mounted read-write at `/workspace`, bound the per-sandbox broker and egress sockets on the host, and exec'd your command inside the guest as the unprivileged `abox` user. The `git` invocation inside the guest is actually a symlink to `abox-shim`, which forwarded the request over vsock to the host's per-sandbox proxy bridge. The bridge evaluated the policy (allow), executed the real `git log` on the host worktree, returned the output, and the shim printed it. When the command exited, its exit code propagated directly back through the runtime and the sandbox stopped.
+What just happened, in one paragraph: `abox run` created a git worktree on a new branch `agent/hello`, started a MicroSandbox microVM from the `base` guest image with that worktree bind-mounted read-write at `/workspace`, bound the per-sandbox broker and egress sockets on the host, and exec'd your command inside the guest as the unprivileged `abox` user. The `git` invocation inside the guest is actually a symlink to `abox-shim`, which forwarded the request over vsock to the host's per-sandbox command broker. The broker evaluated the policy (allow), executed the real `git log` on the host worktree, returned the output, and the shim printed it. When the command exited, its exit code propagated directly back through the runtime and the sandbox stopped.
 
 ---
 
-## 6. Inspect state
+## 5. Inspect state
 
 After the sandbox exits, the worktree is preserved by default so you can `cd` into it and look around. Show the list:
 
@@ -165,7 +149,7 @@ For our `hello` sandbox there are no changes — the agent only ran `echo` and `
 
 ---
 
-## 7. Merge and clean up
+## 6. Merge and clean up
 
 If the agent had made commits you wanted to keep, you'd merge:
 
@@ -194,7 +178,7 @@ abox list
 
 ---
 
-## 8. Repo-owned workflow
+## 7. Repo-owned workflow
 
 The first sandbox above used only host config. For a repo you plan to work in
 repeatedly, add repo-owned behavior explicitly:
@@ -235,7 +219,7 @@ abox run --task fix-auth -- codex
 That flow gives you:
 
 1. A repo-owned network mode (`safe`, `scoped`, or `open`)
-2. An official guest profile (`base`, `node`, `python`, or `rust`)
+2. An official guest profile (`base`, `node`, `python`, `python-glibc`, or `rust`)
 3. Durable per-project caches
 4. A repeatable prepare step that runs inside the real guest
 5. First-class prompt-file support for bare `claude` and `codex`
@@ -276,7 +260,7 @@ with only `[[host_ports]]` is valid — no egress domain is required, and egress
 stays restrictive. The agent then reaches the gateway at `127.0.0.1:4000` inside
 the guest. Pair this with `--input-file` to hand a custom runner its task payload.
 
-## 9. What just happened?
+## 8. What just happened?
 
 In about 10 minutes you:
 
@@ -290,4 +274,4 @@ If you want to know **why** every piece exists (why we use vsock instead of TCP,
 
 If you want to set up your own policies, see [`policies/default.toml`](../policies/default.toml) as a starting point and [`docs/decisions/001-architecture.md`](decisions/001-architecture.md) for the rationale.
 
-If something didn't work, [`docs/runtime.md`](runtime.md#troubleshooting) has the top failure modes and their fixes ([`docs/vm-setup.md`](vm-setup.md#troubleshooting) covers the legacy backend).
+If something didn't work, [`docs/runtime.md`](runtime.md#troubleshooting) has the top failure modes and their fixes.

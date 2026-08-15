@@ -221,7 +221,8 @@ pub struct HostPortPlan {
 }
 
 impl HostPortPlan {
-    /// Project to the guest-visible bridge line written into `/abox-meta/services`.
+    /// Project to the guest-visible bridge metadata (`abox-bridge` listen
+    /// pairs).
     pub fn guest(&self) -> GuestServiceBridge {
         GuestServiceBridge {
             name: format!("hostport-{}", self.host_port),

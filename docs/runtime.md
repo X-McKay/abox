@@ -8,8 +8,7 @@ filesystem brokering, resource limits). abox owns everything above it: what
 the agent is authorized to do.
 
 This page covers how the runtime works, what it needs from the host, and how
-to troubleshoot it. For the legacy Cloud Hypervisor backend, see
-[`vm-setup.md`](vm-setup.md).
+to troubleshoot it.
 
 ## Architecture
 
@@ -31,9 +30,8 @@ resolve to pinned OCI images through the manifest embedded in the abox binary
 The task worktree bind-mounts read-write at `/workspace`. Guest ownership is
 granted through the mount's metadata overlay: a root `chown` inside the guest
 before the agent starts makes the workspace appear owned by the guest `abox`
-user (uid 1000), while host inodes keep their real owner — reproducing the
-legacy virtiofsd uid-map semantics. Files the agent creates land on the host
-owned by the host user. `mount_excludes` become tmpfs volumes shadowing
+user (uid 1000), while host inodes keep their real owner. Files the agent
+creates land on the host owned by the host user. `mount_excludes` become tmpfs volumes shadowing
 workspace subdirectories.
 
 ### Guest staging via rootfs patches
@@ -54,8 +52,8 @@ Unix socket:
 - **Command broker (guest port 5000):** the `git`/`gh`/`aws` shim connects to
   `/run/abox-proxy.sock` inside the guest; the persistent `abox-bridge`
   process forwards it over one long-lived vsock uplink to the host
-  `ProxyBridge`, which evaluates policy, executes allowed commands with real
-  credentials, and audits. Retry semantics are phase-aware: only connect/send
+  `CommandBroker`, which evaluates policy, executes allowed commands with
+  real credentials, and audits. Retry semantics are phase-aware: only connect/send
   failures retry — a lost response never re-executes a privileged command.
 - **HTTPS egress (guest port 5001):** the agent's `HTTPS_PROXY` points at
   guest loopback `127.0.0.1:18443`, bridged by `abox-bridge` to the host
@@ -81,8 +79,7 @@ The agent runs as a non-root exec (default uid 1000, the `abox` user baked
 into the guest images) through the runtime's guest agent, so its exit code
 propagates directly — there is no status-share file protocol. Agent launch is
 deferred until the orchestrator has bound the broker/egress listeners, and
-agent exit stops the sandbox (parity with the legacy poweroff-on-exit).
-There is no guest init script, no `socat`, and no `su-exec`: the runtime
+agent exit stops the sandbox. There is no guest init script: the runtime
 supplies PID 1 and user switching.
 
 ### Network plans
@@ -99,12 +96,11 @@ abox's `safe`/`scoped`/`open` modes compile in abox policy
 
 See [`security-model.md`](security-model.md) for the invariants.
 
-### What the runtime rejects
+### Fast, repeatable environments
 
-Memory-snapshot restore (`abox snapshot restore`, `abox template`) is a
-legacy Cloud Hypervisor mechanism; the MicroSandbox adapter rejects it (fail
-closed). Use `abox env warm` instead. `abox attach` requires a runtime
-console, which MicroSandbox does not currently expose.
+There is no memory-snapshot or template mechanism. `abox env warm` runs the
+repo's prepare flow once inside a real guest and persists durable caches, so
+subsequent sandboxes start against a warm environment.
 
 ## Host requirements
 
@@ -116,8 +112,8 @@ console, which MicroSandbox does not currently expose.
   firmware. `abox init` installs them via the SDK; `abox doctor` verifies
   them.
 
-There is no kernel download, no rootfs build, no virtiofsd, and no
-`setcap` step under this runtime.
+There is no kernel download, no rootfs build, and no `setcap` step —
+`abox init` installs everything the runtime needs.
 
 ### `MSB_HOME`
 
@@ -192,13 +188,10 @@ virtualization are missing.
 Resource defaults live in `~/.abox/config.toml`:
 
 ```toml
-[vm_defaults]
+[sandbox_defaults]
 memory_mib = 2048
 vcpus      = 2
 ```
-
-The legacy `image_path`/`kernel_path` keys in that section apply only to the
-deprecated Cloud Hypervisor backend.
 
 ## Troubleshooting
 
@@ -210,8 +203,8 @@ you installed `msb` yourself somewhere else, either put it on `PATH` or set
 
 **Unix socket path too long**
 Control channels are per-sandbox host Unix sockets under `runtime_dir`
-(default `~/.abox/r`). Unix socket paths are capped at ~104–108 bytes
-(platform-dependent) including the per-sandbox suffix, so a deeply nested
+(default `~/.abox/r`), named `msb-<id>.sock_<port>`. abox budgets against the
+104-byte cap (the macOS floor; Linux allows 108), so a deeply nested
 `runtime_dir` or a very long task id can push past the limit. Keep
 `runtime_dir` short and check the worst case with `abox doctor`. On macOS,
 `/tmp` is a symlink (`/private/tmp`); abox canonicalizes bind paths, but if
@@ -240,8 +233,3 @@ On Linux, check `/dev/kvm` exists and is accessible (`ls -la /dev/kvm`;
 `sudo usermod -aG kvm $USER` then re-login). On macOS, `sysctl
 kern.hv_support` must print `1` — this requires Apple Silicon; nested
 virtualization inside another VM generally does not work.
-
-**Snapshot/template/attach commands fail**
-Expected: those commands are deprecated and only supported by the legacy
-Cloud Hypervisor backend. Use `abox env warm` for fast, repeatable
-environments.

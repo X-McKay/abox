@@ -39,8 +39,8 @@ When running multiple autonomous agents on a single codebase, you face four prob
 `abox` is built in Rust using a Hexagonal (Ports & Adapters) architecture.
 
 1. **`abox-core`**: Domain logic — workspace manager, policy engine, the
-   runtime-neutral `SandboxRuntimePort` boundary, and the runtime adapters
-   (MicroSandbox default; Cloud Hypervisor legacy).
+   runtime-neutral `SandboxRuntimePort` boundary, and the MicroSandbox
+   runtime adapter.
 2. **`abox-cli`**: The user interface (CLI commands and TUI dashboard).
 3. **`abox-proxyd`**: The host-side daemon that evaluates policies and executes allowed commands.
 4. **`abox-shim`**: Static musl guest binaries — `abox-shim` intercepts
@@ -58,8 +58,7 @@ owns the security semantics on top: what the agent is *authorized* to do. See
 ### Platform support
 
 - **Linux x86_64 and aarch64** with `/dev/kvm` accessible to your user.
-- **macOS on Apple Silicon** via Hypervisor.framework (new with the
-  MicroSandbox runtime).
+- **macOS on Apple Silicon** via Hypervisor.framework.
 
 ### Prerequisites
 
@@ -159,23 +158,6 @@ Run `abox doctor` at any time to check your environment for common setup
 problems — hardware virtualization, the msb runtime assets, guest-binary
 staging, and image-manifest resolution.
 
-#### Runtime backend fallback (deprecated)
-
-MicroSandbox is the default and target-sole runtime. The legacy Cloud
-Hypervisor backend remains available as an explicit, deprecated fallback while
-the migration completes:
-
-```toml
-# ~/.abox/config.toml — host-owned config only; repos can never select this
-[runtime]
-backend = "cloud-hypervisor"   # deprecated; default is "microsandbox"
-```
-
-or `ABOX_RUNTIME_BACKEND=cloud-hypervisor` at process start. The legacy
-backend still requires the old VM artifact stack (see
-[`docs/vm-setup.md`](docs/vm-setup.md)) and is slated for deletion per
-ADR-008's criteria. See [`docs/rollback.md`](docs/rollback.md#switching-back-to-the-legacy-runtime-backend).
-
 ### Network modes
 
 A repo's `.abox/project.toml` declares one of three network modes, compiled by
@@ -260,7 +242,7 @@ credential enforcement.
    abox run --task docs-scan --network open --prompt-file prompts/research.md -- claude
    ```
 
-7. **Warm the repo environment (replaces snapshot templates):**
+7. **Warm the repo environment:**
 
    ```bash
    abox env warm      # run the prepare flow once, persist durable caches
@@ -293,10 +275,8 @@ credential enforcement.
     abox ca path      # print CA directory
     ```
 
-    Under the MicroSandbox runtime the CA certificate is staged into each
-    guest at launch, so rotation takes effect on the next sandbox start. (The
-    "rebuild the rootfs" step after rotation applies to the legacy backend
-    only.)
+    The CA certificate is staged into each guest at launch, so rotation
+    takes effect on the next sandbox start.
 
 12. **Enable managed auth providers (Claude Code, Codex):**
 
@@ -368,16 +348,7 @@ credential enforcement.
     `0600`) so a sandboxed agent cannot forge it, and truncation is detected via
     a persisted chain tip. See `docs/audit-log.md` for the threat model.
 
-### Deprecated commands
-
-The following commands depend on legacy Cloud Hypervisor mechanics and are
-deprecated with it (ADR-008):
-
-- **`abox snapshot …` / `abox template …`** — memory snapshots are Cloud
-  Hypervisor-only. The MicroSandbox runtime rejects them (fail closed);
-  `abox env warm` is the replacement for fast, repeatable environments.
-- **`abox attach`** — requires a runtime console, which only the legacy
-  backend exposes today.
+### Profile notes
 
 For profile-backed repo environments:
 
@@ -406,25 +377,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development guidelines.
 
 ## Performance
 
-Measured on x86_64, 32 cores, kernel 6.14.0-37-generic. VM benchmarks averaged over 5 runs.
-Updated at release v0.6.0 (2026-06-27).
-
-> **Note (2026-08-15):** these numbers predate the MicroSandbox runtime
-> migration (ADR-008) and were measured on the legacy Cloud Hypervisor
-> backend. They will be re-baselined on the new runtime at the next release.
-
-| Metric | Value | What it measures |
-|---|---|---|
-| VM boot | 160 ms | Cloud Hypervisor start to first proxied request |
-| Proxy round-trip | 160 ms | Bridge ready to `git status` response |
-| Full `abox run` | 314 ms | Total wall time for trivial guest command |
-| Sandbox cleanup | 14 ms | `abox stop --clean` teardown |
-| Policy evaluation | ~45.236 ns | `evaluate_cli` for `git status` (allowed) |
-| Request serialization | ~45.972 ns | JSON encode of `ProxyRequest` |
-| Boot meta generation | ~177.48 ns | `BootMeta::to_json()` |
-| Release binary | 12.1 MB | `target/release/abox` (LTO + strip) |
-
-Run `just bench` (criterion, no VM) or `just bench-vm-n 5` (VM latency) to reproduce.
+Run `just bench` for the criterion microbenchmarks (policy evaluation,
+request serialization — no microVM needed). End-to-end latency depends on the
+MicroSandbox runtime and the guest image cache; the live suite
+(`just e2e-runtime`) exercises the full boot-to-exit path against real
+microVMs.
 
 ## License
 

@@ -6,7 +6,6 @@ This is the canonical gate for opening a PR against `main`. Humans and AI assist
 
 - [ ] Working on a typed feature branch, not `main`. See [branching.md](./branching.md).
 - [ ] `just tier-ci` passes (fmt + clippy + test + supply-chain audit).
-- [ ] `./scripts/local/e2e_test.sh` passes phases 1–5 locally (or run `just tier-vm` if you have KVM + bootstrapped VM for all phases).
 - [ ] Commit messages follow Conventional Commits (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`).
 - [ ] Each commit subject line reads as a useful release-note bullet on its own. `scripts/release.sh` auto-generates `CHANGELOG.md` from these subjects in Keep-a-Changelog format. Bad: `fix: bug`. Good: `fix: prevent shim panic when CWD is unset on detach`.
 - [ ] No `unwrap()` introduced in `abox-core`.
@@ -16,10 +15,7 @@ This is the canonical gate for opening a PR against `main`. Humans and AI assist
 
 The following paths trigger the `runtime-attestation` CI check:
 
-- `guest/**`
 - `images/**`
-- `scripts/build_rootfs.sh`
-- `scripts/bootstrap_vm.sh`
 - `crates/abox-core/**`
 - `crates/abox-proxyd/**`
 - `crates/abox-protocol/**`
@@ -29,8 +25,7 @@ The following paths trigger the `runtime-attestation` CI check:
 If your diff includes any of those:
 
 - [ ] `just e2e-runtime` passes locally (live MicroSandbox suite; requires virtualization + the msb runtime assets under `$MSB_HOME` — it skips cleanly without them, but a skip is not an attestation).
-- [ ] If the legacy Cloud Hypervisor backend is affected (`guest/**`, `scripts/build_rootfs.sh`, `scripts/bootstrap_vm.sh`, or adapter code it shares): run `just rebuild-rootfs` if `guest/init.sh` or `scripts/build_rootfs.sh` changed, then `just e2e-vm` (requires bootstrapped VM and `/dev/kvm`).
-- [ ] Add the `runtime-attested` label to the PR (`vm-attested` is accepted as a legacy alias during the migration).
+- [ ] Add the `runtime-attested` label to the PR.
 - [ ] Post a PR comment with the timestamp and machine of the local run, e.g. `just e2e-runtime passed 2026-08-15T10:23Z on alice-dev`.
 
 Without the label, the `runtime-attestation` CI check stays red and merge is blocked.
@@ -56,7 +51,7 @@ The PR-level gates above are necessary but not sufficient for releasing. Before 
 just pre-release
 ```
 
-This runs every test tier the host supports (ci, the MicroSandbox runtime e2e, the legacy vm e2e, bench, smoke), compares benchmarks against the previous release baseline, and writes attestation stamps to `.abox-attestations/`. `release.sh` verifies these stamps before proceeding. See the [pre-release validation spec](../superpowers/specs/2026-04-18-pre-release-validation-design.md) for details.
+This runs every test tier the host supports (ci always; the live MicroSandbox runtime e2e and the agent smoke tests when the host has virtualization/credentials) and writes attestation stamps (`runtime`, `smoke`) to `.abox-attestations/`. `release.sh` verifies these stamps before proceeding.
 
 ## After the checklist
 

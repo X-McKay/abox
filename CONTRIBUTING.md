@@ -29,7 +29,7 @@ We use `just` to simplify common commands. Run `just` to see all available recip
 
 `abox` follows a Hexagonal (Ports & Adapters) architecture, implemented as a Cargo workspace with four crates:
 
-1. **`abox-core`**: The domain layer. Defines ports (`WorkspacePort`, `SandboxRuntimePort`) and implements adapters (`Git2Workspace`, `adapters::microsandbox` — the default MicroSandbox runtime — and the deprecated `adapters::cloud_hypervisor_runtime`). Also contains the policy engine (including network-plan compilation), config parsing, and the embedded guest image manifest.
+1. **`abox-core`**: The domain layer. Defines ports (`WorkspacePort`, `SandboxRuntimePort`) and implements adapters (`Git2Workspace` and `adapters::microsandbox`, the MicroSandbox runtime). Also contains the policy engine (including network-plan compilation), the command/request brokers, config parsing, and the embedded guest image manifest.
 2. **`abox-cli`**: The user interface. Implements the `abox` CLI commands and the `ratatui` dashboard.
 3. **`abox-proxyd`**: The host-side daemon. Listens on Unix sockets, evaluates policies, and executes allowed commands.
 4. **`abox-shim`**: The guest-side binaries. `abox-shim` is injected into the sandbox to intercept commands and forward them to the host broker; `abox-bridge` forwards guest loopback/Unix-socket traffic over vsock. Both must remain small, static, synchronous binaries.
@@ -60,21 +60,15 @@ table lives in [`AGENTS.md`](AGENTS.md#test-tiers)):
   this is what CI runs, and the minimum bar for every PR.
 - **`just e2e-runtime`** — the live MicroSandbox end-to-end suite
   (`scripts/local/msb_e2e_test.sh`): boots real microVMs and exercises exit
-  codes, workspace isolation, the command broker (allow/deny/audit), and
-  HTTPS egress. Requires virtualization (KVM or Hypervisor.framework on
-  Apple Silicon) + the msb runtime assets under `$MSB_HOME`; skips cleanly
-  otherwise. Run it after any runtime/guest/broker change.
-- **`just e2e-vm`** (legacy) — `scripts/local/e2e_test.sh`, the Cloud
-  Hypervisor-era suite. Phases 1–5 run on any host (build, tests, scratch
-  repo, CLI workspace ops, proxyd policy enforcement); the VM-backed phases
-  are gated on a bootstrapped legacy VM + `/dev/kvm` and print
-  `skipped: VM artifacts not found` otherwise. `just tier-vm` runs it with a
-  rootfs-freshness check.
-- **`just tier-bench`** — criterion + VM latency benchmarks.
+  codes, workspace isolation, the command broker (allow/deny/audit), HTTPS
+  egress, and filesystem escape attempts. Requires virtualization (KVM or
+  Hypervisor.framework on Apple Silicon) + the msb runtime assets under
+  `$MSB_HOME`; skips cleanly otherwise. Run it after any
+  runtime/guest/broker change.
 - **`just tier-smoke`** — real Claude/Codex API calls through the MITM proxy
-  (requires credentials; costs tokens).
+  (requires the runtime + credentials; costs tokens).
 
-To add an assertion to either e2e script, append a `section "..."` block
+To add an assertion to the e2e script, append a `section "..."` block
 with `step` / `how` / `expect` / `pass` / `fail` calls — the summary footer
 counts every `pass`/`fail` invocation automatically.
 
@@ -86,9 +80,9 @@ under `docs/plans/YYYY-MM-DD-<topic>.md`, then execute it
 task-by-task with TDD and frequent commits. This keeps the change
 log readable and lets the project evolve in small, reviewable steps.
 
-A recent example: `docs/plans/2026-04-08-vm-e2e-hardening.md`,
+An example: `docs/plans/2026-04-08-vm-e2e-hardening.md`,
 which drained 13 P0/P1/P2 backlog items in one session, every
-behavior change gated on TDD + `just check` + `./scripts/local/e2e_test.sh`.
+behavior change gated on TDD and the quality gates of the time.
 
 ## Pull Request Process
 

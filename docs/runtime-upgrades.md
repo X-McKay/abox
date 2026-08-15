@@ -61,7 +61,8 @@ One PR, containing only the runtime bump and any adaptation it forces:
 - Widen a credential rule. Native secret substitution stays limited to the
   rule shapes `native_substitution` validates; everything else stays on the
   abox request broker.
-- Re-enable memory snapshots or other legacy mechanics without an ADR.
+- Reintroduce deleted mechanics (memory snapshots, runtime consoles) without
+  an ADR.
 
 If a candidate version fails qualification, stay on the current pin and file
 the findings upstream; the exact pin is what makes waiting safe.

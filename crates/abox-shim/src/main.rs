@@ -31,7 +31,7 @@ use std::process::ExitCode;
 const SANDBOX_ID_ENV: &str = "ABOX_SANDBOX_ID";
 
 /// Optional environment variable that overrides `getcwd(2)` for the CWD
-/// passed to the proxy. Useful when virtiofs mount points confuse getcwd.
+/// passed to the broker. Useful when virtiofs-backed mounts confuse getcwd.
 const CWD_OVERRIDE_ENV: &str = "ABOX_CWD";
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -68,7 +68,8 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
 /// Resolve the current working directory.
 ///
 /// Resolution order (most authoritative first):
-///   1. `ABOX_CWD` env var (set by `/abox-meta/runner.sh`; host-known truth)
+///   1. `ABOX_CWD` env var (set by the runtime adapter's agent exec;
+///      host-known truth)
 ///   2. `/proc/self/cwd` symlink target -- kernel-maintained, more reliable
 ///      than `getcwd(2)` on some virtiofs kernels which can return the
 ///      wrong path when the process is inside a virtiofs mount.

@@ -43,8 +43,8 @@ Configure in GitHub repo settings:
 - Require status checks to pass before merging:
   - `check` (fmt + clippy + test, via `just check`)
   - `cargo-deny`
-  - `e2e-phases-1-5`
-  - `runtime-attestation` (formerly `vm-attestation`)
+  - `e2e-runtime` (live runtime e2e on KVM-enabled runners)
+  - `runtime-attestation`
   - `doc-staleness-reminder` is advisory, **not** a required check.
 - Require linear history. Enforce squash-merge only.
 - Require branches to be up to date before merging.
@@ -53,7 +53,7 @@ These settings live in repo config, not in code. They are documented here so the
 
 ## Working with git worktrees
 
-For risky or long-lived feature work — especially anything touching the VM boot path, the proxy, or the policy engine — prefer `git worktree add` so the work is isolated from other local changes:
+For risky or long-lived feature work — especially anything touching the runtime adapter, the brokers, or the policy engine — prefer `git worktree add` so the work is isolated from other local changes:
 
 ```bash
 git worktree add ../abox-feat-my-thing -b feat/my-thing

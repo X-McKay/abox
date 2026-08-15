@@ -27,10 +27,9 @@ If the answer is `main` (or empty), stop and invoke the `start-feature` skill. N
 
 ```bash
 just tier-ci
-./scripts/local/e2e_test.sh
 ```
 
-`just tier-ci` = `fmt-check + lint + test + cargo deny check`. The e2e script runs phases 1–5 on any host (no VM needed). If any of these fail, stop and fix. Do not report success until they are green.
+`just tier-ci` = `fmt-check + lint + test + cargo deny check`. If it fails, stop and fix. Do not report success until it is green.
 
 ### 3. Evaluate path-triggered runtime attestation
 
@@ -42,10 +41,7 @@ git diff --name-only main...HEAD
 
 If any changed path matches one of these globs, runtime attestation is required:
 
-- `guest/**`
 - `images/**`
-- `scripts/build_rootfs.sh`
-- `scripts/bootstrap_vm.sh`
 - `crates/abox-core/**`
 - `crates/abox-proxyd/**`
 - `crates/abox-protocol/**`
@@ -55,12 +51,11 @@ If any changed path matches one of these globs, runtime attestation is required:
 If required:
 
 - Run `just e2e-runtime` and wait for completion. This needs virtualization (KVM or Hypervisor.framework) and the msb runtime assets under `$MSB_HOME`; it skips cleanly without them, but a skip does not count as attestation.
-- If the legacy Cloud Hypervisor backend is affected (`guest/**`, `scripts/build_rootfs.sh`, `scripts/bootstrap_vm.sh`): run `just rebuild-rootfs` first if `guest/init.sh` or `scripts/build_rootfs.sh` changed, then also run `just e2e-vm` (needs a bootstrapped VM and `/dev/kvm`).
-- Record the timestamp. When you report the result to the user, include: "Runtime attestation required. `just e2e-runtime` passed at <ISO-8601>. After opening the PR, add the `runtime-attested` label and post a PR comment with this timestamp." (`vm-attested` is accepted by CI as a legacy alias.)
+- Record the timestamp. When you report the result to the user, include: "Runtime attestation required. `just e2e-runtime` passed at <ISO-8601>. After opening the PR, add the `runtime-attested` label and post a PR comment with this timestamp."
 
 ### 3b. Note on release vs PR gates
 
-The above gates are for PRs. For releases, the full pre-release validation (`just pre-release`) must pass — this includes benchmarks and agent smoke tests. See the `release-preparation` skill.
+The above gates are for PRs. For releases, the full pre-release validation (`just pre-release`) must pass — this includes the live runtime e2e and the agent smoke tests. See the `release-preparation` skill.
 
 ### 4. Evaluate documentation updates
 

@@ -11,15 +11,12 @@ host-held credentials, attribution, tamper-evident audit — and delegates
 generic isolation (microVM, OCI images, mounts, resource limits, native
 network isolation) to the runtime.
 
-- **New default runtime: MicroSandbox** (pinned 0.6.9). The legacy Cloud
-  Hypervisor backend remains as an explicit, deprecated fallback
-  (`[runtime] backend = "cloud-hypervisor"` / `ABOX_RUNTIME_BACKEND`)
-  and will be deleted per the criteria in ADR-008.
+- **MicroSandbox is the runtime** (pinned 0.6.9), replacing the bespoke
+  Cloud Hypervisor stack (see the Removed section below).
 - **macOS Apple Silicon host support** via Hypervisor.framework.
 - Guest profiles keep their names but are OCI images
   (`ghcr.io/x-mckay/abox-guest-*`, digest-pinned manifest) instead of raw
-  rootfs artifacts; no kernel/virtiofsd/rootfs bootstrap under the
-  default backend.
+  rootfs artifacts; no kernel/virtiofsd/rootfs bootstrap.
 - Runtime-neutral `SandboxRuntimePort` domain boundary; guest exit codes
   propagate directly from the agent exec (no status-share protocol).
 - Network modes compile to runtime plans: `safe` = host-mediated only;
@@ -35,12 +32,27 @@ network isolation) to the runtime.
   delegates simple env-var rules to runtime-native substitution with
   host-side source references. `abox project explain` reports the
   compiled network plan and per-rule enforcement.
-- `abox init`/`doctor` are runtime-aware: SDK-driven runtime asset
-  install, guest-image manifest checks, host virtualization checks on
-  both platforms.
-- Deprecated: `abox snapshot`/`abox template` memory checkpoints
-  (legacy-runtime only; `abox env warm` is the replacement) and
-  `abox attach` under the new runtime.
+- `abox init`/`doctor` verify the runtime end to end: SDK-driven runtime
+  asset install, guest-image manifest checks, host virtualization checks
+  on both platforms.
+
+### Removed (single-runtime end state)
+
+- **The legacy Cloud Hypervisor backend is deleted.** MicroSandbox is now
+  the sole runtime: the `[runtime]` backend selector and
+  `ABOX_RUNTIME_BACKEND` are gone, and rollback means reverting to a
+  previous abox release, not switching backends.
+- Memory snapshots/templates and their commands (`abox snapshot`,
+  `abox template`) and `abox attach` are deleted; `abox env warm` is the
+  fast-start story.
+- The raw VM pipeline is deleted: kernel/rootfs/virtiofsd artifacts,
+  `bootstrap_vm.sh`, `build_rootfs.sh`, the guest init script and socat
+  bridges, vm-assets release bundles, the VM latency benchmarks, and the
+  legacy `e2e_test.sh` suite (`just e2e-runtime` is the live suite).
+- **Breaking config/API renames:** `[vm_defaults]` → `[sandbox_defaults]`
+  (resources only); `abox-core` modules `proxy_bridge` → `command_broker`
+  (type `CommandBroker`) and `egress` → `request_broker`; `SandboxStatus`
+  JSON fields `vm_state`/`vm_pid` → `state`/`pid`.
 
 ## v0.6.0 — 2026-06-27
 
