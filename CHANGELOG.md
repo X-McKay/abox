@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.7.1 — 2026-08-15
+
+### Fixes
+
+- fix: sandbox stop/list lifecycle — cross-process state, PID-reuse guard, detach argv (0c8ef64)
+
+### Chores
+
+- chore(images): pin guest image digests for tag 0.7 (ab0ce4e)
+
+
 ## v0.7.0 — 2026-08-15
 
 ### Features
