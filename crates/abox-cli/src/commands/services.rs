@@ -25,6 +25,7 @@ pub enum ServicesAction {
     Available,
 
     /// Start a service sidecar for a sandbox.
+    #[command(disable_version_flag = true)]
     Start {
         /// Service name (postgres, redis, ollama, mysql).
         service: String,

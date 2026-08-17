@@ -51,7 +51,7 @@ The PR-level gates above are necessary but not sufficient for releasing. Before 
 just pre-release
 ```
 
-This runs every test tier the host supports (ci always; the live MicroSandbox runtime e2e and the agent smoke tests when the host has virtualization/credentials) and writes attestation stamps (`runtime`, `smoke`) to `.abox-attestations/`. `release.sh` verifies these stamps before proceeding.
+This runs ci and Criterion microbenchmarks on every host, plus the live MicroSandbox runtime e2e and agent smoke tiers when the host has virtualization and credentials. It writes attestation stamps (`bench`, `runtime`, `smoke`) to `.abox-attestations/`; `release.sh` verifies them before proceeding.
 
 ## After the checklist
 

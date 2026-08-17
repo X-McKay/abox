@@ -164,6 +164,206 @@ impl FromStr for EnvironmentProfile {
     }
 }
 
+/// A conventional language marker found at a repository root.
+///
+/// These markers are deliberately advisory. They inform `abox project init`
+/// and `abox doctor`, but never change repo-local configuration on their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProjectLanguage {
+    /// A Cargo manifest was found.
+    Rust,
+    /// A package.json manifest was found.
+    Node,
+    /// One or more standard Python metadata files were found.
+    Python,
+}
+
+impl ProjectLanguage {
+    /// Human-readable language name for CLI advice.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Node => "Node.js",
+            Self::Python => "Python",
+        }
+    }
+}
+
+/// A best-effort guest-profile recommendation based on conventional project
+/// metadata.
+///
+/// The detector only reads repository-root metadata as text. It intentionally
+/// does not parse or validate package manifests: malformed metadata must not
+/// make setup or diagnostics fail, and a recommendation never writes config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileRecommendation {
+    /// Recommended official guest profile, if one ecosystem was detected.
+    pub profile: Option<EnvironmentProfile>,
+    /// Ecosystems detected from conventional root-level metadata files.
+    pub languages: Vec<ProjectLanguage>,
+    /// Known Python dependencies that need manylinux wheel support.
+    pub scientific_python_dependencies: Vec<String>,
+    /// Metadata files that existed but could not be read.
+    pub unreadable_metadata: Vec<PathBuf>,
+}
+
+impl ProfileRecommendation {
+    /// Return user-facing advisory text, if detection found anything useful.
+    pub fn advice(&self) -> Option<String> {
+        let mut messages = Vec::new();
+
+        if self.languages.len() > 1 {
+            let languages = self
+                .languages
+                .iter()
+                .map(|language| language.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            messages.push(format!(
+                "Detected multiple ecosystems ({languages}); no single guest profile is recommended. Choose one explicitly."
+            ));
+        } else if let Some(profile) = self.profile {
+            let language = self.languages.first().map_or("project", |language| language.as_str());
+            if self.scientific_python_dependencies.is_empty() {
+                messages.push(format!(
+                    "Detected a {language} project; recommended guest profile: {profile}."
+                ));
+            } else {
+                messages.push(format!(
+                    "Detected Python dependencies that commonly need manylinux wheels ({}); recommended guest profile: {profile}.",
+                    self.scientific_python_dependencies.join(", ")
+                ));
+            }
+        }
+
+        if !self.unreadable_metadata.is_empty() {
+            let paths = self
+                .unreadable_metadata
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            messages.push(format!(
+                "Could not read {paths}; profile detection is advisory, so choose explicitly if this is incomplete."
+            ));
+        }
+
+        (!messages.is_empty()).then(|| messages.join("\n"))
+    }
+}
+
+/// Recommend an official guest profile from conventional repository metadata.
+///
+/// A project with more than one language marker intentionally gets no profile
+/// recommendation. This avoids silently preferring one part of a mixed
+/// repository over another. Python projects using a known scientific package
+/// receive the glibc profile recommendation because those packages commonly
+/// publish manylinux rather than musllinux wheels.
+pub fn recommend_environment_profile(repo_root: &Path) -> ProfileRecommendation {
+    const PYTHON_METADATA_FILES: &[&str] = &[
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "setup.cfg",
+        "Pipfile",
+        "poetry.lock",
+        "uv.lock",
+    ];
+    const SCIENTIFIC_PYTHON_DEPENDENCIES: &[&str] = &[
+        "numpy",
+        "pandas",
+        "scipy",
+        "scikit-learn",
+        "scikit_learn",
+        "matplotlib",
+        "seaborn",
+        "torch",
+        "tensorflow",
+        "jax",
+        "polars",
+        "pyarrow",
+        "pillow",
+        "opencv-python",
+        "opencv_python",
+        "h5py",
+    ];
+
+    let mut languages = BTreeSet::new();
+    if repo_root.join("Cargo.toml").is_file() {
+        languages.insert(ProjectLanguage::Rust);
+    }
+    if repo_root.join("package.json").is_file() {
+        languages.insert(ProjectLanguage::Node);
+    }
+
+    let mut python_metadata: BTreeSet<PathBuf> = PYTHON_METADATA_FILES
+        .iter()
+        .map(|name| repo_root.join(name))
+        .filter(|path| path.is_file())
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(repo_root) {
+        for entry in entries.filter_map(std::result::Result::ok) {
+            let path = entry.path();
+            let is_requirements_file =
+                path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+                    name.starts_with("requirements")
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+                });
+            if is_requirements_file && path.is_file() {
+                python_metadata.insert(path);
+            }
+        }
+    }
+
+    if !python_metadata.is_empty() {
+        languages.insert(ProjectLanguage::Python);
+    }
+
+    let mut found_dependencies = BTreeSet::new();
+    let mut unreadable_metadata = Vec::new();
+    for path in &python_metadata {
+        match std::fs::read(path) {
+            Ok(contents) => {
+                let contents = String::from_utf8_lossy(&contents);
+                for dependency in SCIENTIFIC_PYTHON_DEPENDENCIES {
+                    if contains_dependency_token(&contents, dependency) {
+                        found_dependencies.insert((*dependency).to_string());
+                    }
+                }
+            }
+            Err(_) => unreadable_metadata.push(path.clone()),
+        }
+    }
+
+    let languages: Vec<ProjectLanguage> = languages.into_iter().collect();
+    let profile = match languages.as_slice() {
+        [ProjectLanguage::Rust] => Some(EnvironmentProfile::Rust),
+        [ProjectLanguage::Node] => Some(EnvironmentProfile::Node),
+        [ProjectLanguage::Python] if found_dependencies.is_empty() => {
+            Some(EnvironmentProfile::Python)
+        }
+        [ProjectLanguage::Python] => Some(EnvironmentProfile::PythonGlibc),
+        _ => None,
+    };
+
+    ProfileRecommendation {
+        profile,
+        languages,
+        scientific_python_dependencies: found_dependencies.into_iter().collect(),
+        unreadable_metadata,
+    }
+}
+
+fn contains_dependency_token(contents: &str, dependency: &str) -> bool {
+    contents
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+        })
+        .any(|token| token.eq_ignore_ascii_case(dependency))
+}
+
 /// Optional project metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1379,6 +1579,67 @@ fn validate_hostname(value: &str) -> Result<(), &'static str> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn recommends_rust_for_a_single_cargo_project() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+
+        let recommendation = recommend_environment_profile(temp.path());
+
+        assert_eq!(recommendation.profile, Some(EnvironmentProfile::Rust));
+        assert_eq!(recommendation.languages, vec![ProjectLanguage::Rust]);
+        assert!(recommendation.scientific_python_dependencies.is_empty());
+    }
+
+    #[test]
+    fn recommends_node_for_a_single_package_json_project() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("package.json"), "{ malformed is still advisory }")
+            .unwrap();
+
+        let recommendation = recommend_environment_profile(temp.path());
+
+        assert_eq!(recommendation.profile, Some(EnvironmentProfile::Node));
+        assert_eq!(recommendation.languages, vec![ProjectLanguage::Node]);
+    }
+
+    #[test]
+    fn recommends_python_for_generic_python_metadata() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("pyproject.toml"), "this is not valid TOML").unwrap();
+
+        let recommendation = recommend_environment_profile(temp.path());
+
+        assert_eq!(recommendation.profile, Some(EnvironmentProfile::Python));
+        assert_eq!(recommendation.languages, vec![ProjectLanguage::Python]);
+    }
+
+    #[test]
+    fn recommends_python_glibc_for_known_binary_wheel_dependencies() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("requirements-dev.txt"), "numpy>=2\npandas==2.2\n")
+            .unwrap();
+
+        let recommendation = recommend_environment_profile(temp.path());
+
+        assert_eq!(recommendation.profile, Some(EnvironmentProfile::PythonGlibc));
+        assert_eq!(recommendation.scientific_python_dependencies, vec!["numpy", "pandas"]);
+        assert!(recommendation.advice().unwrap().contains("manylinux"));
+    }
+
+    #[test]
+    fn mixed_projects_require_an_explicit_profile_choice() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(temp.path().join("package.json"), "{}").unwrap();
+
+        let recommendation = recommend_environment_profile(temp.path());
+
+        assert_eq!(recommendation.profile, None);
+        assert_eq!(recommendation.languages, vec![ProjectLanguage::Rust, ProjectLanguage::Node]);
+        assert!(recommendation.advice().unwrap().contains("multiple ecosystems"));
+    }
 
     #[test]
     fn starter_config_is_minimal_safe_mode() {

@@ -123,14 +123,15 @@ cargo test --workspace -- --nocapture
 Tests are organized into tiers by their requirements:
 
 | Tier | Recipe | What Runs | Requires |
-|------|--------|-----------|----------|
+|---|---|---|---|
 | 1 (ci) | `just tier-ci` | fmt + clippy + test + cargo deny | Nothing special |
-| 2 (runtime) | `just e2e-runtime` | msb_e2e_test.sh — live MicroSandbox microVMs (broker, egress, isolation, exit codes, filesystem-adversarial) | virtualization (KVM or Hypervisor.framework) + msb assets under `$MSB_HOME`; skips cleanly otherwise |
-| 3 (smoke) | `just tier-smoke` | agent_smoke_test.sh — real Claude/Codex API calls through the MITM proxy | virtualization + real OAuth credentials; costs tokens |
+| 2 (bench) | `just tier-bench` | Criterion microbenchmarks — policy evaluation and proxy serialization | Nothing special |
+| 3 (runtime) | `just e2e-runtime` | msb_e2e_test.sh — live MicroSandbox microVMs (broker, egress, isolation, exit codes, filesystem-adversarial) | virtualization (KVM or Hypervisor.framework) + msb assets under `$MSB_HOME`; skips cleanly otherwise |
+| 4 (smoke) | `just tier-smoke` | agent_smoke_test.sh — real Claude/Codex API calls through the MITM proxy | virtualization + real OAuth credentials; costs tokens |
 
 **CI-safe vs local-only:** Scripts in `scripts/ci/` are safe for GitHub Actions. Scripts in `scripts/local/` require virtualization, runtime assets, or credentials — never wire them into CI workflows.
 
-**Before a release:** Run `just pre-release`. It detects host capabilities, runs all applicable tiers (ci always; runtime and smoke when the host supports them), and writes attestation stamps (`runtime`, `smoke`) to `.abox-attestations/`. `release.sh` verifies these stamps before tagging.
+**Before a release:** Run `just pre-release`. It runs ci and Criterion benchmarks on every host, runs runtime and smoke tiers when the host supports them, and writes attestation stamps (`bench`, `runtime`, `smoke`) to `.abox-attestations/`. `release.sh` verifies these stamps before tagging.
 
 **During development:** Run individual tiers as needed — `just tier-ci` after any code change, `just e2e-runtime` after runtime/guest/broker changes. `just build-guest-bins` builds the static musl guest binaries (`abox-shim` + `abox-bridge`) and is a prerequisite for staging fresh guest binaries; the e2e-runtime suite builds them itself.
 

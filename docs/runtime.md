@@ -233,3 +233,20 @@ On Linux, check `/dev/kvm` exists and is accessible (`ls -la /dev/kvm`;
 `sudo usermod -aG kvm $USER` then re-login). On macOS, `sysctl
 kern.hv_support` must print `1` — this requires Apple Silicon; nested
 virtualization inside another VM generally does not work.
+
+**A project needs numpy, pandas, scipy, or torch**
+
+Use the `python-glibc` profile rather than the default musl-based `python`
+profile so `pip` and `uv` can resolve manylinux wheels. `abox project init`
+and `abox doctor` can recommend this profile from supported dependency files;
+review the recommendation, then set it with:
+
+```bash
+abox project set-profile python-glibc
+```
+
+**A project declares services but the sandbox will not start**
+
+Service sidecars run as host Docker containers. Start Docker, verify it with
+`docker info`, then rerun `abox doctor`. Docker is not required for sandboxes
+that do not declare a `[services]` section.

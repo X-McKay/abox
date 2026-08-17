@@ -6,7 +6,7 @@
 use abox_core::config::{
     default_claude_host_credential_file, default_codex_host_credential_file, AboxConfig,
 };
-use abox_core::project::ProjectConfig;
+use abox_core::project::{recommend_environment_profile, ProjectConfig};
 use abox_core::runtime::images::ImageManifest;
 use abox_core::util::{max_task_id_len_for_runtime_dir, TASK_ID_MAX_LEN};
 use anyhow::Result;
@@ -225,14 +225,14 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
     print_and_collect("Audit Log", vec![check_audit_log(config)], &mut all);
 
     // ── Environment ──────────────────────────────────────────────────────────
-    print_and_collect(
-        "Environment",
-        vec![
-            check_profile_image_resolution(&manifest),
-            check_repo_requested_profile_msb(repo_root, &manifest),
-        ],
-        &mut all,
-    );
+    let mut environment_checks = vec![
+        check_profile_image_resolution(&manifest),
+        check_repo_requested_profile_msb(repo_root, &manifest),
+    ];
+    if let Some(check) = check_declared_service_docker(repo_root) {
+        environment_checks.push(check);
+    }
+    print_and_collect("Environment", environment_checks, &mut all);
 
     // ── Summary ──────────────────────────────────────────────────────────────
     let failures = all.iter().filter(|c| c.is_fail()).count();
@@ -392,46 +392,121 @@ fn check_profile_image_resolution(manifest: &ImageManifest) -> Check {
 fn check_repo_requested_profile_msb(repo_root: &Path, manifest: &ImageManifest) -> Check {
     let label = "Current repo environment profile";
     let config_path = ProjectConfig::default_path(repo_root);
+    let recommendation = recommend_environment_profile(repo_root);
+    let profile_advice = recommendation.advice();
     let loaded = match ProjectConfig::load(repo_root) {
         Ok(config) => config,
         Err(err) => {
+            let advice = profile_advice
+                .as_deref()
+                .map(|advice| format!("\n\nProfile advice:\n{advice}"))
+                .unwrap_or_default();
             return Check::warn(
                 label,
                 format!(
-                    "Failed to load {}.\nRun `abox project validate` for details.\n{err:#}",
+                    "Failed to load {}.\nRun `abox project validate` for details.\n{err:#}{advice}",
                     config_path.display()
                 ),
-            )
+            );
         }
     };
 
     let Some(project) = loaded else {
-        return Check::ok_with(label, "no repo config found; base profile will be used");
+        return match (recommendation.profile, profile_advice) {
+            (Some(recommended), Some(advice)) => Check::warn(
+                label,
+                format!(
+                    "No repo config found; base profile would be used.\n{advice}\n\
+                     Create a config with `abox project init --profile {recommended}` after review."
+                ),
+            ),
+            (_, Some(advice)) => Check::warn(
+                label,
+                format!(
+                    "No repo config found; base profile would be used.\n{advice}\n\
+                     Create a config and choose a profile explicitly with `abox project init`."
+                ),
+            ),
+            (_, None) => Check::ok_with(label, "no repo config found; base profile will be used"),
+        };
     };
 
     let resolved = match project.resolve(repo_root) {
         Ok(resolved) => resolved,
         Err(err) => {
+            let advice = profile_advice
+                .as_deref()
+                .map(|advice| format!("\n\nProfile advice:\n{advice}"))
+                .unwrap_or_default();
             return Check::warn(
                 label,
                 format!(
-                    "Failed to resolve {}.\nRun `abox project validate` for details.\n{err:#}",
+                    "Failed to resolve {}.\nRun `abox project validate` for details.\n{err:#}{advice}",
                     config_path.display()
                 ),
-            )
+            );
         }
     };
 
     let profile = resolved.environment_profile;
-    match manifest.image_for_profile(profile) {
-        Ok(image) => Check::ok_with(
+    let image = match manifest.image_for_profile(profile) {
+        Ok(image) => image,
+        Err(err) => {
+            return Check::fail(
+                label,
+                format!("Repo requests '{profile}' but no guest image resolves for it.\n{err:#}"),
+            )
+        }
+    };
+
+    match (recommendation.profile, profile_advice) {
+        (Some(recommended), Some(advice)) if recommended != profile => Check::warn(
+            label,
+            format!(
+                "{profile} → {} (pulled on first use)\n{advice}\n\
+                 The configured profile does not match this advisory recommendation.\n\
+                 To change it after review: `abox project set-profile {recommended}`.",
+                image.pull_reference()
+            ),
+        ),
+        (_, Some(advice)) if recommendation.profile.is_none() => Check::warn(
+            label,
+            format!("{profile} → {} (pulled on first use)\n{advice}", image.pull_reference()),
+        ),
+        _ => Check::ok_with(
             label,
             format!("{profile} → {} (pulled on first use)", image.pull_reference()),
         ),
-        Err(err) => Check::fail(
+    }
+}
+
+/// Check Docker only for a project that has opted into Docker-backed sidecars.
+/// Docker is not a prerequisite for ordinary microVM sandbox runs.
+fn check_declared_service_docker(repo_root: &Path) -> Option<Check> {
+    let project = ProjectConfig::load(repo_root).ok().flatten()?;
+    if project.services.is_empty() {
+        return None;
+    }
+
+    let mut services: Vec<String> = project.services.keys().cloned().collect();
+    services.sort();
+    Some(check_docker_for_services(&services, abox_core::services::docker_available()))
+}
+
+fn check_docker_for_services(services: &[String], docker_is_available: bool) -> Check {
+    let label = "Docker service sidecars";
+    let names = services.join(", ");
+    if docker_is_available {
+        Check::ok_with(label, format!("available for declared sidecars: {names}"))
+    } else {
+        Check::fail(
             label,
-            format!("Repo requests '{profile}' but no guest image resolves for it.\n{err:#}"),
-        ),
+            format!(
+                "This repo declares Docker-backed sidecars: {names}.\n\
+                 Start Docker and verify it with `docker info`, or remove [services] from \
+                 .abox/project.toml. Docker is only needed because this repo declared sidecars."
+            ),
+        )
     }
 }
 
@@ -785,7 +860,12 @@ fn check_socket_path_length(config: &AboxConfig) -> Check {
 
 #[cfg(test)]
 mod tests {
-    use super::pem_cert_body;
+    use super::{
+        check_declared_service_docker, check_docker_for_services, check_repo_requested_profile_msb,
+        pem_cert_body, CheckStatus,
+    };
+    use abox_core::runtime::images::ImageManifest;
+    use tempfile::tempdir;
 
     #[test]
     fn pem_cert_body_normalizes_whitespace() {
@@ -799,5 +879,39 @@ mod tests {
     fn pem_cert_body_rejects_non_pem() {
         assert_eq!(pem_cert_body("not a certificate"), None);
         assert_eq!(pem_cert_body("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----"), None);
+    }
+
+    #[test]
+    fn profile_check_warns_when_scientific_python_uses_musl() {
+        let temp = tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"numpy>=2\"]\n",
+        )
+        .unwrap();
+        let config_path = temp.path().join(".abox/project.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            config_path,
+            "[network]\nmode = \"safe\"\n\n[environment]\nprofile = \"python\"\n",
+        )
+        .unwrap();
+
+        let manifest = ImageManifest::embedded().unwrap();
+        let check = check_repo_requested_profile_msb(temp.path(), &manifest);
+
+        assert!(matches!(check.status, CheckStatus::Warn));
+        assert!(check.detail.unwrap().contains("python-glibc"));
+    }
+
+    #[test]
+    fn docker_check_is_only_created_for_declared_sidecars() {
+        let temp = tempdir().unwrap();
+        assert!(check_declared_service_docker(temp.path()).is_none());
+
+        let services = vec!["postgres".to_string()];
+        let check = check_docker_for_services(&services, false);
+        assert!(matches!(check.status, CheckStatus::Fail));
+        assert!(check.detail.unwrap().contains("postgres"));
     }
 }

@@ -69,13 +69,17 @@ ci: fmt-check lint test deny
 # No virtualization needed.
 tier-ci: check deny
 
-# Tier 2: live runtime end-to-end suite (real microVMs). Skips cleanly when
+# Tier 2: Criterion microbenchmarks for policy evaluation and proxy
+# serialization. No runtime needed.
+tier-bench: bench
+
+# Tier 3: live runtime end-to-end suite (real microVMs). Skips cleanly when
 # the MicroSandbox runtime assets under $MSB_HOME are absent or hardware
 # virtualization is missing.
 e2e-runtime:
     ./scripts/local/msb_e2e_test.sh
 
-# Tier 3: Agent smoke tests — real Claude/Codex API calls (requires the
+# Tier 4: Agent smoke tests — real Claude/Codex API calls (requires the
 # runtime + credentials). Costs tokens.
 tier-smoke:
     ./scripts/local/agent_smoke_test.sh

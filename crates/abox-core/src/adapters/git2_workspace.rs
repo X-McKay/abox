@@ -2,9 +2,15 @@
 //!
 //! Uses the `git2` crate to manage worktrees, branches, and divergence computation.
 
-use crate::workspace::{DivergenceEntry, FileStatus, WorkspacePort, WorktreeInfo};
+use crate::config::MergeValidationConfig;
+use crate::workspace::{
+    approved_path_set, normalize_repo_relative_path, DivergenceEntry, FileStatus, MergeBlocked,
+    MergeOptions, MergeOutcome, MergeValidationPolicy, MergeValidationViolation, WorkspacePort,
+    WorktreeInfo,
+};
 use anyhow::{Context, Result};
-use git2::{BranchType, Delta, Repository};
+use git2::{BranchType, Delta, FileMode, Oid, Repository};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Adapter that implements workspace management using libgit2.
@@ -13,6 +19,8 @@ pub struct Git2Workspace {
     repo_path: PathBuf,
     /// Base directory where worktrees are created (e.g., `~/.abox/worktrees/`).
     worktree_base: PathBuf,
+    /// Host-owned policy compiled once when the adapter is constructed.
+    merge_validation: MergeValidationPolicy,
 }
 
 impl Git2Workspace {
@@ -22,6 +30,18 @@ impl Git2Workspace {
     /// * `repo_path` - Path to the git repository.
     /// * `worktree_base` - Directory where worktrees will be created.
     pub fn new(repo_path: impl AsRef<Path>, worktree_base: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_merge_validation(repo_path, worktree_base, &MergeValidationConfig::default())
+    }
+
+    /// Create an adapter with a host-owned merge validation policy.
+    ///
+    /// The policy is compiled here rather than at merge time, so an invalid
+    /// host configuration cannot be ignored until after an agent has run.
+    pub fn new_with_merge_validation(
+        repo_path: impl AsRef<Path>,
+        worktree_base: impl AsRef<Path>,
+        merge_validation: &MergeValidationConfig,
+    ) -> Result<Self> {
         let repo_path = repo_path.as_ref().to_path_buf();
         let worktree_base = worktree_base.as_ref().to_path_buf();
 
@@ -30,12 +50,196 @@ impl Git2Workspace {
 
         std::fs::create_dir_all(&worktree_base)?;
 
-        Ok(Self { repo_path, worktree_base })
+        Ok(Self {
+            repo_path,
+            worktree_base,
+            merge_validation: MergeValidationPolicy::compile(merge_validation)?,
+        })
     }
 
     /// Return the branch name for a given sandbox ID.
     fn branch_name(sandbox_id: &str) -> String {
         format!("agent/{sandbox_id}")
+    }
+
+    fn validate_merge(
+        &self,
+        repo: &Repository,
+        branch_name: &str,
+        base_branch: &str,
+        options: &MergeOptions,
+    ) -> Result<std::result::Result<MergeSnapshot, MergeBlocked>> {
+        let approved_paths = match approved_path_set(options) {
+            Ok(paths) => paths,
+            Err(blocked) => return Ok(Err(blocked)),
+        };
+
+        let base_oid = resolve_oid(repo, base_branch)
+            .with_context(|| format!("base branch '{base_branch}' not found"))?;
+        let agent_oid = resolve_oid(repo, branch_name)
+            .with_context(|| format!("agent branch '{branch_name}' not found"))?;
+        let snapshot = MergeSnapshot { base_oid, agent_oid };
+
+        if self.merge_validation.is_empty() {
+            return Ok(Ok(snapshot));
+        }
+
+        let merge_base = repo
+            .merge_base(base_oid, agent_oid)
+            .context("failed to find the merge base for validation")?;
+        let base_tree = repo.find_commit(merge_base)?.tree()?;
+        let agent_tree = repo.find_commit(agent_oid)?.tree()?;
+        let mut diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&agent_tree), None)?;
+        diff.find_similar(None)?;
+
+        let mut violations = Vec::new();
+        for delta in diff.deltas() {
+            self.validate_delta(repo, &delta, &approved_paths, &mut violations)?;
+        }
+
+        if violations.is_empty() {
+            Ok(Ok(snapshot))
+        } else {
+            Ok(Err(MergeBlocked::new(violations)))
+        }
+    }
+
+    fn validate_delta(
+        &self,
+        repo: &Repository,
+        delta: &git2::DiffDelta<'_>,
+        approved_paths: &BTreeSet<PathBuf>,
+        violations: &mut Vec<MergeValidationViolation>,
+    ) -> Result<()> {
+        let old_path =
+            normalize_diff_path(delta.old_file().path(), "Git diff old path", violations);
+        let new_path =
+            normalize_diff_path(delta.new_file().path(), "Git diff new path", violations);
+
+        let mut paths = BTreeSet::new();
+        if let Some(path) = old_path.as_ref() {
+            paths.insert(path.clone());
+        }
+        if let Some(path) = new_path.as_ref() {
+            paths.insert(path.clone());
+        }
+
+        for path in paths {
+            if let Some(pattern) = self.merge_validation.denied_pattern(&path) {
+                violations.push(MergeValidationViolation::DeniedPath {
+                    path,
+                    pattern: pattern.to_string(),
+                });
+            } else if let Some(pattern) = self.merge_validation.review_pattern(&path) {
+                if !approved_paths.contains(&path) {
+                    violations.push(MergeValidationViolation::ReviewRequired {
+                        path,
+                        pattern: pattern.to_string(),
+                    });
+                }
+            }
+        }
+
+        let new_file = delta.new_file();
+        let old_file = delta.old_file();
+        if self.merge_validation.denies_new_executables()
+            && new_file.mode() == FileMode::BlobExecutable
+            && old_file.mode() != FileMode::BlobExecutable
+        {
+            if let Some(path) = new_path.as_ref() {
+                violations.push(MergeValidationViolation::NewExecutable { path: path.clone() });
+            }
+        }
+
+        if let (Some(max_size_kib), Some(path)) =
+            (self.merge_validation.max_file_size_kib(), new_path.as_ref())
+        {
+            if matches!(
+                new_file.mode(),
+                FileMode::Blob
+                    | FileMode::BlobExecutable
+                    | FileMode::BlobGroupWritable
+                    | FileMode::Link
+            ) {
+                let max_size_bytes = max_size_kib.saturating_mul(1024);
+                match repo.find_blob(new_file.id()) {
+                    Ok(blob) if u64::try_from(blob.size()).unwrap_or(u64::MAX) > max_size_bytes => {
+                        violations.push(MergeValidationViolation::FileTooLarge {
+                            path: path.clone(),
+                            size_bytes: u64::try_from(blob.size()).unwrap_or(u64::MAX),
+                            max_size_kib,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        violations.push(MergeValidationViolation::UninspectableBlob {
+                            path: path.clone(),
+                            context: error.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn snapshot_still_current(
+        &self,
+        base_branch: &str,
+        agent_branch: &str,
+        snapshot: MergeSnapshot,
+    ) -> Result<Option<MergeBlocked>> {
+        // Reopen the repository so this check observes a ref update made by
+        // another process while the diff was being inspected.
+        let repo = Repository::open(&self.repo_path)?;
+        let mut violations = Vec::new();
+        add_stale_reference_violation(&mut violations, &repo, base_branch, snapshot.base_oid);
+        add_stale_reference_violation(&mut violations, &repo, agent_branch, snapshot.agent_oid);
+
+        Ok((!violations.is_empty()).then(|| MergeBlocked::new(violations)))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MergeSnapshot {
+    base_oid: Oid,
+    agent_oid: Oid,
+}
+
+fn resolve_oid(repo: &Repository, revision: &str) -> Result<Oid> {
+    Ok(repo.revparse_single(revision)?.id())
+}
+
+fn normalize_diff_path(
+    path: Option<&Path>,
+    context: &str,
+    violations: &mut Vec<MergeValidationViolation>,
+) -> Option<PathBuf> {
+    let path = path?;
+
+    match normalize_repo_relative_path(path, context) {
+        Ok(path) => Some(path),
+        Err(violation) => {
+            violations.push(violation);
+            None
+        }
+    }
+}
+
+fn add_stale_reference_violation(
+    violations: &mut Vec<MergeValidationViolation>,
+    repo: &Repository,
+    reference: &str,
+    expected: Oid,
+) {
+    let actual = resolve_oid(repo, reference).ok();
+    if actual != Some(expected) {
+        violations.push(MergeValidationViolation::StaleReference {
+            reference: reference.to_string(),
+            expected: expected.to_string(),
+            actual: actual.map(|oid| oid.to_string()),
+        });
     }
 }
 
@@ -214,10 +418,32 @@ impl WorkspacePort for Git2Workspace {
         Ok(entries)
     }
 
-    fn merge_branch(&self, sandbox_id: &str, base_branch: &str) -> Result<Vec<String>> {
+    fn merge_branch(
+        &self,
+        sandbox_id: &str,
+        base_branch: &str,
+        options: &MergeOptions,
+    ) -> Result<MergeOutcome> {
         // We shell out to `git merge` because git2's merge API is notoriously
         // difficult to use correctly for real-world merges with conflict detection.
         let branch_name = Self::branch_name(sandbox_id);
+        let repo = Repository::open(&self.repo_path)?;
+
+        // No checkout happens before the complete agent diff is validated.
+        // A denied result therefore leaves HEAD, MERGE_HEAD, and the working
+        // tree exactly as the host user left them.
+        let snapshot = match self.validate_merge(&repo, &branch_name, base_branch, options)? {
+            Ok(snapshot) => snapshot,
+            Err(blocked) => return Ok(MergeOutcome::Blocked(blocked)),
+        };
+
+        // The branch can move while an agent is still running or while a host
+        // user is reviewing. Recheck both exact OIDs after validation and
+        // again immediately before `git merge`; the merge itself uses the
+        // reviewed agent commit rather than the mutable branch name.
+        if let Some(blocked) = self.snapshot_still_current(base_branch, &branch_name, snapshot)? {
+            return Ok(MergeOutcome::Blocked(blocked));
+        }
 
         // First, checkout the base branch
         let checkout_output = std::process::Command::new("git")
@@ -231,9 +457,16 @@ impl WorkspacePort for Git2Workspace {
             anyhow::bail!("Failed to checkout {base_branch}: {stderr}");
         }
 
-        // Then merge the agent branch
+        if let Some(blocked) = self.snapshot_still_current(base_branch, &branch_name, snapshot)? {
+            return Ok(MergeOutcome::Blocked(blocked));
+        }
+
+        // Then merge the reviewed agent commit. Passing the OID rather than
+        // the ref prevents a late ref update from changing the content that
+        // is integrated after the review-to-merge recheck above.
+        let agent_oid = snapshot.agent_oid.to_string();
         let merge_output = std::process::Command::new("git")
-            .args(["merge", "--no-ff", &branch_name, "-m"])
+            .args(["merge", "--no-ff", &agent_oid, "-m"])
             .arg(format!("Merge {branch_name} into {base_branch}"))
             .current_dir(&self.repo_path)
             .output()
@@ -241,7 +474,7 @@ impl WorkspacePort for Git2Workspace {
 
         if merge_output.status.success() {
             tracing::info!(sandbox_id, base_branch, "Merged branch successfully");
-            Ok(vec![])
+            Ok(MergeOutcome::Merged)
         } else {
             let stdout = String::from_utf8_lossy(&merge_output.stdout);
             let stderr = String::from_utf8_lossy(&merge_output.stderr);
@@ -265,7 +498,7 @@ impl WorkspacePort for Git2Workspace {
                 );
             }
 
-            Ok(conflicts)
+            Ok(MergeOutcome::Conflicts(conflicts))
         }
     }
 }
@@ -336,7 +569,15 @@ mod tests {
     }
 
     fn commit_file(repo_path: &Path, file_name: &str, contents: &str, message: &str) {
-        std::fs::write(repo_path.join(file_name), contents).unwrap();
+        commit_bytes(repo_path, file_name, contents.as_bytes(), message);
+    }
+
+    fn commit_bytes(repo_path: &Path, file_name: &str, contents: &[u8], message: &str) {
+        let path = repo_path.join(file_name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, contents).unwrap();
 
         let repo = Repository::open(repo_path).unwrap();
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
@@ -347,6 +588,47 @@ mod tests {
         let tree = repo.find_tree(tree_id).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head]).unwrap();
+    }
+
+    fn commit_rename(repo_path: &Path, old_name: &str, new_name: &str, message: &str) {
+        let new_path = repo_path.join(new_name);
+        if let Some(parent) = new_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::rename(repo_path.join(old_name), &new_path).unwrap();
+
+        let repo = Repository::open(repo_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let mut index = repo.index().unwrap();
+        index.remove_path(Path::new(old_name)).unwrap();
+        index.add_path(Path::new(new_name)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head]).unwrap();
+    }
+
+    fn commit_executable(repo_path: &Path, file_name: &str, message: &str) {
+        std::fs::write(repo_path.join(file_name), "#!/bin/sh\necho agent\n").unwrap();
+        let add = std::process::Command::new("git")
+            .args(["add", file_name])
+            .current_dir(repo_path)
+            .status()
+            .unwrap();
+        assert!(add.success());
+        let chmod = std::process::Command::new("git")
+            .args(["update-index", "--chmod=+x", file_name])
+            .current_dir(repo_path)
+            .status()
+            .unwrap();
+        assert!(chmod.success());
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo_path)
+            .status()
+            .unwrap();
+        assert!(commit.success());
     }
 
     #[test]
@@ -439,7 +721,10 @@ mod tests {
         commit_file(&wt_path, "README.md", "# Agent change\n", "Agent edits README");
         commit_file(&repo_path, "README.md", "# Main change\n", "Main edits README");
 
-        let conflicts = ws.merge_branch("task-1", "main").unwrap();
+        let outcome = ws.merge_branch("task-1", "main", &MergeOptions::default()).unwrap();
+        let MergeOutcome::Conflicts(conflicts) = outcome else {
+            panic!("expected merge conflicts");
+        };
 
         assert!(!conflicts.is_empty(), "expected merge conflict details");
         assert!(conflicts.iter().any(|line| line.contains("README.md")));
@@ -457,13 +742,187 @@ mod tests {
 
         let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
 
-        let err = ws.merge_branch("missing-task", "main").unwrap_err();
+        let err = ws.merge_branch("missing-task", "main", &MergeOptions::default()).unwrap_err();
 
         assert!(err.downcast_ref::<WorkspaceError>().is_none());
-        assert!(format!("{err:#}").contains("git merge failed for agent/missing-task into main"));
+        assert!(format!("{err:#}").contains("agent branch 'agent/missing-task' not found"));
         assert!(
             !repo_path.join(".git").join("MERGE_HEAD").exists(),
             "failed merge should not leave state behind"
         );
+    }
+
+    #[test]
+    fn merge_validation_denies_before_checkout_or_merge() {
+        let (tmp, repo_path) = setup_test_repo();
+        let wt_base = tmp.path().join("worktrees");
+        let ws = Git2Workspace::new_with_merge_validation(
+            &repo_path,
+            &wt_base,
+            &MergeValidationConfig {
+                deny_patterns: vec![".claude/**".to_string()],
+                ..MergeValidationConfig::default()
+            },
+        )
+        .unwrap();
+        let wt_path = ws.create_worktree("task-1", "main").unwrap();
+        commit_file(&wt_path, ".claude/settings.json", "{\"agent\": true}\n", "Add agent settings");
+
+        let original_head = Repository::open(&repo_path).unwrap().head().unwrap().target();
+        let outcome = ws.merge_branch("task-1", "main", &MergeOptions::default()).unwrap();
+
+        assert!(
+            matches!(
+            outcome,
+            MergeOutcome::Blocked(MergeBlocked {
+                ref violations,
+                }) if matches!(violations.as_slice(), [MergeValidationViolation::DeniedPath { path, pattern }]
+                    if path == Path::new(".claude/settings.json") && pattern == ".claude/**")
+            ),
+            "unexpected outcome: {outcome:?}"
+        );
+        let repo = Repository::open(&repo_path).unwrap();
+        assert_eq!(repo.head().unwrap().target(), original_head, "validation must not checkout");
+        assert!(
+            !repo_path.join(".git").join("MERGE_HEAD").exists(),
+            "validation must not start a merge"
+        );
+        assert!(!repo_path.join(".claude/settings.json").exists());
+    }
+
+    #[test]
+    fn merge_validation_requires_each_exact_path_acknowledgement() {
+        let (tmp, repo_path) = setup_test_repo();
+        let wt_base = tmp.path().join("worktrees");
+        let ws = Git2Workspace::new_with_merge_validation(
+            &repo_path,
+            &wt_base,
+            &MergeValidationConfig {
+                require_review_paths: vec!["Cargo.toml".to_string()],
+                ..MergeValidationConfig::default()
+            },
+        )
+        .unwrap();
+        let wt_path = ws.create_worktree("task-1", "main").unwrap();
+        commit_file(&wt_path, "Cargo.toml", "[package]\nname = \"agent\"\n", "Add package");
+
+        let blocked = ws.merge_branch("task-1", "main", &MergeOptions::default()).unwrap();
+        assert!(matches!(
+            blocked,
+            MergeOutcome::Blocked(MergeBlocked { violations })
+                if matches!(violations.as_slice(), [MergeValidationViolation::ReviewRequired { path, .. }]
+                    if path == Path::new("Cargo.toml"))
+        ));
+
+        let approved = MergeOptions::with_approved_paths(vec![PathBuf::from("Cargo.toml")]);
+        let merged = ws.merge_branch("task-1", "main", &approved).unwrap();
+        assert_eq!(merged, MergeOutcome::Merged);
+        assert!(repo_path.join("Cargo.toml").exists());
+    }
+
+    #[test]
+    fn merge_validation_checks_both_rename_paths() {
+        let (tmp, repo_path) = setup_test_repo();
+        let wt_base = tmp.path().join("worktrees");
+        commit_file(&repo_path, "sensitive.txt", "review me\n", "Add sensitive file");
+        let ws = Git2Workspace::new_with_merge_validation(
+            &repo_path,
+            &wt_base,
+            &MergeValidationConfig {
+                require_review_paths: vec!["sensitive.txt".to_string()],
+                ..MergeValidationConfig::default()
+            },
+        )
+        .unwrap();
+        let wt_path = ws.create_worktree("task-1", "main").unwrap();
+        commit_rename(&wt_path, "sensitive.txt", "ordinary.txt", "Rename sensitive file");
+
+        let outcome = ws.merge_branch("task-1", "main", &MergeOptions::default()).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                MergeOutcome::Blocked(MergeBlocked { ref violations })
+                    if violations.iter().any(|violation| matches!(
+                        violation,
+                        MergeValidationViolation::ReviewRequired { path, .. }
+                            if path == Path::new("sensitive.txt")
+                    ))
+            ),
+            "unexpected outcome: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn merge_validation_blocks_new_executables_and_large_blobs() {
+        let (tmp, repo_path) = setup_test_repo();
+        let wt_base = tmp.path().join("worktrees");
+        let ws = Git2Workspace::new_with_merge_validation(
+            &repo_path,
+            &wt_base,
+            &MergeValidationConfig {
+                deny_new_executables: true,
+                max_file_size_kib: Some(1),
+                ..MergeValidationConfig::default()
+            },
+        )
+        .unwrap();
+        let wt_path = ws.create_worktree("task-1", "main").unwrap();
+        commit_executable(&wt_path, "agent.sh", "Add executable");
+        commit_bytes(&wt_path, "large.bin", &vec![b'x'; 1025], "Add large blob");
+
+        let outcome = ws.merge_branch("task-1", "main", &MergeOptions::default()).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                MergeOutcome::Blocked(MergeBlocked { ref violations })
+                    if violations.iter().any(|violation| matches!(
+                        violation,
+                        MergeValidationViolation::NewExecutable { path } if path == Path::new("agent.sh")
+                    )) && violations.iter().any(|violation| matches!(
+                        violation,
+                        MergeValidationViolation::FileTooLarge { path, size_bytes: 1025, max_size_kib: 1 }
+                            if path == Path::new("large.bin")
+                    ))
+            ),
+            "unexpected outcome: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn merge_validation_detects_a_ref_that_changed_after_review() {
+        let (tmp, repo_path) = setup_test_repo();
+        let wt_base = tmp.path().join("worktrees");
+        let ws = Git2Workspace::new_with_merge_validation(
+            &repo_path,
+            &wt_base,
+            &MergeValidationConfig {
+                require_review_paths: vec!["README.md".to_string()],
+                ..MergeValidationConfig::default()
+            },
+        )
+        .unwrap();
+        let wt_path = ws.create_worktree("task-1", "main").unwrap();
+        commit_file(&wt_path, "README.md", "reviewed\n", "Reviewed change");
+        let repo = Repository::open(&repo_path).unwrap();
+        let snapshot = ws
+            .validate_merge(
+                &repo,
+                "agent/task-1",
+                "main",
+                &MergeOptions::with_approved_paths(vec![PathBuf::from("README.md")]),
+            )
+            .unwrap()
+            .unwrap();
+        commit_file(&wt_path, "README.md", "late change\n", "Late change");
+
+        let blocked = ws
+            .snapshot_still_current("main", "agent/task-1", snapshot)
+            .unwrap()
+            .expect("agent ref should have moved");
+        assert!(matches!(
+            blocked.violations.as_slice(),
+            [MergeValidationViolation::StaleReference { reference, .. }]
+                if reference == "agent/task-1"
+        ));
     }
 }

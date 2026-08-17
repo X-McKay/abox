@@ -16,20 +16,6 @@ version = 2
 unmaintained = "workspace"
 # Warn (not fail) on yanked crates so a yank upstream doesn't break CI mid-flight.
 yanked = "warn"
-# Advisory IDs explicitly accepted as known-and-tracked exceptions. Each entry
-# must include a comment explaining why it is here and the condition for
-# removing it (typically: upstream ships a fix). Do not add to this list
-# without a written rationale.
-ignore = [
-    # rustls-pemfile 2.2.0 — unmaintained (not vulnerable). Used only in
-    # abox-proxyd for parsing CA + leaf PEM material. The replacement path
-    # is rustls-pki-types' PEM module. Migration is tracked as a follow-up
-    # task; not blocking for current release. Remove this ignore once we
-    # migrate the proxy's PEM parsing off rustls-pemfile.
-    # See https://rustsec.org/advisories/RUSTSEC-2025-0134
-    "RUSTSEC-2025-0134",
-]
-
 [licenses]
 version = 2
 # Allow only these license families. Anything else causes the check to fail.

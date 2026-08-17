@@ -3,9 +3,9 @@
 use abox_core::config::AboxConfig;
 use abox_core::policy::PolicyEngine;
 use abox_core::project::{
-    approvals_dir, is_approved, load_approval_record, record_approval,
-    starter_config_toml_with_profile, EnvironmentConfig, EnvironmentProfile, ProjectConfig,
-    ResolvedProjectConfig,
+    approvals_dir, is_approved, load_approval_record, recommend_environment_profile,
+    record_approval, starter_config_toml_with_profile, EnvironmentConfig, EnvironmentProfile,
+    ProjectConfig, ResolvedProjectConfig,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
@@ -64,6 +64,11 @@ fn init(repo_root: &Path, profile: Option<EnvironmentProfile>) -> Result<()> {
         anyhow::bail!("Project config already exists at {}", path.display());
     }
 
+    // Detection is advisory by design: repo metadata can be mixed or malformed,
+    // and selecting a profile affects the trusted behavior fingerprint. Only an
+    // explicit --profile changes what this command writes.
+    let recommendation = recommend_environment_profile(repo_root);
+
     let parent = path.parent().context("project config path has no parent directory")?;
     std::fs::create_dir_all(parent).with_context(|| format!("Creating {}", parent.display()))?;
     std::fs::write(&path, starter_config_toml_with_profile(profile))
@@ -71,8 +76,13 @@ fn init(repo_root: &Path, profile: Option<EnvironmentProfile>) -> Result<()> {
 
     println!("Created {}", path.display());
     println!("Starter config uses network mode: safe");
-    if let Some(profile) = profile.filter(|profile| *profile != EnvironmentProfile::Base) {
-        println!("Starter config uses environment profile: {profile}");
+    if let Some(profile) = profile {
+        println!("Starter config uses explicitly selected environment profile: {profile}");
+    } else if let Some(advice) = recommendation.advice() {
+        println!("Profile advice (not written automatically): {advice}");
+        if let Some(recommended) = recommendation.profile {
+            println!("To select it after review: abox project set-profile {recommended}");
+        }
     }
     Ok(())
 }
@@ -254,5 +264,37 @@ impl From<ProjectProfileArg> for EnvironmentProfile {
             ProjectProfileArg::PythonGlibc => Self::PythonGlibc,
             ProjectProfileArg::Rust => Self::Rust,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::init;
+    use abox_core::project::{EnvironmentProfile, ProjectConfig};
+    use tempfile::tempdir;
+
+    #[test]
+    fn init_keeps_detected_profile_as_advice_until_explicitly_selected() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+
+        init(temp.path(), None).unwrap();
+
+        let project = ProjectConfig::load(temp.path()).unwrap().unwrap();
+        assert_eq!(project.environment, None);
+    }
+
+    #[test]
+    fn init_uses_explicit_profile_over_detected_profile() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("package.json"), "{}").unwrap();
+
+        init(temp.path(), Some(EnvironmentProfile::Rust)).unwrap();
+
+        let project = ProjectConfig::load(temp.path()).unwrap().unwrap();
+        assert_eq!(
+            project.environment.and_then(|environment| environment.profile),
+            Some(EnvironmentProfile::Rust)
+        );
     }
 }

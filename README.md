@@ -38,6 +38,36 @@ When running multiple autonomous agents on a single codebase, you face four prob
 
 `abox` is built in Rust using a Hexagonal (Ports & Adapters) architecture.
 
+```mermaid
+flowchart LR
+  subgraph Host
+    CLI[abox CLI] --> ORCH[orchestrator]
+    ORCH --> RT[MicroSandbox runtime]
+    POLICY[host policy] --> CB[command broker]
+    POLICY --> RP[HTTPS request broker]
+    AUDIT[tamper-evident audit log]
+    CB --> AUDIT
+    RP --> AUDIT
+  end
+  subgraph Guest[MicroSandbox microVM]
+    AGENT[agent in task worktree]
+    SHIM[abox-shim]
+    BRIDGE[abox-bridge]
+    AGENT --> SHIM
+    SHIM --> BRIDGE
+    AGENT -->|HTTPS_PROXY| BRIDGE
+  end
+  ORCH --> RT
+  BRIDGE -->|vsock: command channel| CB
+  BRIDGE -->|vsock: HTTPS channel| RP
+  CB -->|host-side approved command| HOSTTOOLS[host git / gh / aws]
+  RP -->|inject only for allowed request| INTERNET[approved HTTPS origin]
+```
+
+Real credentials remain on the host: the command broker uses them only for an
+approved host-side invocation, and the request broker injects them only into an
+allowed request. The guest receives neither value.
+
 1. **`abox-core`**: Domain logic — workspace manager, policy engine, the
    runtime-neutral `SandboxRuntimePort` boundary, and the MicroSandbox
    runtime adapter.
@@ -133,6 +163,8 @@ unpinned and `abox doctor` reports them as such. A host-config
   what every component does and why
 - [`docs/runtime.md`](docs/runtime.md) — the MicroSandbox runtime: host
   requirements, guest images, troubleshooting
+- [`docs/profiles.md`](docs/profiles.md) — choosing and preparing the official
+  guest environment profiles
 - [`docs/security-model.md`](docs/security-model.md) — threat model and
   security invariants
 - [`docs/audit-log.md`](docs/audit-log.md) — audit log format, verification,
@@ -352,6 +384,18 @@ credential enforcement.
     `0600`) so a sandboxed agent cannot forge it, and truncation is detected via
     a persisted chain tip. See `docs/audit-log.md` for the threat model.
 
+17. **Generate shell completions:**
+
+    ```bash
+    # Bash: source this now, or place the output in your completion directory.
+    source <(abox completions bash)
+    abox completions zsh > "${fpath[1]}/_abox"
+    abox completions fish > ~/.config/fish/completions/abox.fish
+    abox completions powershell >> $PROFILE
+    ```
+
+    Completion generation does not require an abox config or runtime setup.
+
 ### Profile notes
 
 For profile-backed repo environments:
@@ -376,6 +420,8 @@ We use `just` as our command runner. Install it with `cargo install just`.
   (`abox-shim` + `abox-bridge`) for the host architecture.
 - `just e2e-runtime`: Run the live MicroSandbox end-to-end suite
   (skips cleanly when the msb runtime assets are absent).
+- `just bench`: Run Criterion microbenchmarks for policy evaluation and proxy
+  serialization.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development guidelines.
 
@@ -385,7 +431,8 @@ Run `just bench` for the criterion microbenchmarks (policy evaluation,
 request serialization — no microVM needed). End-to-end latency depends on the
 MicroSandbox runtime and the guest image cache; the live suite
 (`just e2e-runtime`) exercises the full boot-to-exit path against real
-microVMs.
+microVMs. `just pre-release` runs the Criterion suite and requires its `bench`
+attestation before a release can be cut.
 
 ## License
 

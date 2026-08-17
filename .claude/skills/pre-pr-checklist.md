@@ -55,7 +55,7 @@ If required:
 
 ### 3b. Note on release vs PR gates
 
-The above gates are for PRs. For releases, the full pre-release validation (`just pre-release`) must pass — this includes the live runtime e2e and the agent smoke tests. See the `release-preparation` skill.
+The above gates are for PRs. For releases, the full pre-release validation (`just pre-release`) must pass — this includes Criterion microbenchmarks, the live runtime e2e, and the agent smoke tests. See the `release-preparation` skill.
 
 ### 4. Evaluate documentation updates
 

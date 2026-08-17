@@ -1,6 +1,6 @@
 # Future Work and Roadmap
 
-**Last updated:** 2026-08-15 (MicroSandbox migration complete — see ADR-008)
+**Last updated:** 2026-08-17 (MicroSandbox migration complete — see ADR-008)
 
 This document is the **forward-looking** companion to the historical records
 under [`docs/backlog/`](backlog/) and [`docs/plans/`](plans/). Those files
@@ -28,8 +28,9 @@ items (runtime-process hardening, HTTP/2 in the request broker).
 
 ## TL;DR — recommended priority order
 
-1. **Runtime-process confinement** — OS-level confinement of the `msb`
-   runtime process (AppArmor on Linux, Landlock). The runtime is pinned and
+1. **Runtime-process confinement feasibility** — implement only after the
+   Linux gate in [ADR-009](decisions/009-runtime-process-confinement.md) can
+   prove that the actual `msb` child is constrained. The runtime is pinned and
    qualified, but it still runs with the invoking user's ambient authority
    (see [`security-model.md`](security-model.md#defense-in-depth)).
 2. **F5** — TUI dashboard refresh. Cosmetic; nice-to-have (keep it
@@ -42,10 +43,11 @@ items (runtime-process hardening, HTTP/2 in the request broker).
 
 ### Runtime-process confinement — P1, M
 
-Confine the MicroSandbox runtime process itself (AppArmor profile on Linux,
-Landlock where available) so a runtime compromise is not automatically
-host-user compromise. Today the mitigation is the exact version pin plus
-qualified upgrades ([`runtime-upgrades.md`](runtime-upgrades.md)).
+Confine the actual MicroSandbox `msb` child process so a runtime compromise is
+not automatically host-user compromise. [ADR-009](decisions/009-runtime-process-confinement.md)
+sets the prerequisite Linux Landlock feasibility gate and rules out applying
+Landlock to abox's normal Tokio process. Today the mitigation is the exact
+version pin plus qualified upgrades ([`runtime-upgrades.md`](runtime-upgrades.md)).
 
 ### HTTP/2 ALPN in the request broker — P2, M
 
@@ -100,20 +102,15 @@ A `python-musl` alias for the existing `python` profile would make the
 libc axis read consistently across all profile names, without renaming or
 breaking existing configurations.
 
-### L11. `abox init` / `abox doctor` steering for data-science users
-
-When a user's repo installs numpy/pandas/scipy without `python-glibc`, an
-`abox doctor` hint (or `abox init` question) could steer them to the right
-profile before they hit a confusing wheel-resolution failure.
-
----
-
 ## Closed / historical
 
 - **MicroSandbox migration (ADR-008)** — complete; see above and the
   CHANGELOG. Items it superseded (bespoke-VM CI runners, bootstrap SHA
   verification, cgroup wrappers, a separate macOS-host qualification track)
   are closed with it.
+- **Repository profile and doctor steering** — `abox project init` now
+  detects common Rust, Node, and Python markers advisory-only; `abox doctor`
+  identifies a scientific-Python profile mismatch.
 - Earlier closed backlog and roadmap items are recorded in
   [`docs/backlog/2026-04-08-vm-e2e-mvp-followups.md`](backlog/2026-04-08-vm-e2e-mvp-followups.md)
   and [`docs/plans/`](plans/).

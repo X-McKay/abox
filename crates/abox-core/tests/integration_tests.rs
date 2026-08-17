@@ -10,7 +10,7 @@ use abox_core::policy::{CliPolicy, Decision, EgressRule, PolicyEngine, PolicyFil
 use abox_core::project::EnvironmentProfile;
 use abox_core::runtime::testing::{MockBehavior, MockRuntime};
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
-use abox_core::workspace::{FileStatus, WorkspacePort};
+use abox_core::workspace::{FileStatus, MergeOptions, MergeOutcome, WorkspacePort};
 use git2::Repository;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -571,8 +571,11 @@ fn test_workspace_merge_clean() {
     }
 
     // Merge should succeed with no conflicts
-    let conflicts = ws.merge_branch("task-1", "main").unwrap();
-    assert!(conflicts.is_empty(), "Expected no conflicts, got: {conflicts:?}");
+    let outcome = ws.merge_branch("task-1", "main", &MergeOptions::default()).unwrap();
+    assert!(
+        matches!(outcome, MergeOutcome::Merged),
+        "Expected a successful merge, got: {outcome:?}"
+    );
 
     // The main branch should now have the new file
     let repo = Repository::open(&repo_path).unwrap();

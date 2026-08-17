@@ -10,8 +10,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{Method, Request, Response, StatusCode};
-use rustls::pki_types::{CertificateDer, ServerName};
-use std::io::BufReader;
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -374,16 +373,18 @@ pub fn build_server_config(
     ca_cert_pem: &str,
 ) -> Result<rustls::ServerConfig> {
     let leaf_certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut BufReader::new(leaf_cert_pem.as_bytes()))
+        CertificateDer::pem_slice_iter(leaf_cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("parsing leaf cert PEM")?;
 
     let ca_certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut BufReader::new(ca_cert_pem.as_bytes()))
+        CertificateDer::pem_slice_iter(ca_cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("parsing CA cert PEM")?;
 
-    let key = rustls_pemfile::private_key(&mut BufReader::new(leaf_key_pem.as_bytes()))
+    let key = PrivateKeyDer::pem_slice_iter(leaf_key_pem.as_bytes())
+        .next()
+        .transpose()
         .context("parsing leaf key PEM")?
         .context("no private key found in PEM")?;
 
@@ -446,5 +447,43 @@ mod tests {
         let leaf = ca.sign_leaf("test.example.com").unwrap();
         let config = build_server_config(&leaf.cert_pem, &leaf.key_pem, &ca.cert_pem);
         assert!(config.is_ok(), "should build valid server config: {config:?}");
+    }
+
+    #[test]
+    fn build_server_config_rejects_malformed_leaf_certificate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ca = RootCa::generate_and_persist(tmp.path()).unwrap();
+        let leaf = ca.sign_leaf("test.example.com").unwrap();
+
+        let error = build_server_config(
+            "-----BEGIN CERTIFICATE-----\n@@@@\n-----END CERTIFICATE-----\n",
+            &leaf.key_pem,
+            &ca.cert_pem,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("parsing leaf cert PEM"));
+    }
+
+    #[test]
+    fn build_server_config_rejects_absent_private_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ca = RootCa::generate_and_persist(tmp.path()).unwrap();
+        let leaf = ca.sign_leaf("test.example.com").unwrap();
+
+        let error = build_server_config(&leaf.cert_pem, "", &ca.cert_pem).unwrap_err();
+
+        assert!(error.to_string().contains("no private key found in PEM"));
+    }
+
+    #[test]
+    fn build_server_config_rejects_certificate_instead_of_private_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ca = RootCa::generate_and_persist(tmp.path()).unwrap();
+        let leaf = ca.sign_leaf("test.example.com").unwrap();
+
+        let error = build_server_config(&leaf.cert_pem, &ca.cert_pem, &ca.cert_pem).unwrap_err();
+
+        assert!(error.to_string().contains("no private key found in PEM"));
     }
 }
