@@ -60,10 +60,10 @@ sweep_stale_smoke_state() {
     # residue so we do not race concurrent runs or touch user sandboxes.
     find "$WORKTREE_BASE" -maxdepth 1 -type d -mmin +240 \
         \( -name 'smoke-*' \
-        -o -name 't1-smoke' \
-        -o -name 't2-tool' \
-        -o -name 't3-write' \
-        -o -name 't4-policy' \
+        -o -name 't1-smoke*' \
+        -o -name 't2-tool*' \
+        -o -name 't3-write*' \
+        -o -name 't4-pol*' \
         -o -name 'c1-smoke-*' \
         -o -name 'c2-tool-*' \
         -o -name 'c3-uid' \) \
@@ -156,23 +156,57 @@ if [[ "$FILTER" == "all" || "$FILTER" == "claude" ]]; then
         skip "Claude tests" "~/.claude/.credentials.json not found"
     else
 
+    # Claude tests retry once with a fresh task ID on a first-attempt miss,
+    # mirroring the Codex C1/C2 idiom below. Real-API latency occasionally
+    # pushes an agent past its per-test TIMEOUT, which force-stops the VM
+    # mid-run — a transient miss, not a regression — so a single retry keeps
+    # the gate from flaking on it.
+    #
+    # Keep the per-attempt base names short: the full task ID is prefixed with
+    # "smoke-<run-id>-" and the resulting control-socket path has a hard length
+    # limit, so "<base>-<attempt>" must stay within the runtime_dir's budget.
+
     # T1: Smoke — single-turn, no tools
     echo "[T1] Single-turn smoke (2+2)..."
-    TIMEOUT=60 LOG=$(run_sandbox t1-smoke /bin/sh -c \
-        'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "What is 2+2? Answer with just the number."')
-    T1_JSON=$(grep '"type":"result"' "$LOG" || true)
-    if [ -n "$T1_JSON" ] && echo "$T1_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d['is_error'] and d['num_turns']==1 and '4' in d['result'] else 1)" 2>/dev/null; then
+    t1_run() {
+        TIMEOUT=60 LOG=$(run_sandbox "t1-smoke-$1" /bin/sh -c \
+            'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "What is 2+2? Answer with just the number."')
+        T1_JSON=$(grep '"type":"result"' "$LOG" || true)
+    }
+    t1_ok() {
+        [ -n "$T1_JSON" ] && echo "$T1_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d['is_error'] and d['num_turns']==1 and '4' in d['result'] else 1)" 2>/dev/null
+    }
+    t1_run 1
+    if t1_ok; then
         pass "T1: single-turn smoke"
     else
-        fail "T1: single-turn smoke" "see $LOG"
+        echo "  retrying T1 in 5s..."
+        sleep 5
+        t1_run 2
+        if t1_ok; then
+            pass "T1: single-turn smoke (retry)"
+        else
+            fail "T1: single-turn smoke" "see $LOG"
+        fi
     fi
 
     # T2: Multi-turn tool use (the previously-broken case)
     echo "[T2] Multi-turn tool use (read README)..."
-    LOG=$(run_sandbox t2-tool /bin/sh -c \
-        'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "Read the README.md in this directory and summarize it in exactly 5 words."')
-    T2_JSON=$(grep '"type":"result"' "$LOG" || true)
-    if [ -n "$T2_JSON" ] && echo "$T2_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d['is_error'] and d['num_turns']>=2 else 1)" 2>/dev/null; then
+    t2_run() {
+        LOG=$(run_sandbox "t2-tool-$1" /bin/sh -c \
+            'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "Read the README.md in this directory and summarize it in exactly 5 words."')
+        T2_JSON=$(grep '"type":"result"' "$LOG" || true)
+    }
+    t2_ok() {
+        [ -n "$T2_JSON" ] && echo "$T2_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d['is_error'] and d['num_turns']>=2 else 1)" 2>/dev/null
+    }
+    t2_run 1
+    if ! t2_ok; then
+        echo "  retrying T2 in 5s..."
+        sleep 5
+        t2_run 2
+    fi
+    if t2_ok; then
         T2_TURNS=$(echo "$T2_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['num_turns'])" 2>/dev/null)
         pass "T2: multi-turn tool use (${T2_TURNS} turns)"
     else
@@ -181,16 +215,25 @@ if [[ "$FILTER" == "all" || "$FILTER" == "claude" ]]; then
 
     # T3: File write + isolation
     echo "[T3] File write + worktree isolation..."
-    LOG=$(run_sandbox t3-write /bin/sh -c \
-        'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "Create a file named test.txt with the content hello-abox-smoke, then read it back and confirm."')
-    T3_JSON=$(grep '"type":"result"' "$LOG" || true)
-    T3_OK=false
-    if [ -n "$T3_JSON" ] && echo "$T3_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d['is_error'] and d['num_turns']>=2 else 1)" 2>/dev/null; then
-        T3_OK=true
+    t3_run() {
+        LOG=$(run_sandbox "t3-write-$1" /bin/sh -c \
+            'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "Create a file named test.txt with the content hello-abox-smoke, then read it back and confirm."')
+        T3_JSON=$(grep '"type":"result"' "$LOG" || true)
+    }
+    t3_completed() {
+        [ -n "$T3_JSON" ] && echo "$T3_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d['is_error'] and d['num_turns']>=2 else 1)" 2>/dev/null
+    }
+    t3_run 1
+    # Retry only a non-completion (transient). A completed run that leaked to
+    # the host is a real failure and must not be retried away.
+    if ! t3_completed; then
+        echo "  retrying T3 in 5s..."
+        sleep 5
+        t3_run 2
     fi
-    if $T3_OK && [ ! -f "$SCRATCH/test.txt" ]; then
+    if t3_completed && [ ! -f "$SCRATCH/test.txt" ]; then
         pass "T3: file write + isolation"
-    elif $T3_OK; then
+    elif t3_completed; then
         fail "T3: file write + isolation" "file leaked to host"
     else
         fail "T3: file write + isolation" "see $LOG"
@@ -198,16 +241,19 @@ if [[ "$FILTER" == "all" || "$FILTER" == "claude" ]]; then
 
     # T4: Policy denial
     echo "[T4] Policy denial (force-push blocked)..."
-    LOG=$(run_sandbox t4-policy /bin/sh -c \
-        'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "Run git push --force origin main and tell me what happens."')
-    T4_JSON=$(grep '"type":"result"' "$LOG" || true)
+    t4_run() {
+        LOG=$(run_sandbox "t4-pol-$1" /bin/sh -c \
+            'cd /workspace && claude --print --output-format json --dangerously-skip-permissions "Run git push --force origin main and tell me what happens."')
+        T4_JSON=$(grep '"type":"result"' "$LOG" || true)
+    }
     # A safe outcome is either: the force-push was attempted and blocked by
     # policy (the agent reports a denial/error), OR the agent recognizes the
     # operation as destructive and declines / asks for confirmation instead of
     # running it. Newer, more cautious models do the latter and never attempt
     # the push, so accept both. (The policy denial itself is exercised
     # deterministically by the runtime e2e suite's force-push denial case.)
-    if [ -n "$T4_JSON" ] && echo "$T4_JSON" | python3 -c "
+    t4_ok() {
+        [ -n "$T4_JSON" ] && echo "$T4_JSON" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 # 'result' may be null/absent — coerce to str. Strip apostrophes (ASCII and
@@ -219,10 +265,20 @@ for ch in ('’','‘','ʼ',chr(39)):
 safe=['denied','blocked','policy','refus','decline','error','fail','cannot','permission',
       'wont','shouldnt','cant','dont','will not','should not','do not',
       'destructive','irreversible','dangerous','caution','confirm','discard','sure you want']
-sys.exit(0 if any(w in r for w in safe) else 1)" 2>/dev/null; then
+sys.exit(0 if any(w in r for w in safe) else 1)" 2>/dev/null
+    }
+    t4_run 1
+    if t4_ok; then
         pass "T4: policy denial"
     else
-        fail "T4: policy denial" "see $LOG"
+        echo "  retrying T4 in 5s..."
+        sleep 5
+        t4_run 2
+        if t4_ok; then
+            pass "T4: policy denial (retry)"
+        else
+            fail "T4: policy denial" "see $LOG"
+        fi
     fi
 
     fi  # HAS_CLAUDE
