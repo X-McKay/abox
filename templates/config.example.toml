@@ -45,6 +45,27 @@ egress_port = 18443
 # Directory containing policy TOML files.
 # policy_dir = "~/.abox/policies"
 
+# ─── Host-Owned Merge Validation ────────────────────────────────────────────
+#
+# These rules are evaluated by `abox merge` before it checks out or integrates
+# an agent branch. They belong in this host config — never .abox/project.toml —
+# because an agent can modify files in its own worktree. All patterns are
+# repository-relative globs. Empty/default rules preserve normal merge behavior.
+#
+# A path matching `require_review_paths` must be acknowledged exactly after
+# review, for example: `abox merge task-1 --approve-path Cargo.toml`. The same
+# per-path acknowledgement also clears a `deny_new_executables` or
+# `max_file_size_kib` violation for that exact path, so a reviewed executable or
+# large file can be merged without weakening the rule globally. `deny_patterns`
+# are absolute and have no acknowledgement. There is intentionally no broad
+# bypass flag.
+#
+# [merge.validation]
+# deny_patterns = [".claude/**", ".vscode/**"]
+# require_review_paths = ["Cargo.toml", "Cargo.lock", ".github/**"]
+# deny_new_executables = true
+# max_file_size_kib = 512
+
 # ─── Managed Authentication ────────────────────────────────────────────────
 #
 # abox's default supported auth surface is:

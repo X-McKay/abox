@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.7.2 — 2026-08-17
+
+### Features
+
+- feat: prepare v0.7.2 governance and validation (9136cbc)
+
+### Fixes
+
+- fix: close merge-validation bypass and harden v0.7.2 governance (28e6515)
+
+
 ## v0.7.1 — 2026-08-15
 
 ### Fixes

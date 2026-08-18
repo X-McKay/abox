@@ -21,6 +21,7 @@ tracing.workspace = true
 regex.workspace = true
 chrono.workspace = true
 dirs.workspace = true
+globset.workspace = true
 git2 = "0.21"
 sha2 = "0.10"
 getrandom = "0.2"
@@ -34,7 +35,6 @@ bytes = "1"
 rustls = "0.23"
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
-rustls-pemfile = "2"
 rustix = { version = "1", features = ["fs"] }
 # MicroSandbox runtime (ADR-008). Pinned exactly during the migration;
 # updated only through dedicated dependency PRs qualified by the runtime

@@ -26,6 +26,9 @@ pub struct MockBehavior {
     pub exit_delay: Option<Duration>,
     /// `wait()` never returns — for timeout tests.
     pub never_exit: bool,
+    /// `is_task_active()` fails with this message, simulating an unreadable
+    /// persisted state store so callers can be checked for failing closed.
+    pub liveness_error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -134,6 +137,13 @@ impl SandboxRuntimePort for MockRuntime {
                 pid: Some(12345),
             })
             .collect())
+    }
+
+    async fn is_task_active(&self, task_id: &str) -> Result<bool> {
+        if let Some(msg) = &self.behavior.liveness_error {
+            anyhow::bail!("{msg}");
+        }
+        Ok(self.is_running(task_id))
     }
 
     async fn wait(&self, _id: &str) -> Result<RuntimeExit> {

@@ -405,6 +405,54 @@ fn ensure_host_ports_allowed(
     Ok(())
 }
 
+/// Check the host capabilities that every sandbox needs before creating a
+/// worktree, starting Docker sidecars, or refreshing a guest environment.
+fn ensure_runtime_preflight() -> Result<()> {
+    let virtualization = crate::kvm::diagnose_host_virtualization();
+    let msb_binary = crate::msb::find_msb_binary();
+    let libkrunfw_files = crate::msb::libkrunfw_files();
+    validate_runtime_preflight(&virtualization, msb_binary.as_deref(), &libkrunfw_files)
+}
+
+fn validate_runtime_preflight(
+    virtualization: &crate::kvm::HostVirtStatus,
+    msb_binary: Option<&Path>,
+    libkrunfw_files: &[PathBuf],
+) -> Result<()> {
+    match virtualization {
+        crate::kvm::HostVirtStatus::Available { .. } => {}
+        crate::kvm::HostVirtStatus::Unavailable { condition, remediation } => {
+            anyhow::bail!(
+                "Cannot start sandbox — hardware virtualization is unavailable: {condition}\n\n\
+                 abox requires KVM on Linux or Hypervisor.framework on Apple Silicon.\n\n\
+                 {remediation}\n\n\
+                 Run `abox doctor` for the complete host diagnostic."
+            );
+        }
+    }
+
+    let Some(msb_binary) = msb_binary else {
+        anyhow::bail!(
+            "Cannot start sandbox — the MicroSandbox `msb` binary was not found.\n\n\
+             Run `abox init` to install the runtime assets into {} (set MSB_HOME to relocate them), \
+             then run `abox doctor` to verify setup.",
+            crate::msb::msb_home().display()
+        );
+    };
+
+    if libkrunfw_files.is_empty() {
+        anyhow::bail!(
+            "Cannot start sandbox — MicroSandbox guest firmware (libkrunfw) was not found under {}.\n\n\
+             The runtime binary at {} is incomplete. Run `abox init` to reinstall the runtime assets, \
+             then run `abox doctor` to verify setup.",
+            crate::msb::msb_home().join("lib").display(),
+            msb_binary.display(),
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     args: RunArgs,
     repo_root: &Path,
@@ -430,6 +478,10 @@ pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
         args.input_files.iter().map(|s| parse_input_file_arg(s)).collect::<Result<_>>()?;
     let input_files = resolve_input_files(&input_specs)?;
     env_vars.extend(input_file_env_vars(&input_files));
+
+    // Do this before trust writes, warm-environment worktrees, or sidecars so
+    // a missing host prerequisite never leaves behind task state or containers.
+    ensure_runtime_preflight()?;
 
     ensure_managed_agent_ready(&args.command, orchestrator.config())?;
 
@@ -784,7 +836,7 @@ mod tests {
         adapt_command_for_prompt, ensure_host_ports_allowed, ensure_host_ports_no_egress_collision,
         ensure_managed_agent_ready, parse_env_var, parse_input_file_arg, remove_own_pid_file,
         resolve_input_files, resolve_prompt_input, selected_managed_agent, strip_detach_flag,
-        InputFileSpec, RunArgs, MAX_INPUT_FILE_BYTES,
+        validate_runtime_preflight, InputFileSpec, RunArgs, MAX_INPUT_FILE_BYTES,
     };
     use abox_core::config::AboxConfig;
     use abox_core::project::{EnvironmentProfile, NetworkMode, ResolvedProjectConfig};
@@ -1087,6 +1139,45 @@ mod tests {
         assert!(ensure_host_ports_no_egress_collision(&hp, 18443).is_err());
         assert!(ensure_host_ports_no_egress_collision(&hp, 28443).is_ok());
         assert!(ensure_host_ports_no_egress_collision(&[], 18443).is_ok());
+    }
+
+    #[test]
+    fn runtime_preflight_fails_with_virtualization_remediation_first() {
+        let status = crate::kvm::HostVirtStatus::Unavailable {
+            condition: "KVM unavailable".into(),
+            remediation: "Enable nested virtualization.".into(),
+        };
+
+        let err = validate_runtime_preflight(
+            &status,
+            Some(std::path::Path::new("/runtime/msb")),
+            &[PathBuf::from("/runtime/lib/libkrunfw.so")],
+        )
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("KVM unavailable"));
+        assert!(message.contains("Enable nested virtualization"));
+    }
+
+    #[test]
+    fn runtime_preflight_requires_msb_and_firmware() {
+        let status = crate::kvm::HostVirtStatus::Available { detail: "available".into() };
+
+        let missing_binary = validate_runtime_preflight(&status, None, &[]).unwrap_err();
+        assert!(format!("{missing_binary:#}").contains("msb"));
+
+        let missing_firmware =
+            validate_runtime_preflight(&status, Some(std::path::Path::new("/runtime/msb")), &[])
+                .unwrap_err();
+        assert!(format!("{missing_firmware:#}").contains("libkrunfw"));
+
+        assert!(validate_runtime_preflight(
+            &status,
+            Some(std::path::Path::new("/runtime/msb")),
+            &[PathBuf::from("/runtime/lib/libkrunfw.so")],
+        )
+        .is_ok());
     }
 
     #[test]

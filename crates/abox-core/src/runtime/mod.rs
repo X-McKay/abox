@@ -80,7 +80,22 @@ pub trait SandboxRuntimePort: Send + Sync {
     async fn info(&self, id: &str) -> anyhow::Result<RuntimeInstance>;
 
     /// List all managed sandbox instances.
+    ///
+    /// This is resilient by design: a failure to read cross-process persisted
+    /// state degrades to the in-process view rather than failing, so `abox
+    /// list` still shows this process's sandboxes. Do not use it to gate a
+    /// trust-sensitive action — use [`is_task_active`](Self::is_task_active).
     async fn list(&self) -> anyhow::Result<Vec<RuntimeInstance>>;
+
+    /// Return whether `task_id` currently has a non-stopped sandbox.
+    ///
+    /// Unlike [`list`](Self::list), this **fails closed**: when liveness cannot
+    /// be determined (for example the persisted cross-process state store is
+    /// locked or unreadable), it returns `Err` rather than reporting the task
+    /// as inactive. Callers that gate a trust-sensitive action such as merge
+    /// rely on this so a degraded state store cannot silently present a running
+    /// sandbox as stopped.
+    async fn is_task_active(&self, task_id: &str) -> anyhow::Result<bool>;
 
     /// Wait until the sandbox has terminated and return its exit result.
     ///

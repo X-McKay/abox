@@ -10,7 +10,7 @@ use abox_core::policy::{CliPolicy, Decision, EgressRule, PolicyEngine, PolicyFil
 use abox_core::project::EnvironmentProfile;
 use abox_core::runtime::testing::{MockBehavior, MockRuntime};
 use abox_core::sandbox::{CreateSandboxParams, SandboxOrchestrator};
-use abox_core::workspace::{FileStatus, WorkspacePort};
+use abox_core::workspace::{FileStatus, MergeOptions, MergeOutcome, WorkspacePort};
 use git2::Repository;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -571,8 +571,11 @@ fn test_workspace_merge_clean() {
     }
 
     // Merge should succeed with no conflicts
-    let conflicts = ws.merge_branch("task-1", "main").unwrap();
-    assert!(conflicts.is_empty(), "Expected no conflicts, got: {conflicts:?}");
+    let outcome = ws.merge_branch("task-1", "main", &MergeOptions::default()).unwrap();
+    assert!(
+        matches!(outcome, MergeOutcome::Merged),
+        "Expected a successful merge, got: {outcome:?}"
+    );
 
     // The main branch should now have the new file
     let repo = Repository::open(&repo_path).unwrap();
@@ -757,6 +760,34 @@ async fn test_orchestrator_stop_sandbox() {
 
     // Worktree should still exist
     assert!(wt_base.join("task-1").exists());
+}
+
+#[tokio::test]
+async fn test_orchestrator_merge_fails_closed_when_liveness_unknown() {
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+    // Simulate an unreadable persisted state store: liveness cannot be
+    // determined, so merge must refuse rather than treat the task as stopped.
+    let vm = MockRuntime::with_behavior(
+        tmp.path().to_path_buf(),
+        MockBehavior {
+            liveness_error: Some("persisted state unavailable".to_string()),
+            ..MockBehavior::default()
+        },
+    );
+    let orch = SandboxOrchestrator::new(config, ws, vm);
+
+    let err = orch
+        .merge("task-1", "main", &MergeOptions::default())
+        .await
+        .expect_err("merge must fail closed when liveness is unknown");
+    assert!(
+        format!("{err:#}").contains("could not confirm the sandbox is stopped"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[tokio::test]

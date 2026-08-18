@@ -7,8 +7,9 @@
 #
 # Tiers:
 #   1. ci      — fmt + clippy + tests + cargo-deny (always runs)
-#   2. runtime — live MicroSandbox e2e suite (needs virtualization + msb assets)
-#   3. smoke   — real agent API calls through the broker (needs credentials)
+#   2. bench   — Criterion microbenchmarks (always runs)
+#   3. runtime — live MicroSandbox e2e suite (needs virtualization + msb assets)
+#   4. smoke   — real agent API calls through the broker (needs credentials)
 #
 # The script continues across tiers even if one fails, so you always get
 # a complete report.
@@ -36,6 +37,7 @@ info()    { printf '  %s·%s %s\n' "$DIM" "$RESET" "$1"; }
 skip()    { printf '  %sSKIP%s %s — %s\n' "$DIM" "$RESET" "$1" "$2"; }
 
 TIER_CI="skip";      TIER_CI_REASON=""
+TIER_BENCH="skip";   TIER_BENCH_REASON=""
 TIER_RUNTIME="skip"; TIER_RUNTIME_REASON=""
 TIER_SMOKE="skip";   TIER_SMOKE_REASON=""
 
@@ -100,6 +102,7 @@ section "Plan"
 
 CAN_CI=true
 info "tier-ci:      WILL RUN (always)"
+info "tier-bench:   WILL RUN (always)"
 
 CAN_RUNTIME=false
 if $HAS_VIRT && $HAS_MSB; then
@@ -149,7 +152,17 @@ if $CAN_CI; then
     fi
 fi
 
-section "Tier 2: MicroSandbox runtime end-to-end"
+section "Tier 2: Criterion microbenchmarks"
+if just tier-bench; then
+    TIER_BENCH="pass"
+    ok "tier-bench passed"
+else
+    TIER_BENCH="fail"
+    TIER_BENCH_REASON="criterion benchmarks failed"
+    err "tier-bench failed"
+fi
+
+section "Tier 3: MicroSandbox runtime end-to-end"
 if $CAN_RUNTIME; then
     if just e2e-runtime; then
         TIER_RUNTIME="pass"
@@ -163,7 +176,7 @@ else
     skip "tier-runtime" "$TIER_RUNTIME_REASON"
 fi
 
-section "Tier 3: Agent smoke tests"
+section "Tier 4: Agent smoke tests"
 if $CAN_SMOKE; then
     SMOKE_ARGS=()
     [[ "$SMOKE_FILTER" != "all" ]] && SMOKE_ARGS+=("$SMOKE_FILTER")
@@ -230,6 +243,12 @@ PYEOF
         STAMPS_WRITTEN=$((STAMPS_WRITTEN + 1))
     fi
 
+    if [[ "$TIER_BENCH" == "pass" ]]; then
+        STAMP_PATH=$(write_stamp "bench" "Criterion microbenchmarks passed")
+        ok "wrote $STAMP_PATH"
+        STAMPS_WRITTEN=$((STAMPS_WRITTEN + 1))
+    fi
+
     if [[ "$TIER_SMOKE" == "pass" ]]; then
         STAMP_PATH=$(write_stamp "smoke" "Agent smoke tests passed ($SMOKE_FILTER)")
         ok "wrote $STAMP_PATH"
@@ -257,6 +276,7 @@ print_tier_status() {
 }
 
 print_tier_status "tier-ci"      "$TIER_CI"      "$TIER_CI_REASON"
+print_tier_status "tier-bench"   "$TIER_BENCH"   "$TIER_BENCH_REASON"
 print_tier_status "tier-runtime" "$TIER_RUNTIME" "$TIER_RUNTIME_REASON"
 print_tier_status "tier-smoke"   "$TIER_SMOKE"   "$TIER_SMOKE_REASON"
 
@@ -264,7 +284,7 @@ echo
 info "$STAMPS_WRITTEN attestation stamp(s) written"
 
 ANY_FAILED=false
-if [[ "$TIER_CI" == "fail" ]] || [[ "$TIER_RUNTIME" == "fail" ]] || [[ "$TIER_SMOKE" == "fail" ]]; then
+if [[ "$TIER_CI" == "fail" ]] || [[ "$TIER_BENCH" == "fail" ]] || [[ "$TIER_RUNTIME" == "fail" ]] || [[ "$TIER_SMOKE" == "fail" ]]; then
     ANY_FAILED=true
 fi
 

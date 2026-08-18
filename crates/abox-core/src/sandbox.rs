@@ -400,9 +400,38 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
         self.workspace.compute_divergence(base_branch)
     }
 
-    /// Merge a sandbox's branch back into the base branch.
-    pub fn merge(&self, task_id: &str, base_branch: &str) -> Result<Vec<String>> {
-        self.workspace.merge_branch(task_id, base_branch)
+    /// Merge a stopped sandbox's branch back into the base branch.
+    ///
+    /// The runtime check closes the most common review-to-merge race: a live
+    /// sandbox may still commit to its agent branch after the host reviews
+    /// it. The workspace adapter performs the remaining Git ref snapshot and
+    /// validation checks before it changes the host checkout.
+    pub async fn merge(
+        &self,
+        task_id: &str,
+        base_branch: &str,
+        options: &crate::workspace::MergeOptions,
+    ) -> Result<crate::workspace::MergeOutcome> {
+        // Fail closed: if liveness cannot be determined (e.g. the persisted
+        // cross-process state store is unavailable), `is_task_active` returns
+        // an error and the merge does not proceed, rather than treating an
+        // unknown state as "stopped".
+        let active = self
+            .runtime
+            .is_task_active(task_id)
+            .await
+            .context("could not confirm the sandbox is stopped before merging")?;
+        if active {
+            return Ok(crate::workspace::MergeOutcome::Blocked(
+                crate::workspace::MergeBlocked::new(vec![
+                    crate::workspace::MergeValidationViolation::ActiveSandbox {
+                        task_id: task_id.to_string(),
+                    },
+                ]),
+            ));
+        }
+
+        self.workspace.merge_branch(task_id, base_branch, options)
     }
 
     /// Get workspace info for a specific sandbox.

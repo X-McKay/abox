@@ -10,7 +10,7 @@ use abox_core::adapters::microsandbox::MicrosandboxRuntime;
 use abox_core::config::AboxConfig;
 use abox_core::sandbox::SandboxOrchestrator;
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -44,6 +44,13 @@ enum Commands {
 
     /// Check the environment for common setup problems.
     Doctor,
+
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate a completion script for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 
     /// Create and start a new sandbox.
     Run(commands::run::RunArgs),
@@ -105,6 +112,14 @@ async fn main() -> Result<()> {
     // host with no abox config can still be probed by bakudo.
     if capabilities {
         return commands::capabilities::execute();
+    }
+
+    // Completion generation is metadata-only and must work before any config
+    // or orchestrator loading, including on a fresh host.
+    if let Some(Commands::Completions { shell }) = command.as_ref() {
+        let mut cli = Cli::command();
+        clap_complete::generate(*shell, &mut cli, "abox", &mut std::io::stdout());
+        return Ok(());
     }
 
     // `abox init` must run before AboxConfig::load so it remains reachable
@@ -189,7 +204,11 @@ async fn main() -> Result<()> {
     let policy = std::sync::Arc::new(policy);
 
     // Build the orchestrator
-    let workspace = Git2Workspace::new(&repo_path, config.worktrees_dir())?;
+    let workspace = Git2Workspace::new_with_merge_validation(
+        &repo_path,
+        config.worktrees_dir(),
+        &config.merge.validation,
+    )?;
     let runtime = MicrosandboxRuntime::new(&config)?;
     let orchestrator = SandboxOrchestrator::new(config.clone(), workspace, runtime);
 
@@ -239,7 +258,7 @@ async fn main() -> Result<()> {
         Commands::Stop(args) => commands::stop::execute(args, &orchestrator).await,
         Commands::Divergence(ref args) => commands::divergence::execute(args, &orchestrator),
         Commands::Path(ref args) => commands::path::execute(args, &orchestrator),
-        Commands::Merge(ref args) => commands::merge::execute(args, &orchestrator),
+        Commands::Merge(ref args) => commands::merge::execute(args, &orchestrator).await,
         Commands::Ca(_)
         | Commands::Grant(_)
         | Commands::Services(_)
@@ -247,6 +266,7 @@ async fn main() -> Result<()> {
         | Commands::Audit(_)
         | Commands::Init(_)
         | Commands::Doctor
+        | Commands::Completions { .. }
         | Commands::Project(_) => unreachable!(),
     }
 }

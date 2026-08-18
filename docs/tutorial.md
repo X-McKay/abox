@@ -157,6 +157,11 @@ If the agent had made commits you wanted to keep, you'd merge:
 abox merge hello
 ```
 
+If your host configuration enables merge validation, abox may first list
+sensitive changed paths and ask you to review and explicitly acknowledge each
+one with `--approve-path <path>`. A blocked merge leaves the base branch
+unchanged; inspect the task worktree before retrying.
+
 For this tutorial there's nothing to merge. Just clean up:
 
 ```bash

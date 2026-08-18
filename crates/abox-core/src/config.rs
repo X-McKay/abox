@@ -35,6 +35,50 @@ pub struct AboxConfig {
     /// Guest OCI image configuration for the MicroSandbox runtime.
     #[serde(default)]
     pub images: ImagesConfig,
+
+    /// Host-owned validation applied before agent branches are merged.
+    ///
+    /// This configuration deliberately lives in `~/.abox/config.toml`, not
+    /// `.abox/project.toml`: an agent can edit files in its worktree, so
+    /// repository-owned configuration cannot be a merge security boundary.
+    #[serde(default)]
+    pub merge: MergeConfig,
+}
+
+/// `[merge]` section — host-owned integration behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MergeConfig {
+    /// Rules evaluated before `abox merge` checks out or integrates an agent
+    /// branch.
+    #[serde(default)]
+    pub validation: MergeValidationConfig,
+}
+
+/// `[merge.validation]` section — optional rules for changes produced by an
+/// agent branch.
+///
+/// Empty/default rules preserve the historical merge behavior. Patterns are
+/// interpreted as repository-relative globs and compiled by the workspace
+/// adapter before they are used.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MergeValidationConfig {
+    /// Repository-relative globs that are never allowed to be merged.
+    #[serde(default)]
+    pub deny_patterns: Vec<String>,
+
+    /// Repository-relative globs that require an exact `--approve-path`
+    /// acknowledgement before merging.
+    #[serde(default)]
+    pub require_review_paths: Vec<String>,
+
+    /// Reject a path whose mode changes to executable.
+    #[serde(default)]
+    pub deny_new_executables: bool,
+
+    /// Reject an incoming blob larger than this many KiB. `None` disables the
+    /// limit.
+    #[serde(default)]
+    pub max_file_size_kib: Option<u64>,
 }
 
 /// `[images]` section — guest OCI image behavior for the MicroSandbox
@@ -194,6 +238,7 @@ impl Default for AboxConfig {
             proxy: ProxyConfig::default(),
             auth: AuthConfig::default(),
             images: ImagesConfig::default(),
+            merge: MergeConfig::default(),
         }
     }
 }
@@ -440,6 +485,23 @@ mod tests {
         assert_eq!(config.sandbox_defaults.vcpus, 4);
         // Proxy should use defaults
         assert_eq!(config.proxy.egress_port, 18443);
+    }
+
+    #[test]
+    fn merge_validation_is_host_config_and_defaults_to_no_rules() {
+        let toml_str = r#"
+            [merge.validation]
+            deny_patterns = [".github/**"]
+            require_review_paths = ["Cargo.toml"]
+            deny_new_executables = true
+            max_file_size_kib = 512
+        "#;
+        let config: AboxConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.merge.validation.deny_patterns, [".github/**"]);
+        assert_eq!(config.merge.validation.require_review_paths, ["Cargo.toml"]);
+        assert!(config.merge.validation.deny_new_executables);
+        assert_eq!(config.merge.validation.max_file_size_kib, Some(512));
+        assert_eq!(AboxConfig::default().merge.validation.max_file_size_kib, None);
     }
 
     #[test]

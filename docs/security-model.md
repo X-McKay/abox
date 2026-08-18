@@ -127,7 +127,23 @@ compiled policy and validated live against real microVMs:
 - The audit chain is keyed with a host-only HMAC key, so even full guest
   compromise leaves tamper-evident history.
 - **Future work:** OS-level confinement of the MicroSandbox runtime process
-  itself (AppArmor on Linux, Landlock) is planned but not yet implemented.
-  Today the `msb` process runs with the invoking user's ambient authority;
-  its compromise is equivalent to host-user compromise, which is why it is
-  pinned exactly and upgraded only through qualified PRs.
+  itself (Landlock on Linux, with AppArmor as optional operator-managed
+  hardening) is under a feasibility gate in
+  [ADR-009](decisions/009-runtime-process-confinement.md). Today the `msb`
+  process runs with the invoking user's ambient authority; its compromise is
+  equivalent to host-user compromise, which is why it is pinned exactly and
+  upgraded only through qualified PRs.
+
+## Review and trust handoffs
+
+Sandbox isolation prevents the guest from directly reaching host authority; it
+does not make agent-authored repository content safe for a host user to trust
+later. Build scripts, editor settings, CI configuration, and dependency changes
+can cause effects when reviewed, merged, or executed outside the sandbox.
+
+`abox merge` is therefore an explicit host-side action. When host merge
+validation is configured, it blocks selected high-risk path, executable, and
+size changes before it mutates the base branch, and requires per-path operator
+acknowledgement for review-required paths. This is a review gate, not a claim
+that arbitrary merged source code is safe to execute; users must still review
+the diff and apply their normal repository controls.

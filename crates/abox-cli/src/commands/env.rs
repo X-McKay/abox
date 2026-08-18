@@ -555,7 +555,9 @@ mod tests {
     use abox_core::policy::{PolicyEngine, PolicyFile};
     use abox_core::project::{rootfs_token, EnvironmentProfile};
     use abox_core::runtime::testing::MockRuntime;
-    use abox_core::workspace::{DivergenceEntry, WorkspacePort, WorktreeInfo};
+    use abox_core::workspace::{
+        DivergenceEntry, MergeOptions, MergeOutcome, WorkspacePort, WorktreeInfo,
+    };
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
@@ -587,7 +589,8 @@ mod tests {
             &self,
             _sandbox_id: &str,
             _base_branch: &str,
-        ) -> anyhow::Result<Vec<String>> {
+            _options: &MergeOptions,
+        ) -> anyhow::Result<MergeOutcome> {
             panic!("workspace should not be used in this test")
         }
     }
@@ -637,8 +640,9 @@ mod tests {
             &self,
             _sandbox_id: &str,
             _base_branch: &str,
-        ) -> anyhow::Result<Vec<String>> {
-            Ok(vec![])
+            _options: &MergeOptions,
+        ) -> anyhow::Result<MergeOutcome> {
+            Ok(MergeOutcome::Merged)
         }
     }
 
