@@ -412,9 +412,15 @@ impl<W: WorkspacePort, R: SandboxRuntimePort> SandboxOrchestrator<W, R> {
         base_branch: &str,
         options: &crate::workspace::MergeOptions,
     ) -> Result<crate::workspace::MergeOutcome> {
-        let active = self.runtime.list().await?.into_iter().any(|instance| {
-            instance.id == task_id && instance.state != crate::runtime::RuntimeState::Stopped
-        });
+        // Fail closed: if liveness cannot be determined (e.g. the persisted
+        // cross-process state store is unavailable), `is_task_active` returns
+        // an error and the merge does not proceed, rather than treating an
+        // unknown state as "stopped".
+        let active = self
+            .runtime
+            .is_task_active(task_id)
+            .await
+            .context("could not confirm the sandbox is stopped before merging")?;
         if active {
             return Ok(crate::workspace::MergeOutcome::Blocked(
                 crate::workspace::MergeBlocked::new(vec![

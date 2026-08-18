@@ -131,12 +131,16 @@ impl std::fmt::Display for MergeValidationViolation {
                 path.display(),
                 path.display()
             ),
-            Self::NewExecutable { path } => {
-                write!(f, "{} is newly executable", path.display())
-            }
+            Self::NewExecutable { path } => write!(
+                f,
+                "{} is newly executable; rerun with --approve-path {} after review",
+                path.display(),
+                path.display()
+            ),
             Self::FileTooLarge { path, size_bytes, max_size_kib } => write!(
                 f,
-                "{} is {size_bytes} bytes, exceeding the {max_size_kib} KiB limit",
+                "{} is {size_bytes} bytes, exceeding the {max_size_kib} KiB limit; rerun with --approve-path {} after review",
+                path.display(),
                 path.display()
             ),
             Self::UninspectableBlob { path, context } => {

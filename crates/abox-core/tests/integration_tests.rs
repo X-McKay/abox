@@ -763,6 +763,34 @@ async fn test_orchestrator_stop_sandbox() {
 }
 
 #[tokio::test]
+async fn test_orchestrator_merge_fails_closed_when_liveness_unknown() {
+    let (tmp, repo_path) = setup_test_repo();
+    let wt_base = tmp.path().join("worktrees");
+
+    let config = AboxConfig { state_dir: tmp.path().to_path_buf(), ..Default::default() };
+    let ws = Git2Workspace::new(&repo_path, &wt_base).unwrap();
+    // Simulate an unreadable persisted state store: liveness cannot be
+    // determined, so merge must refuse rather than treat the task as stopped.
+    let vm = MockRuntime::with_behavior(
+        tmp.path().to_path_buf(),
+        MockBehavior {
+            liveness_error: Some("persisted state unavailable".to_string()),
+            ..MockBehavior::default()
+        },
+    );
+    let orch = SandboxOrchestrator::new(config, ws, vm);
+
+    let err = orch
+        .merge("task-1", "main", &MergeOptions::default())
+        .await
+        .expect_err("merge must fail closed when liveness is unknown");
+    assert!(
+        format!("{err:#}").contains("could not confirm the sandbox is stopped"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
 async fn test_orchestrator_stop_with_clean() {
     let (tmp, repo_path) = setup_test_repo();
     let wt_base = tmp.path().join("worktrees");

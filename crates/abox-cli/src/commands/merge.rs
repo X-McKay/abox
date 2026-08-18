@@ -29,17 +29,22 @@ pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
     validate_task_arg(&args.task)?;
 
     let options = MergeOptions::with_approved_paths(args.approve_paths.clone());
+    // Every non-`Merged` outcome leaves the base branch unchanged and must
+    // exit non-zero, so `abox merge && <next step>` never proceeds on a merge
+    // that did not happen.
     match orchestrator.merge(&args.task, &args.base, &options).await? {
         MergeOutcome::Merged => {
             println!("Successfully merged agent/{} into {}.", args.task, args.base);
+            Ok(())
         }
         MergeOutcome::Conflicts(conflicts) => {
-            println!("Merge failed with {} conflict(s):", conflicts.len());
+            eprintln!("Merge failed with {} conflict(s):", conflicts.len());
             for conflict in &conflicts {
-                println!("  {conflict}");
+                eprintln!("  {conflict}");
             }
-            println!();
-            println!("The merge was aborted. Resolve conflicts manually.");
+            eprintln!();
+            eprintln!("The merge was aborted. Resolve conflicts manually.");
+            anyhow::bail!("merge was not performed");
         }
         MergeOutcome::Blocked(blocked) => {
             eprintln!("Merge blocked by host validation:");
@@ -49,6 +54,4 @@ pub async fn execute<W: WorkspacePort, R: SandboxRuntimePort>(
             anyhow::bail!("merge was not performed");
         }
     }
-
-    Ok(())
 }

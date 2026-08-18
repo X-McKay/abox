@@ -6,7 +6,7 @@
 use abox_core::config::{
     default_claude_host_credential_file, default_codex_host_credential_file, AboxConfig,
 };
-use abox_core::project::{recommend_environment_profile, ProjectConfig};
+use abox_core::project::{recommend_environment_profile, EnvironmentProfile, ProjectConfig};
 use abox_core::runtime::images::ImageManifest;
 use abox_core::util::{max_task_id_len_for_runtime_dir, TASK_ID_MAX_LEN};
 use anyhow::Result;
@@ -172,6 +172,7 @@ pub fn execute(config: &AboxConfig, repo_root: &Path) -> Result<bool> {
             check_config_file(config),
             check_policy_file(config),
             check_socket_path_length(config),
+            check_merge_validation(config),
         ],
         &mut all,
     );
@@ -459,21 +460,32 @@ fn check_repo_requested_profile_msb(repo_root: &Path, manifest: &ImageManifest) 
         }
     };
 
-    match (recommendation.profile, profile_advice) {
-        (Some(recommended), Some(advice)) if recommended != profile => Check::warn(
+    // The only genuinely warn-worthy divergence is a musl Python profile paired
+    // with dependencies that need manylinux wheels — that setup is likely
+    // broken. Every other divergence from the *advisory* recommendation (a
+    // deliberate `base`, a polyglot repo the user has already resolved, or an
+    // unreadable metadata file that might hold scientific deps) is
+    // informational only, so doctor does not nag about a valid explicit choice
+    // or advise a downgrade it cannot justify.
+    let scientific_musl_mismatch = profile == EnvironmentProfile::Python
+        && recommendation.profile == Some(EnvironmentProfile::PythonGlibc)
+        && !recommendation.scientific_python_dependencies.is_empty();
+
+    match profile_advice {
+        Some(advice) if scientific_musl_mismatch => Check::warn(
             label,
             format!(
                 "{profile} → {} (pulled on first use)\n{advice}\n\
-                 The configured profile does not match this advisory recommendation.\n\
-                 To change it after review: `abox project set-profile {recommended}`.",
+                 This profile uses musl, but manylinux wheels were detected.\n\
+                 To switch after review: `abox project set-profile python-glibc`.",
                 image.pull_reference()
             ),
         ),
-        (_, Some(advice)) if recommendation.profile.is_none() => Check::warn(
+        Some(advice) => Check::ok_with(
             label,
             format!("{profile} → {} (pulled on first use)\n{advice}", image.pull_reference()),
         ),
-        _ => Check::ok_with(
+        None => Check::ok_with(
             label,
             format!("{profile} → {} (pulled on first use)", image.pull_reference()),
         ),
@@ -525,6 +537,24 @@ fn check_config_file(config: &AboxConfig) -> Check {
                 config.runtime_dir().display(),
             ),
         )
+    }
+}
+
+/// Compile the host `[merge.validation]` policy so an invalid glob is reported
+/// here rather than only surfacing when a merge is attempted. The workspace
+/// adapter defers this error to merge time to avoid bricking unrelated
+/// commands, so doctor is the proactive diagnostic path.
+fn check_merge_validation(config: &AboxConfig) -> Check {
+    let label = "Merge validation ([merge.validation])";
+    match abox_core::workspace::MergeValidationPolicy::compile(&config.merge.validation) {
+        Ok(_) => Check::ok_with(label, "host merge validation rules compile"),
+        Err(err) => Check::fail(
+            label,
+            format!(
+                "Invalid [merge.validation] host config in ~/.abox/config.toml.\n\
+                 `abox merge` will refuse to run until this is fixed:\n{err:#}"
+            ),
+        ),
     }
 }
 
@@ -861,9 +891,10 @@ fn check_socket_path_length(config: &AboxConfig) -> Check {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_declared_service_docker, check_docker_for_services, check_repo_requested_profile_msb,
-        pem_cert_body, CheckStatus,
+        check_declared_service_docker, check_docker_for_services, check_merge_validation,
+        check_repo_requested_profile_msb, pem_cert_body, CheckStatus,
     };
+    use abox_core::config::AboxConfig;
     use abox_core::runtime::images::ImageManifest;
     use tempfile::tempdir;
 
@@ -902,6 +933,34 @@ mod tests {
 
         assert!(matches!(check.status, CheckStatus::Warn));
         assert!(check.detail.unwrap().contains("python-glibc"));
+    }
+
+    #[test]
+    fn profile_check_does_not_warn_on_deliberate_base_config() {
+        // The starter config `abox project init` writes has no [environment]
+        // section (resolves to `base`). A detected ecosystem must not turn that
+        // deliberate choice into a permanent warning.
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let config_path = temp.path().join(".abox/project.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(config_path, "[network]\nmode = \"safe\"\n").unwrap();
+
+        let manifest = ImageManifest::embedded().unwrap();
+        let check = check_repo_requested_profile_msb(temp.path(), &manifest);
+
+        assert!(matches!(check.status, CheckStatus::Ok), "deliberate base config should not warn");
+    }
+
+    #[test]
+    fn merge_validation_check_fails_on_invalid_glob() {
+        let mut config = AboxConfig::default();
+        config.merge.validation.deny_patterns = vec!["/etc/**".to_string()];
+        let check = check_merge_validation(&config);
+        assert!(matches!(check.status, CheckStatus::Fail));
+
+        let ok = check_merge_validation(&AboxConfig::default());
+        assert!(matches!(ok.status, CheckStatus::Ok));
     }
 
     #[test]

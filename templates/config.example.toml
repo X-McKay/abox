@@ -53,8 +53,12 @@ egress_port = 18443
 # repository-relative globs. Empty/default rules preserve normal merge behavior.
 #
 # A path matching `require_review_paths` must be acknowledged exactly after
-# review, for example: `abox merge task-1 --approve-path Cargo.toml`.
-# There is intentionally no broad bypass flag.
+# review, for example: `abox merge task-1 --approve-path Cargo.toml`. The same
+# per-path acknowledgement also clears a `deny_new_executables` or
+# `max_file_size_kib` violation for that exact path, so a reviewed executable or
+# large file can be merged without weakening the rule globally. `deny_patterns`
+# are absolute and have no acknowledgement. There is intentionally no broad
+# bypass flag.
 #
 # [merge.validation]
 # deny_patterns = [".claude/**", ".vscode/**"]

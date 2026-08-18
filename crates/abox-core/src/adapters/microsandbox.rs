@@ -149,6 +149,50 @@ impl MicrosandboxRuntime {
         }
     }
 
+    /// Sandboxes started by this process. These are authoritative and always
+    /// considered running.
+    fn in_process_instances(&self) -> Vec<RuntimeInstance> {
+        let tasks = self.tasks.lock().unwrap();
+        tasks
+            .iter()
+            .map(|(id, entry)| RuntimeInstance {
+                id: id.clone(),
+                state: RuntimeState::Running,
+                pid: entry.pid,
+            })
+            .collect()
+    }
+
+    /// Query MicroSandbox's persisted cross-process state for abox sandboxes.
+    ///
+    /// Returns an error when the persisted store cannot be read, so callers
+    /// that must fail closed (liveness gating) can distinguish "not active"
+    /// from "could not tell". Stopped entries are filtered out.
+    async fn query_persisted_instances() -> Result<Vec<RuntimeInstance>> {
+        let page = microsandbox::Sandbox::list_with(|l| {
+            l.limit(microsandbox::sandbox::MAX_SANDBOX_LIST_LIMIT)
+        })
+        .await
+        .context("failed to query persisted sandbox state")?;
+
+        let mut instances = Vec::new();
+        for handle in page.sandboxes {
+            let Some(task_id) = Self::task_id_from_sandbox_name(handle.name()) else {
+                continue;
+            };
+            let state = Self::map_msb_status(handle.status_snapshot());
+            if state == RuntimeState::Stopped {
+                continue;
+            }
+            instances.push(RuntimeInstance {
+                id: task_id.to_string(),
+                state,
+                pid: handle.local().and_then(|l| l.pid).and_then(|p| u32::try_from(p).ok()),
+            });
+        }
+        Ok(instances)
+    }
+
     /// Remove the per-sandbox control sockets once the sandbox is reaped so
     /// they don't accumulate in long-lived runtime directories.
     fn remove_control_sockets(&self, id: &str, ports: &[u32]) {
@@ -633,44 +677,18 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
     }
 
     async fn list(&self) -> Result<Vec<RuntimeInstance>> {
-        let mut instances: Vec<RuntimeInstance> = {
-            let tasks = self.tasks.lock().unwrap();
-            tasks
-                .iter()
-                .map(|(id, entry)| RuntimeInstance {
-                    id: id.clone(),
-                    state: RuntimeState::Running,
-                    pid: entry.pid,
-                })
-                .collect()
-        };
+        let mut instances = self.in_process_instances();
 
         // Merge live abox sandboxes recorded in MicroSandbox's persisted
         // state by other abox processes (issue #37). In-process entries are
         // authoritative; persisted-query failures degrade to the in-process
         // view rather than failing `abox list` outright.
-        match microsandbox::Sandbox::list_with(|l| {
-            l.limit(microsandbox::sandbox::MAX_SANDBOX_LIST_LIMIT)
-        })
-        .await
-        {
-            Ok(page) => {
-                for handle in page.sandboxes {
-                    let Some(task_id) = Self::task_id_from_sandbox_name(handle.name()) else {
-                        continue;
-                    };
-                    if instances.iter().any(|i| i.id == task_id) {
-                        continue;
+        match Self::query_persisted_instances().await {
+            Ok(persisted) => {
+                for instance in persisted {
+                    if !instances.iter().any(|i| i.id == instance.id) {
+                        instances.push(instance);
                     }
-                    let state = Self::map_msb_status(handle.status_snapshot());
-                    if state == RuntimeState::Stopped {
-                        continue;
-                    }
-                    instances.push(RuntimeInstance {
-                        id: task_id.to_string(),
-                        state,
-                        pid: handle.local().and_then(|l| l.pid).and_then(|p| u32::try_from(p).ok()),
-                    });
                 }
             }
             Err(e) => {
@@ -679,6 +697,23 @@ impl SandboxRuntimePort for MicrosandboxRuntime {
         }
 
         Ok(instances)
+    }
+
+    async fn is_task_active(&self, task_id: &str) -> Result<bool> {
+        // In-process sandboxes are authoritative and always running.
+        if self.tasks.lock().unwrap().contains_key(task_id) {
+            return Ok(true);
+        }
+
+        // Otherwise consult persisted cross-process state. Unlike `list`, a
+        // query failure here propagates so the caller can fail closed: an
+        // unreadable state store must not read as "not active".
+        let persisted = Self::query_persisted_instances()
+            .await
+            .context("could not determine sandbox liveness from persisted state")?;
+        Ok(persisted
+            .iter()
+            .any(|instance| instance.id == task_id && instance.state != RuntimeState::Stopped))
     }
 
     async fn wait(&self, id: &str) -> Result<RuntimeExit> {
